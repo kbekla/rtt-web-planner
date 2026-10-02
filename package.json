@@ -1,0 +1,25 @@
+{
+  "name": "rtt-web-planner",
+  "private": true,
+  "type": "module",
+  "description": "RT&T self-hosted map pipeline: OSM -> Planetiler -> PMTiles -> MapLibre",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test:unit": "node --test 'tests/repo/*.test.mjs' 'tests/schema/*.test.mjs' 'tests/attribution/*.test.mjs'",
+    "test:render": "playwright test"
+  },
+  "dependencies": {
+    "maplibre-gl": "6.11.2",
+    "pmtiles": "4.5.0"
+  },
+  "devDependencies": {
+    "@mapbox/vector-tile": "3.0.0",
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
+    "@playwright/test": "1.63.0",
+    "js-yaml": "5.4.2",
+    "pbf": "5.1.2",
+    "sirv": "3.0.2"
+  }
+}

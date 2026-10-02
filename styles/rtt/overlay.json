@@ -1,0 +1,107 @@
+{
+  "$comment": "RT&T-owned style layer applied on top of the vendored scaffold by scripts/build-style.mjs. Phase 1: identity, attribution and asset wiring only; the RT&T visual design replaces the scaffold in a later phase.",
+  "name": "RT&T Basemap",
+  "metadata": {
+    "rtt:style-version": "0.1.0",
+    "rtt:status": "scaffold",
+    "rtt:scaffold": "openmaptiles/osm-bright-gl-style v1.11"
+  },
+  "sources": {
+    "openmaptiles": {
+      "attribution": "<a href=\"https://www.openmaptiles.org/\" target=\"_blank\">&copy; OpenMapTiles</a> <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">&copy; OpenStreetMap contributors</a>"
+    }
+  },
+  "remove_layers": [],
+  "layer_overrides": {
+    "poi-level-1": {
+      "layout": {
+        "icon-image": [
+          "coalesce",
+          [
+            "image",
+            [
+              "concat",
+              [
+                "get",
+                "class"
+              ],
+              "_11"
+            ]
+          ],
+          [
+            "image",
+            "circle_11"
+          ]
+        ]
+      }
+    },
+    "poi-level-2": {
+      "layout": {
+        "icon-image": [
+          "coalesce",
+          [
+            "image",
+            [
+              "concat",
+              [
+                "get",
+                "class"
+              ],
+              "_11"
+            ]
+          ],
+          [
+            "image",
+            "circle_11"
+          ]
+        ]
+      }
+    },
+    "poi-level-3": {
+      "layout": {
+        "icon-image": [
+          "coalesce",
+          [
+            "image",
+            [
+              "concat",
+              [
+                "get",
+                "class"
+              ],
+              "_11"
+            ]
+          ],
+          [
+            "image",
+            "circle_11"
+          ]
+        ]
+      }
+    },
+    "poi-railway": {
+      "layout": {
+        "icon-image": [
+          "coalesce",
+          [
+            "image",
+            [
+              "concat",
+              [
+                "get",
+                "class"
+              ],
+              "_11"
+            ]
+          ],
+          [
+            "image",
+            "circle_11"
+          ]
+        ]
+      }
+    }
+  },
+  "add_layers": [],
+  "$comment_layer_overrides": "POI classes without a scaffold icon fall back to a generic circle instead of rendering nothing. Replaced when the RT&T icon set lands."
+}

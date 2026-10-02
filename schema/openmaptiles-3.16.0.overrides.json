@@ -1,0 +1,39 @@
+{
+  "$comment": "Values OpenMapTiles 3.16 emits that its layer YAML 'values' lists omit, because they are produced in SQL. Each entry cites the upstream source at commit c33503af. Only add entries with an upstream citation; never just to silence a test.",
+  "extra_values": {
+    "transportation.class": {
+      "values": [
+        "rail",
+        "transit",
+        "aerialway",
+        "pier",
+        "bridge"
+      ],
+      "source": "layers/transportation/transportation.sql:40-47 (railway_class(), 'aerialway', shipway, man_made); class.sql:24-29; mapping.yaml:443-445 (man_made bridge, pier)"
+    },
+    "transportation.subclass": {
+      "values": [
+        "chair_lift",
+        "drag_lift",
+        "platter",
+        "t-bar",
+        "gondola",
+        "cable_car",
+        "j-bar",
+        "mixed_lift"
+      ],
+      "source": "layers/transportation/transportation.sql:48-54 (subclass = aerialway); mapping.yaml:370-378"
+    },
+    "transportation_name.class": {
+      "values": [
+        "bus_guideway",
+        "busway",
+        "ferry"
+      ],
+      "source": "layers/transportation_name/transportation_name.sql:90 (class = highway_class(), whose outputs are the transportation.yaml class values; shipways merged in as highway='shipway' -> 'ferry', update_transportation_name.sql:176)"
+    }
+  },
+  "open_fields": {
+    "poi.class": "layers/poi/poi.yaml: 'If there is no more general class for the subclass this field will contain the same value as subclass' (poi_class() in class.sql) \u2014 open set, validated as non-empty string."
+  }
+}

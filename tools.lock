@@ -1,0 +1,7 @@
+# Pinned external tools. Format (whitespace separated):
+# name  version  sha256  url  [archive-member]
+# scripts/fetch-tools installs into $FACTORY_DIR/tools and refuses on any hash mismatch.
+planetiler  0.10.2  f310bd0413e2e4512b27f4046d418664e8e1d3bf31603c2a70e23de06c167e4d  https://github.com/onthegomap/planetiler/releases/download/v0.10.2/planetiler.jar
+pmtiles     1.31.2  3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f  https://github.com/protomaps/go-pmtiles/releases/download/v1.31.2/go-pmtiles_1.31.2_Linux_x86_64.tar.gz  pmtiles
+spreet      0.13.1  0119329214870da10b256f1eae314b9346a7d0a404e3350df902d76796117e64  https://github.com/flother/spreet/releases/download/v0.13.1/spreet-x86_64-unknown-linux-musl.tar.gz  spreet
+noto-sans   2.0     d117316544b43a5dde7ee761b36e17701e9f85574e181d76a74814240fdbaf34  https://github.com/openmaptiles/fonts/releases/download/v2.0/noto-sans.zip

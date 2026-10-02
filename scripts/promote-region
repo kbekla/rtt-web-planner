@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Point output/<region>/current at a tested build. Called by scripts/pipeline only
+# after every test has passed.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO/config/pipeline.env"
+region="$1" id="$2"
+dir="$FACTORY_DIR/output/$region"
+[[ -f "$dir/$id/manifest.json" ]] || { echo "no build $id for $region" >&2; exit 1; }
+ln -sfn "$id" "$dir/current.tmp" && mv -T "$dir/current.tmp" "$dir/current"
+echo "promoted $region -> $id"

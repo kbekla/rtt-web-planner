@@ -1,0 +1,7 @@
+# Pinned Planetiler/OpenMapTiles auxiliary inputs in $FACTORY_DIR/sources/ancillary.
+# Refresh deliberately with `scripts/fetch-ancillary --refresh`, which rewrites this file.
+# file  sha256  fetched(UTC)
+lake_centerline.shp.zip          6c900507c88fc9f5b5a386f90fd0a42d0495e8755a03d075538fb9a6801a3192  2026-10-02
+natural_earth_vector.sqlite.zip  375da61836d4779dffa8b87887bc4faa94dac77745ba0ee3914bd7cbedf40a02  2026-10-02
+tile_weights.tsv.gz              b952d5023c7855784e7080fe55b20296e972b5a1e13dc07c72bea2f8f464f10c  2026-10-02
+water-polygons-split-3857.zip    d297fdced153edfc947cc2f049146687fe8440c3222dbae4a8d7d7dd6170ed8a  2026-10-02

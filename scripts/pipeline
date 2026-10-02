@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# One command: pinned snapshot -> PMTiles -> style/assets -> all tests -> promote.
+#   scripts/pipeline <region>
+# A build is promoted to output/<region>/current only if every test passes.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+region="${1:?usage: scripts/pipeline <region>}"
+
+step() { printf '\n=== %s\n' "$*"; }
+
+step "tools";            scripts/fetch-tools
+step "snapshot";         node scripts/fetch-region.mjs "$region"
+step "build";            out="$(node scripts/build-region.mjs "$region" | tee /dev/stderr | tail -1)"
+id="$(basename "$out")"
+step "assets";           scripts/build-assets
+step "style";            node scripts/build-style.mjs "$region"
+export RTT_REGION="$region" RTT_BUILD_ID="$id"
+step "tests: repo, schema, attribution ($id)"
+node --test 'tests/repo/*.test.mjs' 'tests/schema/*.test.mjs' 'tests/attribution/*.test.mjs'
+step "tests: render ($id)"
+npx playwright test
+step "promote";          scripts/promote-region "$region" "$id"

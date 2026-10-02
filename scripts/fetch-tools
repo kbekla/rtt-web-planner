@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Install pinned tools from tools.lock into $FACTORY_DIR/tools.
+# Idempotent: re-running re-verifies every cached download and installed file.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO/config/pipeline.env"
+
+TOOLS="$FACTORY_DIR/tools"
+CACHE="$TOOLS/cache"
+STAMPS="$TOOLS/.installed"
+mkdir -p "$CACHE" "$STAMPS" "$TOOLS/bin"
+
+verify() { # file sha256
+  local got
+  got="$(sha256sum "$1" | cut -d' ' -f1)"
+  if [[ "$got" != "$2" ]]; then
+    echo "FATAL: sha256 mismatch for $1" >&2
+    echo "  expected $2" >&2
+    echo "  got      $got" >&2
+    return 1
+  fi
+}
+
+while read -r name version sha url member; do
+  [[ -z "${name:-}" || "$name" == \#* ]] && continue
+  archive="$CACHE/$(basename "$url")"
+  if [[ ! -f "$archive" ]]; then
+    echo "download $name $version"
+    curl -fsSL --retry 3 -o "$archive.part" "$url"
+    mv "$archive.part" "$archive"
+  fi
+  verify "$archive" "$sha"
+
+  case "$archive" in
+    *.jar)
+      target="$TOOLS/$name-$version.jar"
+      [[ -f "$target" ]] || cp "$archive" "$target"
+      verify "$target" "$sha"
+      ln -sfn "$name-$version.jar" "$TOOLS/$name.jar"
+      ;;
+    *.tar.gz)
+      target="$TOOLS/bin/$name"
+      stamp="$STAMPS/$name"
+      if [[ ! -x "$target" || "$(cat "$stamp" 2>/dev/null)" != "$sha" ]]; then
+        tar -xzf "$archive" -C "$TOOLS/bin" "$member"
+        [[ "$member" == "$name" ]] || mv "$TOOLS/bin/$member" "$target"
+        chmod +x "$target"
+        sha256sum "$target" | cut -d' ' -f1 > "$stamp.bin"
+        echo "$sha" > "$stamp"
+      fi
+      verify "$target" "$(cat "$stamp.bin")"
+      ;;
+    *.zip)
+      target="$TOOLS/$name-$version"
+      stamp="$STAMPS/$name"
+      if [[ ! -d "$target" || "$(cat "$stamp" 2>/dev/null)" != "$sha" ]]; then
+        rm -rf "$target"
+        mkdir -p "$target"
+        unzip -q "$archive" -d "$target"
+        echo "$sha" > "$stamp"
+      fi
+      ;;
+  esac
+  echo "ok   $name $version"
+done < "$REPO/tools.lock"
+
+"$TOOLS/bin/pmtiles" version >/dev/null
+"$TOOLS/bin/spreet" --version >/dev/null
+java -jar "$TOOLS/planetiler.jar" --help >/dev/null 2>&1 || { echo "FATAL: planetiler.jar does not run" >&2; exit 1; }
+echo "tools ready in $TOOLS"

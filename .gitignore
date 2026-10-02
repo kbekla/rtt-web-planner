@@ -1,0 +1,14 @@
+# Large/generated map data lives in ~/rtt-map-factory, never here.
+*.pbf
+*.osm
+*.pmtiles
+*.mbtiles
+*.zip
+*.tar.gz
+/dist/
+/data/
+/out/
+node_modules/
+test-results/
+playwright-report/
+.env

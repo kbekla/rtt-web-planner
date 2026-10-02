@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/openmaptiles/osm-bright-gl-style",
+  "tag": "v1.11",
+  "commit": "65c699326edce05da9bbda2c53116314259f1503",
+  "license": "Code BSD-3-Clause; design CC-BY 4.0 (see LICENSE.md)",
+  "note": "Pristine upstream copy used only as a scaffold. Never edit; RT&T changes go in styles/rtt/ and are applied by scripts/build-style.mjs."
+}

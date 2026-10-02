@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Build self-hosted style assets into $FACTORY_DIR/assets:
+#   glyphs/<fontstack>/<range>.pbf   from the pinned openmaptiles/fonts release
+#   sprites/rtt-basemap{,@2x}.{json,png}  from vendored scaffold icons + RT&T icons
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO/config/pipeline.env"
+
+TOOLS="$FACTORY_DIR/tools"
+ASSETS="$FACTORY_DIR/assets"
+FONTS="$TOOLS/noto-sans-2.0"
+[[ -d "$FONTS" && -x "$TOOLS/bin/spreet" ]] || { echo "run scripts/fetch-tools first" >&2; exit 1; }
+
+# Vendored scaffold must be pristine.
+(cd "$REPO/styles/vendor/osm-bright" && sha256sum --quiet -c SHA256SUMS)
+
+mkdir -p "$ASSETS/glyphs" "$ASSETS/sprites"
+for stack in "$FONTS"/*/; do
+  name="$(basename "$stack")"
+  rm -rf "$ASSETS/glyphs/$name"
+  cp -r "$stack" "$ASSETS/glyphs/$name"
+done
+echo "glyphs: $(ls "$ASSETS/glyphs" | paste -sd, -)"
+
+# RT&T icons override scaffold icons with the same name.
+work="$(mktemp -d "$FACTORY_DIR/scratch/sprite.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+cp "$REPO"/styles/vendor/osm-bright/icons/*.svg "$work"/
+shopt -s nullglob
+for svg in "$REPO"/styles/rtt/icons/*.svg; do cp "$svg" "$work"/; done
+"$TOOLS/bin/spreet" --unique "$work" "$ASSETS/sprites/rtt-basemap"
+"$TOOLS/bin/spreet" --unique --retina "$work" "$ASSETS/sprites/rtt-basemap@2x"
+echo "sprites: $(python3 -c "import json;print(len(json.load(open('$ASSETS/sprites/rtt-basemap.json'))))") icons"

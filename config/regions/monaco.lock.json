@@ -1,0 +1,12 @@
+{
+  "region": "monaco",
+  "file": "2026-09-30-daa8f1756555.osm.pbf",
+  "sha256": "daa8f17565554064e3f49fb75f9705e195852ab282165f8e9ee3f4df1f376436",
+  "md5": "237dc81fe6286088ff8e5b5de194fcd2",
+  "bytes": 691511,
+  "source_url": "https://download.geofabrik.de/europe/monaco-latest.osm.pbf",
+  "replication_timestamp": "2026-09-30T20:22:42Z",
+  "replication_sequence": "4925",
+  "replication_url": "https://download.geofabrik.de/europe/monaco-updates",
+  "fetched_at": "2026-10-02T10:10:38.473Z"
+}

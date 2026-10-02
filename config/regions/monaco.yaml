@@ -1,0 +1,56 @@
+# Smoke-test region: builds in seconds and exercises the whole pipeline.
+name: monaco
+title: Monaco
+source:
+  url: https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+  md5_url: https://download.geofabrik.de/europe/monaco-latest.osm.pbf.md5
+# Expected data extent [west, south, east, north]; the PMTiles header bounds must
+# fall within this box. Geofabrik's Monaco extract header bounds include a large sea area.
+bbox: [7.35, 43.45, 7.65, 43.80]
+maxzoom: 14
+planetiler:
+  heap: 2g
+
+# Layers every built region must contain somewhere (checked against metadata).
+required_layers:
+  - boundary
+  - building
+  - housenumber
+  - landuse
+  - place
+  - poi
+  - transportation
+  - transportation_name
+  - water
+
+# Tile probes: decode the tile containing (lon, lat) at zoom z and check content.
+probes:
+  - name: port-hercule
+    lon: 7.4250
+    lat: 43.7350
+    z: 14
+    layers: [water, building, transportation, transportation_name, poi]
+    contains:
+      - { layer: transportation, class: [primary, secondary, tertiary, minor] }
+  - name: monte-carlo-casino
+    lon: 7.4285
+    lat: 43.7393
+    z: 14
+    layers: [building, housenumber, transportation, poi]
+  - name: low-zoom
+    lon: 7.42
+    lat: 43.74
+    z: 8
+    layers: [water]
+
+# Render views for the browser tests (center lon/lat, zoom).
+views:
+  - name: overview
+    center: [7.4220, 43.7380]
+    zoom: 13.5
+  - name: harbour-detail
+    center: [7.4250, 43.7350]
+    zoom: 16.5
+  - name: regional
+    center: [7.42, 43.74]
+    zoom: 9
