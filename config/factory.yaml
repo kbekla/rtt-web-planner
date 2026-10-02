@@ -1,0 +1,50 @@
+# Unattended factory policy (scripts/factory/*). Changing it is a human decision:
+# commit it, then `factoryctl deploy` so the worker runs the new commit.
+# The autonomy rules (GREEN/AMBER/RED) and approved remediations live in
+# scripts/factory/rules.mjs and are documented in docs/FACTORY.md.
+
+# Regions the worker may build unattended. Anything else is held for approval (AMBER).
+regions:
+  monaco: { enabled: true }
+  uk: { enabled: true }
+
+# Hard refusals (RED). No full-planet builds: refused by name, URL or size.
+refuse:
+  names: [planet, planet-latest, world]
+  url_patterns: ['planet', '/world']
+  max_snapshot_bytes: 20000000000   # 20 GB; the UK is 2.26 GB, full US ~11 GB
+
+# Scheduled jobs, enqueued by rtt-factory-schedule.timer (daily 03:15).
+schedule:
+  verify: daily       # re-test each region's promoted build (GREEN)
+  repro: weekly       # Sundays: rebuild in scratch and require identical bytes (GREEN)
+  refresh: never      # new OSM snapshots are AMBER: enqueue manually, approve to run
+
+# Disk guard: a job starts only if free space covers
+#   snapshot (if not yet downloaded) + expected scratch + expected output + margin.
+# Expectations come from the region's last manifest (x headroom), or from the
+# snapshot size times the ratios below when there is no earlier build.
+disk:
+  margin_gb: 25
+  margin_pct: 5          # of the filesystem size; the larger margin wins
+  headroom: 1.25
+  ratio_scratch: 5.5     # UK: 11.0 GB scratch / 2.26 GB snapshot = 4.9
+  ratio_output: 0.85     # UK: 1.64 GB / 2.26 GB = 0.72
+
+# Start gates: the worker waits (it does not fail) while these are out of range.
+thermal:
+  cpu_max_start_c: 85
+  nvme_max_start_c: 65
+power:
+  require_ac: true
+
+# Local AI helper (scripts/factory/ai.mjs). Advisory only, GPU-only.
+ai:
+  enabled: true
+  model: qwen2.5-coder:3b   # chosen by scripts/factory/ai-bench.mjs (docs/FACTORY.md)
+  min_mem_available_mb: 2048
+  max_swap_used_mb: 2048
+
+worker:
+  poll_s: 30
+  stop_timeout_s: 90     # after SIGTERM, how long a job gets to stop before SIGKILL

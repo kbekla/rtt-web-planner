@@ -1,0 +1,8 @@
+[Unit]
+Description=RT&T factory: enqueue scheduled verify/repro jobs
+
+[Service]
+Type=oneshot
+WorkingDirectory=@RUNNER_DIR@
+Environment=FACTORY_DIR=@FACTORY_DIR@
+ExecStart=/usr/bin/node @RUNNER_DIR@/scripts/factory/factoryctl.mjs schedule

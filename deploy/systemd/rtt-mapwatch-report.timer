@@ -1,0 +1,9 @@
+[Unit]
+Description=RT&T mapwatch report, hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=RT&T factory schedule (daily 03:15; catches up after downtime)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Render deploy/systemd/*.{service,timer} into ~/.config/systemd/user and reload.
+#   scripts/install-units [unit ...]   (default: all)
+# Units are enabled but not started; use `systemctl --user start <unit>`.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO/config/pipeline.env"
+RUNNER_DIR="$FACTORY_DIR/runner/repo"
+dest="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mkdir -p "$dest"
+units=("$@")
+[[ ${#units[@]} -gt 0 ]] || mapfile -t units < <(cd "$REPO/deploy/systemd" && ls)
+for u in "${units[@]}"; do
+  sed -e "s#@FACTORY_DIR@#$FACTORY_DIR#g" -e "s#@RUNNER_DIR@#$RUNNER_DIR#g" \
+    "$REPO/deploy/systemd/$u" > "$dest/$u.tmp"
+  mv "$dest/$u.tmp" "$dest/$u"
+  echo "installed $dest/$u"
+done
+systemctl --user daemon-reload
+for u in "${units[@]}"; do
+  # Timers and long-running services are enabled; oneshot helpers are triggered by timers.
+  if grep -q '^\[Install\]' "$dest/$u"; then systemctl --user enable "$u" >/dev/null 2>&1 && echo "enabled $u"; fi
+done

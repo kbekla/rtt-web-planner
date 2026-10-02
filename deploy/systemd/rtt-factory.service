@@ -1,0 +1,25 @@
+# Unattended map factory worker. Runs the deployed runner checkout, one job at a
+# time; restarts on any exit and resumes interrupted jobs. Installed by
+# scripts/install-units (@FACTORY_DIR@/@RUNNER_DIR@ substituted).
+[Unit]
+Description=RT&T unattended map factory worker
+After=network-online.target rtt-ollama.service
+Wants=network-online.target
+# Never give up restarting; crash loops are visible in the dashboard (restarts).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@RUNNER_DIR@
+Environment=FACTORY_DIR=@FACTORY_DIR@
+# Block sleep while the worker is up (the lid switch is already ignored).
+ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=rtt-factory --why="unattended map builds" --mode=block /usr/bin/node @RUNNER_DIR@/scripts/factory/worker.mjs
+Restart=always
+RestartSec=30
+# SIGTERM goes to the worker, which signals the job's process group and records
+# the interruption; anything left after the timeout is killed.
+KillMode=mixed
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

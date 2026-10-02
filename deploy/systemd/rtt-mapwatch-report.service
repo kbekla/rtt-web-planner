@@ -1,0 +1,8 @@
+[Unit]
+Description=RT&T mapwatch report ($FACTORY_DIR/reports/latest.{json,md})
+
+[Service]
+Type=oneshot
+WorkingDirectory=@RUNNER_DIR@
+Environment=FACTORY_DIR=@FACTORY_DIR@
+ExecStart=/usr/bin/node @RUNNER_DIR@/scripts/mapwatch.mjs report

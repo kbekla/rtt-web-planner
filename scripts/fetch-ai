@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Install the pinned Ollama runtime from config/ai.lock (sha256-verified) and pull
+# the pinned models, verifying each model's manifest digest.
+#   scripts/fetch-ai            install runtime + pinned models
+#   scripts/fetch-ai --runtime  install runtime only
+# Idempotent. The runtime is served by the user unit rtt-ollama.service.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+source "$REPO/config/pipeline.env"
+TOOLS="$FACTORY_DIR/tools"
+mkdir -p "$TOOLS/cache"
+
+while read -r name version sha url; do
+  [[ -z "${name:-}" || "$name" == \#* || "$name" != ollama ]] && continue
+  archive="$TOOLS/cache/ollama-linux-amd64-v$version.tar.zst"
+  if [[ ! -f "$archive" ]]; then
+    echo "download ollama $version"
+    curl -fsSL --retry 3 -o "$archive.part" "$url"
+    mv "$archive.part" "$archive"
+  fi
+  got="$(sha256sum "$archive" | cut -d' ' -f1)"
+  [[ "$got" == "$sha" ]] || { echo "FATAL: ollama archive sha256 $got != $sha" >&2; exit 1; }
+  target="$TOOLS/ollama-$version"
+  if [[ ! -x "$target/bin/ollama" || "$(cat "$target/.sha256" 2>/dev/null)" != "$sha" ]]; then
+    rm -rf "$target.part"
+    mkdir -p "$target.part"
+    tar --zstd -xf "$archive" -C "$target.part"
+    echo "$sha" > "$target.part/.sha256"
+    rm -rf "$target"
+    mv "$target.part" "$target"
+  fi
+  ln -sfn "ollama-$version" "$TOOLS/ollama"
+  echo "ok   ollama $version ($("$TOOLS/ollama/bin/ollama" --version 2>&1 | tail -1))"
+done < "$REPO/config/ai.lock"
+
+[[ "${1:-}" == --runtime ]] && exit 0
+exec node "$REPO/scripts/lib/ai-models.mjs" pull

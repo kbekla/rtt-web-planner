@@ -2,7 +2,7 @@
 R ?= monaco
 export RTT_REGION := $(R)
 
-.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report
+.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard
 
 setup:            ## install pinned npm deps, browser, git hooks and tools
 	npm ci
@@ -41,3 +41,6 @@ watch:            ## mapwatch: follow running builds until idle
 
 report:           ## mapwatch: write $$FACTORY_DIR/reports/latest.{json,md}
 	node scripts/mapwatch.mjs report
+
+dashboard:        ## unattended factory: worker, current job, queue, disk, thermals, last failure
+	node scripts/factory/factoryctl.mjs status

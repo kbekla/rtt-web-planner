@@ -1,0 +1,8 @@
+# Optional local AI helper. Not part of the map pipeline or the build ID: the
+# deterministic pipeline and remediation rules work without it.
+# Installed by scripts/fetch-ai into $FACTORY_DIR/tools/ollama-<version>.
+# name    version  sha256                                                            url
+ollama    0.35.0   1c114a6b220c5efca2ef2b1e5f01d1e535e26f6cd6d1678c8489325d2835e525  https://github.com/ollama/ollama/releases/download/v0.35.0/ollama-linux-amd64.tar.zst
+# Models (pulled by scripts/fetch-ai; the manifest digest must match).
+# name    tag               digest
+model     qwen2.5-coder:3b  f72c60cabf6237b07f6e632b2c48d533cef25eda2efbd34bed21c5e9c01e6225
