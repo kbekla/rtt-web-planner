@@ -42,6 +42,7 @@ const log = (msg) => console.log(`[build-region ${region}] ${msg}`);
 // --- status + failure preservation ----------------------------------------
 let outDir = null;
 let buildId = null;
+let tmpDir = null;
 let status = { region, build_id: null, state: 'running', stage: 'verify-inputs', pid: process.pid,
   started_at: new Date().toISOString() };
 
@@ -66,6 +67,8 @@ function preserveAttempt(dir, st) {
 }
 
 function fail(error, exitCode = 1) {
+  // Scratch has no evidence value (the log and status are preserved below) and is large.
+  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   const logFile = outDir && path.join(outDir, 'build.log');
   writeStatus({ state: 'failed', error: String(error?.message ?? error), exit_code: exitCode,
     log_tail: logFile ? tail(logFile) : '' });
@@ -133,7 +136,7 @@ try {
   }
   writeStatus({ stage: 'planetiler' });
 
-  const tmpDir = path.join(FACTORY, 'scratch', `${region}-${buildId}-${process.pid}`);
+  tmpDir = path.join(FACTORY, 'scratch', `${region}-${buildId}-${process.pid}`);
   fs.rmSync(tmpDir, { recursive: true, force: true });
   fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -174,6 +177,7 @@ try {
   const tel = telemetry.stop();
   fs.closeSync(logFd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  tmpDir = null;
   const logText = fs.readFileSync(logFile, 'utf8');
   if (res.status !== 0) {
     console.error(logText.split('\n').slice(-40).join('\n'));

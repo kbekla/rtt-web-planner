@@ -148,8 +148,9 @@ function readPipelineStep(region) {
 /** Jobs left in running/ by a worker that died (crash, kill, power loss, reboot). */
 async function recover() {
   const orphans = Q.list('running');
-  // A killed build leaves scratch behind; clear what no live process owns.
-  if (orphans.length) log(`recovery: cleaned ${(cleanScratch() / 1e6).toFixed(0)} MB of stale scratch`);
+  // Killed or interrupted builds leave scratch behind; clear what no live process owns.
+  const freed = cleanScratch();
+  if (freed) log(`startup: cleaned ${(freed / 1e6).toFixed(0)} MB of stale scratch`);
   for (const job of orphans) {
     const a = job.attempts.at(-1);
     if (a && !a.ended_at) Object.assign(a, { ended_at: new Date().toISOString(), result: 'aborted' });
