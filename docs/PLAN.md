@@ -261,7 +261,7 @@ Visual review findings. These are all style or scaffold issues, not data issues,
 - **Retired:** the first UK build `580ed65ae762167c`. It was byte-identical to the promoted build and had no unique evidence. Its manifest and log are kept in `logs/retired-builds/`.
 
 #### Unattended factory (2026-10-02)
-The A17 can now run unattended: a systemd user-service job queue, GREEN/AMBER/RED autonomy rules, a disk guard, a planet refusal, a dashboard (`make dashboard`) and an optional GPU-only local AI helper (qwen2.5-coder:3b on Ollama). See [FACTORY.md](FACTORY.md) for the design, rules, benchmark and restart/resume tests. Simulated crash and graceful-restart resume both pass. A real reboot test waits on linger being enabled. No full-planet build has been or will be started; it is refused by policy.
+The A17 can now run unattended: a systemd user-service job queue, GREEN/AMBER/RED autonomy rules, a disk guard, a planet refusal, a dashboard (`make dashboard`) and an optional GPU-only local AI helper (qwen2.5-coder:3b on Ollama). See [FACTORY.md](FACTORY.md) for the design, rules, benchmark and restart/resume tests. Simulated crash, graceful restart and a real reboot mid-UK-build all resume correctly and produce byte-identical output. The reboot test found two cleanup defects, both fixed and re-verified. No full-planet build has been or will be started; it is refused by policy.
 
 ### Phase 3: RT&T proprietary layer (needs decision A)
 - Lock `schema/rtt-trails.schema.json`, covering `rtt_id`, `kind`, `surface`, `status`, `version` and so on.

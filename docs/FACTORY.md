@@ -141,4 +141,32 @@ sudo loginctl enable-linger $USER      # start at boot without logging in (needs
 | B: power loss | `systemctl --user kill --signal=SIGKILL rtt-factory` during UK Planetiler `osm_pass2`. Every process in the unit died at once. | systemd restarted the worker after 30 s. The job was recovered as `interrupted` → `resume` (GREEN), and attempt 2 finished byte-identical (`a1a1c57c…`). No Java process was orphaned. |
 | C: graceful stop/restart | `systemctl --user restart rtt-factory` during UK `osm_pass2`. | The first run exposed a bug: `systemd-inhibit` as `ExecStart` swallowed SIGTERM, so stops became hard kills. After the fix, the worker received SIGTERM, signalled the job's process group, recorded the interruption and requeued the job within 0.2 s. The new worker resumed it straight away; result byte-identical. `build-region` saved the partial attempt to `logs/failures/`. |
 | Regression | `build monaco` and `build uk` run through the factory. | Builds reused (`97b3e038`, `c9f7aa62`); 41 unit tests each, plus 8 and 22 render tests; promoted. |
-| Real reboot | Pending. It needs `loginctl enable-linger`, so that the user manager starts at boot without a login. | Not yet run. |
+| Real reboot | Linger on. A UK repro was queued, and the machine was rebooted by hand during Planetiler `osm_pass2` (nodes 86 %, 3.7 GB scratch). | See below. |
+
+### Real reboot (2026-10-02 18:01)
+
+- **Shutdown.** systemd sent SIGTERM. The worker recorded attempt 1 as `interrupted` → `resume` (GREEN, rules) and requeued the job at 18:01:05.
+- **Boot.** Linger started the user manager. The order was:
+
+  | Time | Event |
+  |---|---|
+  | 18:01:26.210 | `user@1000.service` starts (session 1, `Class=manager`, `Service=systemd-user`) |
+  | 18:01:26.379 | GDM auto-login opens session 2 |
+  | 18:01:26.528 | `rtt-factory` and `rtt-ollama` start |
+  | 18:01:27 | attempt 2 starts |
+
+  This machine has GDM auto-login enabled (`AutomaticLogin=karl`), so it never shows a login screen. The factory is started by linger, through the manager session that exists before the auto-login session. A remote reboot behaves the same way.
+- **Processes.** After boot the factory cgroup held only the new worker, its inhibitor, and attempt 2's `check-repro` → `build-region` → `java`. Nothing was orphaned.
+- **Result.** Attempt 2 finished at 18:11:56: **IDENTICAL**, sha256 `a1a1c57c…3a0ad`, the same as the promoted UK build.
+- **Ollama.** Came back at boot with CUDA on the GTX 1650. The pinned model digest verified, and readiness was `ai` (fits in VRAM, 9.4 GB RAM available, no swap).
+- **Queue and timers.** The 8 earlier done jobs were intact. The schedule timer (03:15) and the hourly report timer were still scheduled; the report ran at 18:00.
+- **Status.** Dashboard and mapwatch GREEN after the run.
+
+**Two defects found, and fixed in `bf28436`:**
+1. **Stop cleanup was cut short.** On stop, the worker exited as soon as the job's leader process died. systemd then SIGKILLed `build-region` while it was deleting its scratch and writing its failure record, so the shutdown left 4.4 GB of scratch and no record. The worker now waits for the whole job process group to exit, up to 90 % of the stop timeout.
+2. **The startup sweep skipped pre-reboot scratch.** It had been written less than 15 minutes earlier. `cleanScratch` now treats a directory as stale immediately if its owning pid is dead or it was last written before this boot. After deploying the fix, the startup sweep removed the 4.4 GB.
+
+**Fix verified (test D, 18:16).** `systemctl --user restart` during UK `osm_pass2` with 3.4 GB of scratch:
+- The worker waited for the job's process group to exit (0.6 s).
+- `build-region` deleted its scratch and wrote its failure record (`interrupted by SIGTERM`, stage `planetiler`).
+- The job was requeued, resumed, and finished IDENTICAL (`a1a1c57c…`), with the scratch directory empty at the end.
