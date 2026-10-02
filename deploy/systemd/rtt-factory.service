@@ -12,8 +12,9 @@ StartLimitIntervalSec=0
 Type=simple
 WorkingDirectory=@RUNNER_DIR@
 Environment=FACTORY_DIR=@FACTORY_DIR@
-# Block sleep while the worker is up (the lid switch is already ignored).
-ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=rtt-factory --why="unattended map builds" --mode=block /usr/bin/node @RUNNER_DIR@/scripts/factory/worker.mjs
+# The worker is the main process, so a stop's SIGTERM reaches it first. It holds
+# a sleep inhibitor through a child process (the lid switch is already ignored).
+ExecStart=/usr/bin/node @RUNNER_DIR@/scripts/factory/worker.mjs
 Restart=always
 RestartSec=30
 # SIGTERM goes to the worker, which signals the job's process group and records

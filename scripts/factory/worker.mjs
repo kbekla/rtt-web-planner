@@ -227,8 +227,20 @@ async function runOne(job) {
   heartbeat({ phase: 'idle', job: null, job_started_at: null });
 }
 
+/** Block system sleep while the worker runs (a child, so it dies with the unit). */
+function inhibitSleep() {
+  if (Q.TEST_MODE) return null;
+  const p = spawn('systemd-inhibit', ['--what=sleep:idle', '--who=rtt-factory', '--why=unattended map builds',
+    '--mode=block', 'sleep', 'infinity'], { stdio: 'ignore' });
+  p.on('error', (e) => log(`sleep inhibitor unavailable: ${e.message}`));
+  p.on('exit', (code) => { if (!stopping) log(`sleep inhibitor exited (${code})`); });
+  return p;
+}
+
 async function main() {
   acquire();
+  const inhibitor = inhibitSleep();
+  process.on('exit', () => inhibitor?.kill());
   heartbeat({ phase: 'recovering' });
   const hb = setInterval(() => heartbeat(), 15_000);
   await recover();
