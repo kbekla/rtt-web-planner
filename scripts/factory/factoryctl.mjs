@@ -163,8 +163,9 @@ function deploy(ref = 'HEAD') {
   };
   const sha = spawnSync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: REPO, encoding: 'utf8' }).stdout.trim();
   if (!sha) die(`deploy: unknown commit ${ref}`);
-  const dirty = spawnSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: RUNNER, encoding: 'utf8' }).stdout.trim();
-  if (fs.existsSync(RUNNER) && dirty) die(`deploy: runner has local changes; inspect ${RUNNER} first:\n${dirty}`);
+  const dirty = fs.existsSync(RUNNER)
+    ? spawnSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: RUNNER, encoding: 'utf8' }).stdout.trim() : '';
+  if (dirty) die(`deploy: runner has local changes; inspect ${RUNNER} first:\n${dirty}`);
   if (!fs.existsSync(path.join(RUNNER, '.git'))) {
     fs.mkdirSync(path.dirname(RUNNER), { recursive: true });
     sh('git', ['worktree', 'add', '--detach', RUNNER, sha], { cwd: REPO });
