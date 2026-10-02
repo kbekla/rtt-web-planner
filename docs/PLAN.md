@@ -1,6 +1,6 @@
 # RT&T Self-Hosted Map Build: Plan
 
-Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below). Phase 3 waits for an explicit go-ahead.
+Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below), followed by a factory-hardening pass. Phase 3 waits for an explicit go-ahead.
 
 ## 0. Decisions recorded at approval (these override anything below)
 1. RT&T trail and lane data must be independently sourced and carry provenance. Nothing proprietary may be derived from OSM. Any OSM-derived feature is isolated and flagged for licensing review.
@@ -232,13 +232,33 @@ Schema findings. Each override cites upstream OMT 3.16 in `schema/openmaptiles-3
 - `boundary.disputed_name` is free text taken from the OSM relation name, for example `Louth/Down`. The YAML list is only Asian examples.
 - `landuse.class` is an open set. It is `COALESCE(landuse, amenity, leisure, …)`, so a polygon admitted by `amenity=school` but tagged `landuse=education` gets class `education`. The UK shows 11 such classes.
 
-Visual review findings. These are all style or scaffold issues, not data issues, and belong to the RT&T style work.
+Visual review findings. These are all style or scaffold issues, not data issues, and belong to the RT&T style work. They are tracked as S1–S6 in [STYLE-BACKLOG.md](STYLE-BACKLOG.md).
 1. **No mountain peaks are drawn.** OSM Bright has no `mountain_peak` layer. The data is present, for example Yr Wyddfa 1085 m and Scafell Pike 978 m.
 2. **Footpaths are very faint.** `highway-path` is a thin, light dash, so upland trail networks (Snowdon, Lake District) nearly disappear. Path names only appear from z15.5.
 3. **Unstyled landuse classes.** Only residential, commercial, industrial, cemetery, hospital, school and railway are styled. `education`, `university`, `college`, `park`, `religious` and others fall back to the background colour.
 4. **Admin boundaries are drawn along the coast.** County and unitary boundaries follow the low-water line and are not tagged `maritime`, so a heavy dashed line traces much of the coastline and out across mudflats (Thames estuary, Land's End, Forth).
 5. **Areas outside the extract are blank land.** The Republic of Ireland and the Isle of Man appear as empty land at low zoom, which is expected for a UK-only extract.
 6. **Generic POI icons.** POIs with no class-specific icon show as black dots (`circle_11` fallback), which is noticeable at high zoom.
+
+#### Factory hardening (2026-10-02, between Phases 2 and 3)
+- **Build identity, scheme 2.** The build ID hashes only the tile-producing inputs (`scripts/lib/build-id.mjs`):
+  - region name, snapshot, ancillary inputs
+  - the Planetiler jar and Java version
+  - output arguments
+
+  Probes, views, `bbox`, `required_layers`, heap and thread count are excluded. Unclassified config keys fail the build. `tests/repo/build-id.test.mjs` checks that each test-only edit keeps the ID and each tile input changes it. The scheme-2 rebuilds are byte-identical to the scheme-1 builds:
+  - Monaco `97b3e038…`: sha256 `26bf9453…`
+  - UK `c9f7aa62…`: sha256 `a1a1c57c…`
+
+  A view edit in `uk.yaml` reused the UK build with no Planetiler run.
+- **Telemetry.** Planetiler runs are sampled every 5 s into `telemetry.jsonl`. Peaks and means go into `manifest.json` under `stats.telemetry`. UK peaks:
+  - CPU 76.0 °C (mean 68.7), NVMe 54.9 °C (mean 42.8)
+  - iGPU 55 °C / 12 % / 488 MB, dGPU 51 °C / 1 % / 88 MB
+  - system RAM 9.9 GB, swap 1.05 GB, scratch 11.0 GB, load 13.7
+
+  Over the 9 min 21 s build, the sampler used 11.5 s of CPU time across 114 samples, about 0.2 % of the 12-core machine. This build was faster than the two Phase 2 builds.
+- **mapwatch** (`scripts/mapwatch.mjs`, `make status|watch|report`). A read-only monitor with JSON and Markdown output. It shows the stage and status of builds and pipelines, detects aborted processes, and shows log tails. Failed and interrupted attempts are preserved in `logs/failures/`. `tests/repo/mapwatch.test.mjs` runs it against a fixture factory and verifies it changes nothing outside `reports/`.
+- **Retired:** the first UK build `580ed65ae762167c`. It was byte-identical to the promoted build and had no unique evidence. Its manifest and log are kept in `logs/retired-builds/`.
 
 ### Phase 3: RT&T proprietary layer (needs decision A)
 - Lock `schema/rtt-trails.schema.json`, covering `rtt_id`, `kind`, `surface`, `status`, `version` and so on.

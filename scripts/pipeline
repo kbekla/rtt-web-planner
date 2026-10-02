@@ -2,22 +2,38 @@
 # One command: pinned snapshot -> PMTiles -> style/assets -> all tests -> promote.
 #   scripts/pipeline <region>
 # A build is promoted to output/<region>/current only if every test passes.
+#
+# Progress is recorded for scripts/mapwatch in $FACTORY_DIR/state/pipeline-<region>.json,
+# and the full output is kept in $FACTORY_DIR/logs/pipeline-<region>-<UTC time>.log.
+# On failure, the step and log tail are copied to $FACTORY_DIR/logs/failures/.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
+source "$REPO/config/pipeline.env"
 region="${1:?usage: scripts/pipeline <region>}"
 
-step() { printf '\n=== %s\n' "$*"; }
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$FACTORY_DIR/logs" "$FACTORY_DIR/state"
+export RTT_PIPELINE_LOG="$FACTORY_DIR/logs/pipeline-$region-$stamp.log"
+exec > >(tee -a "$RTT_PIPELINE_LOG") 2>&1
 
+state() { node scripts/lib/pipeline-state.mjs "$region" "$@"; }
+current=""
+step() { current="$1"; printf '\n=== %s\n' "$*"; state step "$1"; }
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then state fail "$current" "$rc"; fi' EXIT
+
+state start
 step "tools";            scripts/fetch-tools
 step "snapshot";         node scripts/fetch-region.mjs "$region"
 step "build";            out="$(node scripts/build-region.mjs "$region" | tee /dev/stderr | tail -1)"
 id="$(basename "$out")"
+state build-id "$id"
 step "assets";           scripts/build-assets
 step "style";            node scripts/build-style.mjs "$region"
 export RTT_REGION="$region" RTT_BUILD_ID="$id"
-step "tests: repo, schema, attribution ($id)"
+step "tests-unit"; echo "repo, schema, attribution ($id)"
 node --test 'tests/repo/*.test.mjs' 'tests/schema/*.test.mjs' 'tests/attribution/*.test.mjs'
-step "tests: render ($id)"
+step "tests-render"; echo "render ($id)"
 npx playwright test
 step "promote";          scripts/promote-region "$region" "$id"
+state done

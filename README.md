@@ -21,7 +21,7 @@ make repro R=monaco     # rebuild from pinned inputs; must be byte-identical
 | Pinned tools | `scripts/fetch-tools` reads `tools.lock` (sha256-verified) | `$FACTORY_DIR/tools/` |
 | OSM snapshot | `scripts/fetch-region.mjs <r>`; `--refresh` pins a new one | `sources/osm/<r>/<date>-<sha12>.osm.pbf`, locked in `config/regions/<r>.lock.json` |
 | Ancillary inputs | pinned in `config/ancillary.lock` | `sources/ancillary/` |
-| Tiles | `scripts/build-region.mjs <r>` | `output/<r>/<build-id>/{<r>.pmtiles, manifest.json, build.log}` |
+| Tiles | `scripts/build-region.mjs <r>` | `output/<r>/<build-id>/{<r>.pmtiles, manifest.json, build.log, status.json, telemetry.jsonl}` |
 | Glyphs and sprites | `scripts/build-assets` | `assets/glyphs/`, `assets/sprites/` |
 | Style | `scripts/build-style.mjs <r>`: vendored scaffold + `styles/rtt/overlay.json` | `assets/styles/<r>/style.json` |
 | Tests | `tests/{repo,schema,attribution}` (node:test) and `tests/render` (Playwright) | |
@@ -29,7 +29,31 @@ make repro R=monaco     # rebuild from pinned inputs; must be byte-identical
 
 `scripts/pipeline <r>` (`make region`) runs every step in order. It promotes the build only if all tests pass.
 
-**Build ID.** The build ID is a hash of the region config, the snapshot sha256, the ancillary hashes, `tools.lock`, the Java version and the Planetiler output arguments. Identical inputs therefore always produce the same ID. The output is byte-identical too: `make repro` checks this with a different thread count. The git commit and thread count are recorded in `manifest.json` but are not part of the ID, because they don't affect the output.
+**Build ID.** The build ID is a hash of the tile-producing inputs only: the region name, the snapshot sha256, the ancillary hashes, the pinned Planetiler jar, the Java version and the Planetiler output arguments (`maxzoom`, `planetiler.args`). `scripts/lib/build-id.mjs` lists the inputs and `manifest.json` records them under `build_id_inputs`. Test probes, views, `bbox`, `planetiler.heap` and the thread count are not part of the ID, so editing a test never forces a rebuild. Every region-config key must be classified in `build-id.mjs`, and an unclassified key fails the build. The output is byte-identical for identical inputs; `make repro` checks this with a different thread count.
+
+## Monitoring: mapwatch and telemetry
+
+During Planetiler, `build-region` samples the host every 5 s and writes the samples to `telemetry.jsonl` next to the build. It records:
+- CPU, NVMe and iGPU temperatures
+- iGPU load and VRAM
+- the NVIDIA dGPU, queried only when it is already awake
+- RAM and swap
+- the scratch-directory size
+
+The peaks, the means and the sampler's own cost go into `manifest.json` under `stats.telemetry`.
+
+`scripts/mapwatch.mjs` is a read-only monitor for the factory. It only writes its own reports, and it uses no network or AI/API. It reads the following:
+- each build's `status.json`, `manifest.json`, `build.log` and `telemetry.jsonl`
+- `state/pipeline-<r>.json`
+- `logs/failures/`
+
+A failed or interrupted build or pipeline is copied to `logs/failures/` before a retry can overwrite it. A "running" record whose process has gone is reported as `aborted`.
+
+```sh
+make status             # Markdown summary (or: node scripts/mapwatch.mjs status --json)
+make watch              # follow running builds, printing stage changes, until idle
+make report             # $FACTORY_DIR/reports/latest.{json,md} plus a timestamped copy
+```
 
 ## Adding a region
 
@@ -53,6 +77,7 @@ styles/       vendor/osm-bright (pristine, checksummed scaffold), rtt/ (RT&T ove
 viewer/       local MapLibre + pmtiles viewer
 tests/        repo hygiene, schema, attribution, render (+ golden screenshots)
 docs/PLAN.md  phased plan and acceptance criteria
+docs/STYLE-BACKLOG.md  open style issues from the visual reviews
 ```
 
 See [ATTRIBUTION.md](ATTRIBUTION.md) for licensing. The OSM and OpenMapTiles credit must be visible on every map.

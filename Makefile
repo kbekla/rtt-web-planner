@@ -2,7 +2,7 @@
 R ?= monaco
 export RTT_REGION := $(R)
 
-.PHONY: setup tools region test test-unit test-render repro serve goldens
+.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report
 
 setup:            ## install pinned npm deps, browser, git hooks and tools
 	npm ci
@@ -32,3 +32,12 @@ serve:            ## local viewer at http://127.0.0.1:8080/viewer/?region=$(R)
 
 goldens:          ## accept new reference screenshots — review them first!
 	npx playwright test --update-snapshots
+
+status:           ## mapwatch: builds, pipelines, failures, host readings
+	node scripts/mapwatch.mjs status
+
+watch:            ## mapwatch: follow running builds until idle
+	node scripts/mapwatch.mjs watch --until-idle
+
+report:           ## mapwatch: write $$FACTORY_DIR/reports/latest.{json,md}
+	node scripts/mapwatch.mjs report
