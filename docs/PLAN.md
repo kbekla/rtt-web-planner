@@ -202,7 +202,7 @@ Each phase ends with its tests passing and a commit. Nothing is called "done" ju
 - [ ] `make serve` + a browser: a manual sign-off pass over 10 named views (listed in the test file).
 
 #### Phase 2 results (2026-10-02)
-Build `uk/7b3dd56c0e4d3b65`, promoted. Snapshot `2026-09-30-faaf4961d753.osm.pbf` (2,263,969,331 bytes; md5 matched Geofabrik; replication 2026-09-30T20:22:42Z, seq 1042).
+Build `uk/7b3dd56c0e4d3b65`, promoted. (Later superseded by the byte-identical scheme-2 build `c9f7aa62` and retired on 2026-10-02. Its manifest and log are kept in `$FACTORY_DIR/logs/retired-builds/`.) Snapshot `2026-09-30-faaf4961d753.osm.pbf` (2,263,969,331 bytes; md5 matched Geofabrik; replication 2026-09-30T20:22:42Z, seq 1042).
 
 | Measure | Value |
 |---|---|
@@ -258,7 +258,7 @@ Visual review findings. These are all style or scaffold issues, not data issues,
 
   Over the 9 min 21 s build, the sampler used 11.5 s of CPU time across 114 samples, about 0.2 % of the 12-core machine. This build was faster than the two Phase 2 builds.
 - **mapwatch** (`scripts/mapwatch.mjs`, `make status|watch|report`). A read-only monitor with JSON and Markdown output. It shows the stage and status of builds and pipelines, detects aborted processes, and shows log tails. Failed and interrupted attempts are preserved in `logs/failures/`. `tests/repo/mapwatch.test.mjs` runs it against a fixture factory and verifies it changes nothing outside `reports/`.
-- **Retired:** the first UK build `580ed65ae762167c`. It was byte-identical to the promoted build and had no unique evidence. Its manifest and log are kept in `logs/retired-builds/`.
+- **Retired:** the first UK build `580ed65ae762167c`, and after the factory work the scheme-1 builds Monaco `316ecd77` and UK `7b3dd56c`. All were byte-identical to their successors and had no unique evidence beyond timing figures. Their manifests and logs are kept in `logs/retired-builds/`. The last two retirements reclaimed 1.64 GB.
 
 #### Unattended factory (2026-10-02)
 The A17 can now run unattended: a systemd user-service job queue, GREEN/AMBER/RED autonomy rules, a disk guard, a planet refusal, a dashboard (`make dashboard`) and an optional GPU-only local AI helper (qwen2.5-coder:3b on Ollama). See [FACTORY.md](FACTORY.md) for the design, rules, benchmark and restart/resume tests. Simulated crash, graceful restart and a real reboot mid-UK-build all resume correctly and produce byte-identical output. The reboot test found two cleanup defects, both fixed and re-verified. No full-planet build has been or will be started; it is refused by policy.
