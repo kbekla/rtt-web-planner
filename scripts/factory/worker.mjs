@@ -36,6 +36,21 @@ const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`);
 let state = { pid: process.pid, commit, repo: REPO, started_at: new Date().toISOString(), phase: 'starting', job: null };
 let stopping = false;
 let child = null;
+let lastGroup = null;
+
+/**
+ * On stop, wait until every process in the job's group has exited, not just its
+ * leader, so grandchildren (build-region) can finish cleaning up and recording
+ * their failure before systemd kills what is left of the unit.
+ */
+async function waitForGroup(pgid, ms) {
+  const deadline = Date.now() + ms;
+  while (pgid && Date.now() < deadline) {
+    try { process.kill(-pgid, 0); } catch { return true; }
+    await sleep(200);
+  }
+  return false;
+}
 
 function heartbeat(patch = {}) {
   state = { ...state, ...patch, heartbeat_at: new Date().toISOString() };
@@ -93,6 +108,7 @@ async function runSteps(job, logFile) {
       fs.writeSync(out, `\n### ${new Date().toISOString()} step ${i + 1}: ${argv.join(' ')}\n`);
       const res = await new Promise((resolve) => {
         child = spawn(argv[0], argv.slice(1), { cwd: REPO, env, stdio: ['ignore', out, out], detached: true });
+        lastGroup = child.pid;
         heartbeat({ child_pid: child.pid });
         child.on('error', (e) => resolve({ code: 127, signal: null, error: e.message }));
         child.on('close', (code, signal) => resolve({ code, signal }));
@@ -211,6 +227,10 @@ async function runOne(job) {
   log(`${job.id}: attempt ${n} (${disk.reason})`);
 
   const res = await runSteps(job, logFile);
+  if (stopping && lastGroup) {
+    const gone = await waitForGroup(lastGroup, STOP_TIMEOUT_MS * 0.9);
+    log(`job process group ${lastGroup} ${gone ? 'exited' : 'still running at stop timeout'}`);
+  }
   const a = job.attempts.at(-1);
   a.ended_at = new Date().toISOString();
   if (res.code === 0) {
@@ -269,7 +289,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     heartbeat({ phase: 'stopping' });
     if (child) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ }
-      setTimeout(() => { if (child) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } } }, STOP_TIMEOUT_MS).unref();
+      setTimeout(() => { try { process.kill(-lastGroup, 'SIGKILL'); } catch { /* gone */ } }, STOP_TIMEOUT_MS).unref();
     } else {
       process.exit(0);
     }

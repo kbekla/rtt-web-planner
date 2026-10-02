@@ -86,17 +86,25 @@ export function cleanScratch() {
       if (s.isDirectory()) for (const f of fs.readdirSync(q)) walk(path.join(q, f), fn);
     } catch { /* vanished */ }
   };
+  // Anything last written before this boot can't belong to a live process.
+  const bootMs = (() => {
+    try { return Number(/^btime (\d+)/m.exec(fs.readFileSync('/proc/stat', 'utf8'))[1]) * 1000; } catch { return 0; }
+  })();
   let freed = 0;
   for (const name of fs.readdirSync(dir)) {
     const p = path.join(dir, name);
-    // Build scratch dirs end in the owning pid; skip them while it is alive.
-    const pid = Number(/-(\d+)$/.exec(name)?.[1]);
-    if (pid) { try { process.kill(pid, 0); continue; } catch { /* owner is gone */ } }
-    // Others (e.g. check-repro output) have no pid: skip anything written to recently.
     let newest = 0;
     let bytes = 0;
     walk(p, (s) => { newest = Math.max(newest, s.mtimeMs); if (s.isFile()) bytes += s.size; });
-    if (Date.now() - newest < 15 * 60 * 1000) continue;
+    // Build scratch dirs end in the owning pid: stale once it is gone, however recent.
+    // A reused pid after a reboot is caught by the boot-time check.
+    const pid = Number(/-(\d+)$/.exec(name)?.[1]);
+    let stale;
+    if (newest < bootMs) stale = true;
+    else if (pid) { try { process.kill(pid, 0); stale = false; } catch { stale = true; } }
+    // Others (e.g. check-repro output) have no pid: stale after 15 minutes without writes.
+    else stale = Date.now() - newest >= 15 * 60 * 1000;
+    if (!stale) continue;
     fs.rmSync(p, { recursive: true, force: true });
     freed += bytes;
   }

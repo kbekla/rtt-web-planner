@@ -183,6 +183,45 @@ test('SIGTERM interrupts the job, records it and requeues it for resume', async 
   assert.equal(job.remediations.resume, 1);
 });
 
+test('on SIGTERM the worker waits for the whole job process group to clean up', async () => {
+  reset();
+  const mark = path.join(factory, 'grandchild-cleaned-up');
+  const id = enqueue('verify', 'monaco');
+  // The leader exits at once; its child needs 1 s to clean up after SIGTERM.
+  const inner = `trap "sleep 1; touch ${mark}; exit 1" TERM; while true; do sleep 0.1; done`;
+  const w = spawn('node', [path.join(REPO, 'scripts/factory/worker.mjs')],
+    { env: env({ verify: [['sh', '-c', `sh -c '${inner}' & wait`]] }) });
+  for (let i = 0; i < 50 && where(id)?.state !== 'running'; i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 500));
+  w.kill('SIGTERM');
+  await new Promise((r) => w.on('close', r));
+  assert.ok(fs.existsSync(mark), 'worker exited before the grandchild finished cleaning up');
+  assert.equal(where(id).state, 'pending');
+});
+
+test('stale scratch: dead-pid dirs go at once, pid-less dirs after 15 min, live dirs stay', () => {
+  const scratch = path.join(factory, 'scratch');
+  const mk = (name, ageMin = 0) => {
+    const d = path.join(scratch, name);
+    fs.mkdirSync(d, { recursive: true });
+    const f = path.join(d, 'data');
+    fs.writeFileSync(f, 'x'.repeat(1000));
+    const t = (Date.now() - ageMin * 60_000) / 1000;
+    fs.utimesSync(f, t, t);
+    fs.utimesSync(d, t, t);
+  };
+  const dead = spawnSync('true').pid;
+  mk(`uk-0123456789abcdef-${dead}`);            // dead owner, fresh: stale
+  mk(`uk-0123456789abcdef-${process.pid}`);     // live owner: keep
+  mk('repro-uk-fresh');                         // no pid, fresh: keep
+  mk('repro-uk-old', 30);                       // no pid, 30 min idle: stale
+  const r = spawnSync('node', ['-e', "import('./scripts/factory/guards.mjs').then(g => console.log(g.cleanScratch()))"],
+    { cwd: REPO, encoding: 'utf8', env: { ...process.env, FACTORY_DIR: factory } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(fs.readdirSync(scratch).sort(), [`uk-0123456789abcdef-${process.pid}`, 'repro-uk-fresh'].sort());
+  assert.equal(Number(r.stdout.trim()), 2000);
+});
+
 test('dashboard shows region, queue, disk, thermals and last failure', () => {
   const out = ctl('status').stdout;
   for (const re of [/^worker /m, /^current /m, /^queue /m, /^disk .*free/m, /^thermals CPU/m, /^ai /m, /^last failure .*interrupted/m]) {
