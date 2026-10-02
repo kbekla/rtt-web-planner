@@ -8,7 +8,7 @@ The factory keeps building, validating and promoting regional basemaps without a
 
 | Piece | What it does |
 |---|---|
-| `rtt-factory.service` | The worker (`scripts/factory/worker.mjs`). It runs one queued job at a time from the **runner checkout** `$FACTORY_DIR/runner/repo`, restarts on any exit, and blocks sleep while it is up. |
+| `rtt-factory.service` | The worker (`scripts/factory/worker.mjs`). It runs one queued job at a time from the **runner checkout** `$FACTORY_DIR/runner/repo`. It restarts on any exit, after 30 s, and blocks sleep while it is up through a `systemd-inhibit` child. The worker is the unit's main process, so a stop's SIGTERM reaches it first. |
 | `rtt-factory-schedule.timer` | Runs daily at 03:15 and catches up after downtime. It enqueues `verify` daily and `repro` on Sundays for each enabled region (`config/factory.yaml`). |
 | `rtt-mapwatch-report.timer` | Writes `$FACTORY_DIR/reports/latest.{json,md}` every hour. |
 | `rtt-ollama.service` | Local AI runtime: localhost only, GPU-only, cgroup memory capped. Optional; the factory works without it. |
@@ -132,3 +132,13 @@ systemctl --user enable --now rtt-ollama.service rtt-factory.service \
   rtt-factory-schedule.timer rtt-mapwatch-report.timer
 sudo loginctl enable-linger $USER      # start at boot without logging in (needs a terminal)
 ```
+
+## Restart/resume tests (2026-10-02)
+
+| Test | What was done | Result |
+|---|---|---|
+| A: normal operation | Enqueued `build monaco`. Fired the schedule service, which enqueued `verify monaco` and `verify uk`. | All three done unattended in 4m41s. Disk-guard figures were logged before each job. |
+| B: power loss | `systemctl --user kill --signal=SIGKILL rtt-factory` during UK Planetiler `osm_pass2`. Every process in the unit died at once. | systemd restarted the worker after 30 s. The job was recovered as `interrupted` → `resume` (GREEN), and attempt 2 finished byte-identical (`a1a1c57c…`). No Java process was orphaned. |
+| C: graceful stop/restart | `systemctl --user restart rtt-factory` during UK `osm_pass2`. | The first run exposed a bug: `systemd-inhibit` as `ExecStart` swallowed SIGTERM, so stops became hard kills. After the fix, the worker received SIGTERM, signalled the job's process group, recorded the interruption and requeued the job within 0.2 s. The new worker resumed it straight away; result byte-identical. `build-region` saved the partial attempt to `logs/failures/`. |
+| Regression | `build monaco` and `build uk` run through the factory. | Builds reused (`97b3e038`, `c9f7aa62`); 41 unit tests each, plus 8 and 22 render tests; promoted. |
+| Real reboot | Pending. It needs `loginctl enable-linger`, so that the user manager starts at boot without a login. | Not yet run. |

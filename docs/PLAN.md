@@ -260,6 +260,9 @@ Visual review findings. These are all style or scaffold issues, not data issues,
 - **mapwatch** (`scripts/mapwatch.mjs`, `make status|watch|report`). A read-only monitor with JSON and Markdown output. It shows the stage and status of builds and pipelines, detects aborted processes, and shows log tails. Failed and interrupted attempts are preserved in `logs/failures/`. `tests/repo/mapwatch.test.mjs` runs it against a fixture factory and verifies it changes nothing outside `reports/`.
 - **Retired:** the first UK build `580ed65ae762167c`. It was byte-identical to the promoted build and had no unique evidence. Its manifest and log are kept in `logs/retired-builds/`.
 
+#### Unattended factory (2026-10-02)
+The A17 can now run unattended: a systemd user-service job queue, GREEN/AMBER/RED autonomy rules, a disk guard, a planet refusal, a dashboard (`make dashboard`) and an optional GPU-only local AI helper (qwen2.5-coder:3b on Ollama). See [FACTORY.md](FACTORY.md) for the design, rules, benchmark and restart/resume tests. Simulated crash and graceful-restart resume both pass. A real reboot test waits on linger being enabled. No full-planet build has been or will be started; it is refused by policy.
+
 ### Phase 3: RT&T proprietary layer (needs decision A)
 - Lock `schema/rtt-trails.schema.json`, covering `rtt_id`, `kind`, `surface`, `status`, `version` and so on.
 - Build from a fixture GeoJSON and add it as a separate source in the style.
