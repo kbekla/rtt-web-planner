@@ -1,9 +1,10 @@
 # RT&T Self-Hosted Map Build: Plan
 
-Status: **Approved 2026-10-02.** Phases 0–1 are implemented. Phase 2 (UK) waits for an explicit go-ahead.
+Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below). Phase 3 waits for an explicit go-ahead.
 
 ## 0. Decisions recorded at approval (these override anything below)
 1. RT&T trail and lane data must be independently sourced and carry provenance. Nothing proprietary may be derived from OSM. Any OSM-derived feature is isolated and flagged for licensing review.
+   *Decision (A), confirmed 2026-10-02:* RT&T's proprietary trail and lane geometry is intended to be independently sourced with provenance, not traced or derived from OSM. If any existing geometry is later found to have been traced, snapped or otherwise derived from OSM, it must not be silently included in the proprietary dataset. It is isolated and flagged for licensing review.
 2. "No Mapbox" means no Mapbox SDK, mapbox-gl runtime, APIs, tokens, hosted tiles/styles or network services. `@mapbox/*` open-source helpers are allowed where MapLibre requires them; `tests/repo` holds the allow-list.
 3. Contrasting region: **Colorado** before any full-US attempt.
 4. Schema: **OpenMapTiles**. OSM Bright is a scaffold only. The production style becomes an RT&T-owned design, with all glyphs, sprites and assets self-hosted.
@@ -59,7 +60,7 @@ Implementation notes that refine the original plan:
 8. **Valhalla is untouched.** Optional later idea, not part of this plan: Valhalla could build from the same pinned PBF snapshot so the basemap and routing graph agree.
 
 ### Points that need your input
-- **(A) ODbL exposure of RT&T data.** If any RT&T trail or lane geometry was *derived from OSM* (traced or snapped from it), it is likely a Derivative Database under ODbL share-alike, which conflicts with "proprietary". If it was surveyed or digitised independently, it is fine. This needs a yes/no from you, and legal advice if the answer is unclear.
+- **(A) ODbL exposure of RT&T data.** *(Answered 2026-10-02: see section 0, item 1.)* If any RT&T trail or lane geometry was *derived from OSM* (traced or snapped from it), it is likely a Derivative Database under ODbL share-alike, which conflicts with "proprietary". If it was surveyed or digitised independently, it is fine. This needs a yes/no from you, and legal advice if the answer is unclear.
 - **(B) Meaning of "no Mapbox runtime dependency."** I propose it means: no Mapbox services, tokens, `mapbox://` URLs, `api.mapbox.com` calls, or `mapbox-gl` ≥ v2. BSD-licensed utility packages under the `@mapbox/` npm scope are allowed, because MapLibre itself depends on some of them (`@mapbox/vector-tile`, `point-geometry`, …). The acceptance test enforces exactly that definition.
 - **(C) Contrasting region.** I recommend **Colorado first** (383 MB). It differs from the UK in TIGER-derived roads, dense `highway=track`/`path` coverage, mountains, and US admin and ref tagging, and it builds in minutes. Full US would follow. Full US at about 11 GB on 14 GB RAM should work with `--storage=mmap`, but expect several hours and about 100 GB of temp disk.
 - **(D) Max zoom.** z14 with overzoom is the OpenMapTiles norm. Trail detail is still readable at z15–17 through overzoom.
@@ -199,6 +200,45 @@ Each phase ends with its tests passing and a commit. Nothing is called "done" ju
 - [ ] Recorded runtime, peak RSS and output size, with no OOM.
 - [ ] A second UK build from the same snapshot reproduces (same criterion as Phase 1).
 - [ ] `make serve` + a browser: a manual sign-off pass over 10 named views (listed in the test file).
+
+#### Phase 2 results (2026-10-02)
+Build `uk/7b3dd56c0e4d3b65`, promoted. Snapshot `2026-09-30-faaf4961d753.osm.pbf` (2,263,969,331 bytes; md5 matched Geofabrik; replication 2026-09-30T20:22:42Z, seq 1042).
+
+| Measure | Value |
+|---|---|
+| Download + verify | 3 min |
+| Planetiler build | 10 min 23 s (12 threads, `-Xmx6g`); about 10.5 min at 6 threads (`make repro`, including hashing) |
+| Whole pipeline (build, style, all tests) | 11 min 21 s |
+| Peak RSS (Java process) | 7.5 GB and 8.4 GB for the two measured 12-thread builds, on a 14 GB box. Up to ~0.9 GB of swap was used. No OOM. |
+| Peak scratch disk | 11.0 GB, freed after the build |
+| Disk kept | snapshot 2.26 GB; output 1.64 GB per build |
+| PMTiles | 1,637,564,936 bytes, z0–14, sha256 `a1a1c57c…3a0ad` |
+| Reproducibility | Three builds are byte-identical: two at 12 threads with different build IDs (only test probes changed), and one at 6 threads (`make repro`). |
+
+- [x] Snapshot md5 matches Geofabrik's `.md5`. The manifest records the replication timestamp.
+- [x] All Phase 1 checks pass on UK: integrity, header and bounds, schema across 15,690 sampled tiles, attribution, no Mapbox, zero external requests, and rendering on desktop and mobile.
+- [x] 12 probe tiles pass:
+  - London: 3 probes covering buildings, housenumbers, POIs, the Thames as `river`, and the city label.
+  - Edinburgh: city label.
+  - Snowdon: `path`, plus the peak "Yr Wyddfa".
+  - Scafell Pike: `path`, plus the peak "Scafell Pike".
+  - Belfast: 2 probes.
+  - Shetland: 2 probes with `ocean`.
+  - Thames estuary: 2 probes with `ocean`.
+- [x] No ocean flooding or missing land at the coastline views: Thames estuary, Shetland, Land's End, Edinburgh/Forth.
+- [x] Visual review of the 10 named views in `config/regions/uk.yaml`. The accepted renders are the goldens. Issues found are listed below.
+
+Schema findings. Each override cites upstream OMT 3.16 in `schema/openmaptiles-3.16.0.overrides.json`.
+- `boundary.disputed_name` is free text taken from the OSM relation name, for example `Louth/Down`. The YAML list is only Asian examples.
+- `landuse.class` is an open set. It is `COALESCE(landuse, amenity, leisure, …)`, so a polygon admitted by `amenity=school` but tagged `landuse=education` gets class `education`. The UK shows 11 such classes.
+
+Visual review findings. These are all style or scaffold issues, not data issues, and belong to the RT&T style work.
+1. **No mountain peaks are drawn.** OSM Bright has no `mountain_peak` layer. The data is present, for example Yr Wyddfa 1085 m and Scafell Pike 978 m.
+2. **Footpaths are very faint.** `highway-path` is a thin, light dash, so upland trail networks (Snowdon, Lake District) nearly disappear. Path names only appear from z15.5.
+3. **Unstyled landuse classes.** Only residential, commercial, industrial, cemetery, hospital, school and railway are styled. `education`, `university`, `college`, `park`, `religious` and others fall back to the background colour.
+4. **Admin boundaries are drawn along the coast.** County and unitary boundaries follow the low-water line and are not tagged `maritime`, so a heavy dashed line traces much of the coastline and out across mudflats (Thames estuary, Land's End, Forth).
+5. **Areas outside the extract are blank land.** The Republic of Ireland and the Isle of Man appear as empty land at low zoom, which is expected for a UK-only extract.
+6. **Generic POI icons.** POIs with no class-specific icon show as black dots (`circle_11` fallback), which is noticeable at high zoom.
 
 ### Phase 3: RT&T proprietary layer (needs decision A)
 - Lock `schema/rtt-trails.schema.json`, covering `rtt_id`, `kind`, `surface`, `status`, `version` and so on.

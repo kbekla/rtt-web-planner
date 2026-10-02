@@ -1,0 +1,159 @@
+# Phase 2 milestone region: Great Britain + Northern Ireland (Geofabrik extract).
+name: uk
+title: United Kingdom
+source:
+  url: https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf
+  md5_url: https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf.md5
+# Expected data extent [west, south, east, north]; the PMTiles header bounds must
+# fall within this box. Generous enough for Geofabrik's UK polygon (incl. Shetland,
+# St Kilda, Rockall waters, Scilly and the Channel approaches; header is
+# -14.86, 49.42, 2.64, 61.14 for the 2026-09-30 snapshot).
+bbox: [-15.0, 49.0, 3.0, 61.5]
+maxzoom: 14
+planetiler:
+  heap: 6g
+
+required_layers:
+  - aerodrome_label
+  - boundary
+  - building
+  - housenumber
+  - landcover
+  - landuse
+  - mountain_peak
+  - park
+  - place
+  - poi
+  - transportation
+  - transportation_name
+  - water
+  - water_name
+  - waterway
+
+# Tile probes: decode the tile containing (lon, lat) at zoom z and check content.
+probes:
+  # London: dense urban detail at z14.
+  - name: london-covent-garden
+    lon: -0.1225
+    lat: 51.5117
+    z: 14
+    layers: [building, housenumber, poi, transportation, transportation_name]
+    contains:
+      - { layer: transportation, class: [primary, secondary, tertiary, minor] }
+  - name: london-thames-westminster
+    lon: -0.1205
+    lat: 51.5008
+    z: 14
+    layers: [water, building, transportation]
+    contains:
+      - { layer: water, class: river }
+  - name: london-place-label
+    lon: -0.1276
+    lat: 51.5074
+    z: 8
+    layers: [place, water]
+    contains:
+      - { layer: place, class: city, name: London }
+  # Edinburgh: place labels.
+  - name: edinburgh-place-label
+    lon: -3.1883
+    lat: 55.9533
+    z: 10
+    layers: [place, transportation]
+    contains:
+      - { layer: place, class: city, name: Edinburgh }
+  # Snowdonia and the Lake District: paths and peaks (no contours expected).
+  - name: snowdon-summit
+    lon: -4.0761
+    lat: 53.0685
+    z: 14
+    layers: [transportation, mountain_peak, landcover]
+    contains:
+      - { layer: transportation, class: path }
+      - { layer: mountain_peak, class: peak, name: Yr Wyddfa }  # Snowdon; OSM name is Welsh
+  - name: scafell-pike
+    lon: -3.2117
+    lat: 54.4542
+    z: 14
+    layers: [transportation, mountain_peak]
+    contains:
+      - { layer: transportation, class: path }
+      - { layer: mountain_peak, class: peak, name: Scafell Pike }
+  # Belfast: Northern Ireland is included.
+  - name: belfast-city-hall
+    lon: -5.9301
+    lat: 54.5964
+    z: 14
+    layers: [building, housenumber, poi, transportation, transportation_name]
+    contains:
+      - { layer: transportation, class: [primary, secondary, tertiary, minor] }
+  - name: belfast-place-label
+    lon: -5.9301
+    lat: 54.5964
+    z: 10
+    layers: [place, water]
+    contains:
+      - { layer: place, class: city, name: Belfast }
+  # Shetland: islands surrounded by ocean water polygons.
+  - name: shetland-lerwick
+    lon: -1.1450
+    lat: 60.1550
+    z: 14
+    layers: [water, building, transportation]
+    contains:
+      - { layer: water, class: ocean }
+  - name: shetland-mainland
+    lon: -1.2500
+    lat: 60.3000
+    z: 9
+    layers: [water, place, transportation]
+    contains:
+      - { layer: water, class: ocean }
+  # Thames estuary: coastline / ocean polygons meet the river.
+  - name: thames-estuary-southend
+    lon: 0.7100
+    lat: 51.5300
+    z: 13
+    layers: [water, transportation, building]
+    contains:
+      - { layer: water, class: ocean }
+  - name: thames-estuary-mouth
+    lon: 0.9000
+    lat: 51.5000
+    z: 9
+    layers: [water, place]
+    contains:
+      - { layer: water, class: ocean }
+
+# Render views for the browser tests and the 10-view manual review (center lon/lat, zoom).
+views:
+  - name: overview
+    center: [-3.5, 55.0]
+    zoom: 5.5
+  - name: london-central
+    center: [-0.1276, 51.5074]
+    zoom: 15
+  - name: london-overzoom
+    center: [-0.1419, 51.5014]
+    zoom: 17.5
+  - name: thames-estuary
+    center: [0.75, 51.50]
+    zoom: 10
+  - name: edinburgh
+    center: [-3.19, 55.95]
+    zoom: 12
+  - name: belfast
+    center: [-5.93, 54.597]
+    zoom: 13
+  - name: snowdon
+    center: [-4.076, 53.068]
+    zoom: 14
+  - name: lake-district
+    center: [-3.15, 54.48]
+    zoom: 11.5
+  - name: shetland
+    center: [-1.30, 60.35]
+    zoom: 9
+  - name: lands-end
+    center: [-5.70, 50.07]
+    zoom: 12

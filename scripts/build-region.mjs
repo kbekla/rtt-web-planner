@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   ANCILLARY_DIR, FACTORY, PLANETILER_JAR, PMTILES_BIN, REPO,
   canonicalJson, loadRegion, loadRegionLock, readTable, regionConfigPath, run, sha256, sha256File,
@@ -109,11 +109,19 @@ log(`build ${buildId}: planetiler (heap ${heap}, ${threads} threads) -> ${pmtile
 const logFile = path.join(outDir, 'build.log');
 const logFd = fs.openSync(logFile, 'w');
 const started = Date.now();
-// /usr/bin/time reports peak RSS on its last stderr line.
-const res = spawnSync('/usr/bin/time', ['-f', 'PEAK_RSS_KB=%M', 'java', ...args], {
-  cwd: tmpDir,
-  stdio: ['ignore', logFd, logFd],
+// /usr/bin/time reports peak RSS on its last stderr line. Scratch disk usage is
+// sampled while Planetiler runs (it doesn't report its own peak).
+const dirBytes = (dir) => Number(spawnSync('du', ['-sb', dir], { encoding: 'utf8' }).stdout.split('\t')[0]) || 0;
+let peakScratchBytes = 0;
+const sampler = setInterval(() => { peakScratchBytes = Math.max(peakScratchBytes, dirBytes(tmpDir)); }, 5000);
+const res = await new Promise((resolve) => {
+  const child = spawn('/usr/bin/time', ['-f', 'PEAK_RSS_KB=%M', 'java', ...args], {
+    cwd: tmpDir,
+    stdio: ['ignore', logFd, logFd],
+  });
+  child.on('close', (status) => resolve({ status }));
 });
+clearInterval(sampler);
 fs.closeSync(logFd);
 const seconds = (Date.now() - started) / 1000;
 fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -162,9 +170,9 @@ const manifest = {
     },
     pmtiles_verify: 'ok',
   },
-  stats: { seconds, peak_rss_kb: peakRssKb, data_errors: dataErrors },
+  stats: { seconds, peak_rss_kb: peakRssKb, peak_scratch_bytes: peakScratchBytes, data_errors: dataErrors },
 };
 fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-log(`done in ${seconds.toFixed(1)}s, ${manifest.output.bytes} bytes, peak RSS ${(peakRssKb / 1024).toFixed(0)} MB`);
+log(`done in ${seconds.toFixed(1)}s, ${manifest.output.bytes} bytes, peak RSS ${(peakRssKb / 1024).toFixed(0)} MB, peak scratch ${(peakScratchBytes / 2 ** 20).toFixed(0)} MB`);
 log(`sha256 ${manifest.output.sha256}`);
 console.log(outDir);

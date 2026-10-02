@@ -1,0 +1,12 @@
+{
+  "region": "uk",
+  "file": "2026-09-30-faaf4961d753.osm.pbf",
+  "sha256": "faaf4961d753bd42eb6a9b61d893494533aa9e7fadb0427d5f57e024b859e8f4",
+  "md5": "0b21cf8fb0833ee0f4e79bff2165facd",
+  "bytes": 2263969331,
+  "source_url": "https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf",
+  "replication_timestamp": "2026-09-30T20:22:42Z",
+  "replication_sequence": "1042",
+  "replication_url": "https://download.geofabrik.de/europe/united-kingdom-updates",
+  "fetched_at": "2026-10-02T13:03:34.394Z"
+}

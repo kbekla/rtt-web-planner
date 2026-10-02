@@ -34,6 +34,8 @@
     }
   },
   "open_fields": {
-    "poi.class": "layers/poi/poi.yaml: 'If there is no more general class for the subclass this field will contain the same value as subclass' (poi_class() in class.sql) \u2014 open set, validated as non-empty string."
+    "poi.class": "layers/poi/poi.yaml: 'If there is no more general class for the subclass this field will contain the same value as subclass' (poi_class() in class.sql) \u2014 open set, validated as non-empty string.",
+    "boundary.disputed_name": "layers/boundary/boundary.yaml:37-42 ('extracted from border relation in OSM, without spaces'; the listed values are 'Value examples from Asian OSM pbf extract'); boundary.sql:308-316,484 (disputed_name = edit_name(name)) \u2014 open set, e.g. 'Louth/Down' on the Irish border.",
+    "landuse.class": "layers/landuse/landuse.sql:235-242 (class = landuse_unify(COALESCE(landuse, amenity, leisure, tourism, place, waterway))) with the mapping.yaml:73-106 filter matching on any one key: a polygon admitted by e.g. amenity=school but also tagged landuse=education gets class 'education'. Open set (UK 2026-09-30 snapshot: education, park, religious, recreation_ground, healthcare, ...)."
   }
 }
