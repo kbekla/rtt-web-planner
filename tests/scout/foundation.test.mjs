@@ -7,6 +7,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
 import { openCanonicalMasterReadOnly } from '../../scripts/scout/canonical-readonly.mjs';
+import { parseNvidiaTelemetry, nvidiaQueryAllowed } from '../../scripts/lib/telemetry.mjs';
+import { zohoSmtpDefaults } from '../../scripts/scout/zoho-smtp.mjs';
 import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, ScoutHeavyWorkCoordinator, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rtt-scout-'));
@@ -221,6 +223,18 @@ test('host snapshot reuses factory job state and detects loaded Ollama without s
   assert.equal(snapshot.factory_state, 'building'); assert.equal(snapshot.planetiler_active, false);
   assert.equal(snapshot.local_ai_active, true); assert.equal(snapshot.other_heavy_lease, null);
 });
+test('host telemetry reports sampler sources/capacity and additional host contention signals', () => {
+  const source = { cpu_temp: '/sys/hwmon/cpu', nvme_temp: '/sys/hwmon/nvme', igpu: '/sys/drm/amdgpu', dgpu: null };
+  const capacity = { mem_total_mb: 16000, swap_total_mb: 4000, igpu_vram_total_mb: 512 };
+  const root = path.join(tmp, 'host-telemetry'); fs.mkdirSync(path.join(root, 'queue', 'running'), { recursive: true });
+  const snapshot = readHostSnapshot({ factoryDir: root, sampler: { sensors: source, host: capacity, sample: () => ({ load1: 1, mem_used_mb: 7000, swap_used_mb: 0 }) },
+    commands: [{ pid: 12, cmdline: 'java -jar planetiler.jar' }, { pid: 13, cmdline: 'llama-server --model local.gguf' }], runCommand: () => null });
+  assert.deepEqual(snapshot.sensor_sources, source); assert.deepEqual(snapshot.host_capacity, capacity);
+  assert.equal(snapshot.planetiler_active, true); assert.equal(snapshot.local_ai_active, true);
+  assert.equal(snapshot.factory_state, 'building'); assert.ok(Number.isInteger(snapshot.mem_available_mb));
+  assert.ok(Number.isInteger(snapshot.mem_total_mb)); assert.ok(Number.isInteger(snapshot.swap_total_mb));
+  assert.ok(Number.isInteger(snapshot.swap_free_mb)); assert.ok(snapshot.disk.free_bytes > 0);
+});
 test('host snapshot fails closed for unknown Ollama state and corrupt shared lease', () => {
   const root = path.join(tmp, 'host-unknown'), leasePath = path.join(root, 'state', 'heavy-work.json'); fs.mkdirSync(path.dirname(leasePath), { recursive: true });
   fs.writeFileSync(leasePath, '{corrupt');
@@ -245,6 +259,21 @@ test('thermal hysteresis requires sustained cooling before resuming heavy work',
   assert.equal(g.update({ cpu_temp_c: 91 }, 10_000).state, 'WARM'); assert.equal(g.update({ cpu_temp_c: 91 }, 20_000).state, 'HOT');
   assert.equal(g.update({ cpu_temp_c: 82 }, 30_000).allow_heavy, false); assert.equal(g.update({ cpu_temp_c: 82 }, 40_000).allow_heavy, false);
   assert.equal(g.update({ cpu_temp_c: 82 }, 50_000).allow_heavy, true);
+});
+test('thermal governor uses the hottest available GPU sensor and NVIDIA power is not a thermal input', () => {
+  const g = new ThermalGovernor({ warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65,
+    hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, hot_entry_samples: 1, sample_interval_seconds: 0 });
+  assert.equal(g.update({ cpu_temp_c: 60, igpu: { temp_c: 92 }, dgpu: { temp_c: 60, power_w: 170 } }, 10_000).state, 'WARM');
+  assert.equal(g.update({ cpu_temp_c: 60, igpu: { temp_c: 92 }, dgpu: { temp_c: 60, power_w: 170 } }, 20_000).state, 'HOT');
+  assert.equal(g.update({ cpu_temp_c: 60, igpu: { temp_c: 60 }, dgpu: { temp_c: 60, power_w: 170 } }, 30_000).state, 'HOT', 'one cool sample must not clear HOT');
+});
+test('NVIDIA telemetry parses temperature/clocks/utilization and never imports bogus power draw', () => {
+  const parsed = parseNvidiaTelemetry('56, 22, 1536, 300, 810, SW Power Cap');
+  assert.deepEqual(parsed, { temp_c: 56, busy_pct: 22, vram_used_mb: 1536, core_clock_mhz: 300,
+    memory_clock_mhz: 810, throttle_reasons: 'SW Power Cap' });
+  assert.equal(Object.hasOwn(parsed, 'power_w'), false);
+  assert.equal(nvidiaQueryAllowed('active'), true); assert.equal(nvidiaQueryAllowed('suspended'), false);
+  assert.equal(parseNvidiaTelemetry('N/A, N/A, 0, N/A, N/A, Not Active').temp_c, null);
 });
 test('HOT needs sustained samples while CRITICAL immediately holds', () => {
   const g = new ThermalGovernor({ hot_entry_samples: 3 });
@@ -344,6 +373,15 @@ test('corrupt persistent queue enters durable RED and refuses another worker pas
 test('notifications queue a digest without credentials', () => {
   const c = new NotificationCenter(path.join(tmp, 'digest', 'state.json'));
   assert.equal(c.digest([{ candidates: 2 }]), 1); assert.deepEqual(c.state().digest, [{ candidates: 2 }]);
+});
+test('Zoho SMTP defaults expose configuration and credential path but no credential value', () => {
+  assert.deepEqual({ host: zohoSmtpDefaults.host, port: zohoSmtpDefaults.port, username: zohoSmtpDefaults.username,
+    from: zohoSmtpDefaults.from, fromName: zohoSmtpDefaults.fromName }, {
+    host: 'smtp.zoho.eu', port: 587, username: 'info@roadtrailandtide.com',
+    from: 'scouta17@roadtrailandtide.com', fromName: 'RT&T Scout A17',
+  });
+  assert.equal(zohoSmtpDefaults.credentialFile, '/home/karl/.config/rtt-scout/credentials/zoho-smtp-password');
+  assert.equal(Object.hasOwn(zohoSmtpDefaults, 'password'), false);
 });
 test('private Scout files stay outside tracked public data and the trail whitelist stays unchanged', () => {
   const store = new ScoutStore(path.join(tmp, 'private-check')); const c = cand([[0, 0], [0.01, 0]]); store.saveCandidate(c);

@@ -360,7 +360,8 @@ export function classifyHost(snapshot, history = [], policy = {}) {
   const highSwap = sustained('swap_used_mb', policy.max_swap_used_mb, policy.sustained_swap_samples);
   const lowMemory = snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048);
   const contention = snapshot.factory_state === 'building' || snapshot.planetiler_active || snapshot.other_heavy_lease ||
-    snapshot.local_ai_active || (snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048)) ||
+    snapshot.local_ai_active || snapshot.other_heavy_workload_active ||
+    (snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048)) ||
     highSwap || highLoad || lowDisk;
   const unsafeHost = lowDisk || (lowMemory && snapshot.mem_available_mb < (policy.red_mem_available_mb ?? 512));
   return { thermal, contention, allow_heavy: thermal === 'NORMAL' && !contention,
@@ -373,7 +374,8 @@ export class ThermalGovernor {
   constructor(policy = {}, state = {}) { this.policy = { ...SCOUT_CONFIG.resource_governor.thermal, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; this.hotSamples = state.hot_samples ?? 0; this.hotSince = state.hot_since_ms ?? null; }
   serialize() { return { state: this.state, cool: this.cool, hot_samples: this.hotSamples, hot_since_ms: this.hotSince, updated_at: now() }; }
   update(s, now_ms = Date.now()) {
-    const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity, gpu = s.dgpu?.temp_c ?? s.igpu?.temp_c ?? -Infinity;
+    const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity;
+    const gpu = Math.max(-Infinity, ...[s.dgpu?.temp_c, s.igpu?.temp_c].filter(Number.isFinite));
     const requested = cpu >= p.critical_cpu_c || nvme >= p.critical_nvme_c ? 'CRITICAL'
       : cpu >= p.hot_cpu_c || nvme >= p.hot_nvme_c || gpu >= p.gpu_hot_c ? 'HOT'
         : cpu >= p.warm_cpu_c || nvme >= p.warm_nvme_c ? 'WARM' : 'NORMAL';

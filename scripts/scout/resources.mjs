@@ -16,7 +16,12 @@ function processCommands() {
   }
   return list;
 }
-export function readHostSnapshot({ factoryDir = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-factory'), sample = createSampler().sample, commands = processCommands(), runCommand = run } = {}) {
+export function readHostSnapshot(options = {}) {
+  const sampler = options.sampler ?? (options.sample ? null : createSampler());
+  const factoryDir = options.factoryDir ?? process.env.FACTORY_DIR ?? path.join(os.homedir(), 'rtt-map-factory');
+  const sample = options.sample ?? sampler?.sample ?? (() => ({}));
+  const commands = options.commands ?? processCommands();
+  const runCommand = options.runCommand ?? run;
   const telemetry = sample(null);
   const mem = Object.fromEntries((() => { try { return fs.readFileSync('/proc/meminfo', 'utf8').split('\n'); } catch { return []; } })()
     .map((l) => /^([A-Za-z]+):\s+(\d+)/.exec(l)).filter(Boolean).map((m) => [m[1], Number(m[2])]));
@@ -25,22 +30,37 @@ export function readHostSnapshot({ factoryDir = process.env.FACTORY_DIR || path.
   const planetiler = commands.some((p) => /planetiler|build-region\.mjs/.test(p.cmdline));
   const runningJobs = path.join(factoryDir, 'queue', 'running');
   const factoryJob = fs.existsSync(runningJobs) && fs.readdirSync(runningJobs).some((f) => f.endsWith('.json'));
-  const ollamaService = active('rtt-ollama.service') || commands.some((p) => /ollama serve/.test(p.cmdline));
+  const ollamaService = active('rtt-ollama.service') || commands.some((p) => /ollama\s+serve/.test(p.cmdline));
   const ollama = ollamaService ? runCommand('ollama', ['ps']) : null;
-  const localAI = ollamaService && (ollama === null || ollama.split('\n').filter((line) => line.trim()).length > 1);
+  const localAIProcess = commands.some((p) => /ollama\s+runner|llama[-_]server|vllm|llm-worker/i.test(p.cmdline));
+  const localAI = localAIProcess || (ollamaService && (ollama === null || ollama.split('\n').filter((line) => line.trim()).length > 1));
+  const otherHeavy = commands.filter((p) => /java.*planetiler|check-repro|geometry-match/i.test(p.cmdline))
+    .map(({ pid, cmdline }) => ({ pid, cmdline: cmdline.slice(0, 240) }));
+  const otherHeavyActive = otherHeavy.length > 0;
   const leaseFile = path.join(factoryDir, 'state', 'heavy-work.json');
   let lease = null; const leaseExists = fs.existsSync(leaseFile);
   try { lease = JSON.parse(fs.readFileSync(leaseFile, 'utf8')); } catch { /* unreadable existing leases fail closed below */ }
   const bootId = (() => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return null; } })();
   const validCurrentBootLease = lease && lease.boot_id === bootId;
+  const workerFile = path.join(factoryDir, 'state', 'worker.json');
+  let factoryWorker = null; try { factoryWorker = JSON.parse(fs.readFileSync(workerFile, 'utf8')); } catch { /* worker state unavailable */ }
   let disk = null;
   try { const s = fs.statfsSync(factoryDir); disk = { free_bytes: s.bavail * s.bsize, total_bytes: s.blocks * s.bsize }; } catch { /* not mounted */ }
   return { ...telemetry,
+    sensor_sources: options.sensor_sources ?? sampler?.sensors ?? null,
+    host_capacity: options.host_capacity ?? sampler?.host ?? null,
     mem_available_mb: mem.MemAvailable == null ? null : Math.round(mem.MemAvailable / 1024),
+    mem_total_mb: mem.MemTotal == null ? null : Math.round(mem.MemTotal / 1024),
+    swap_total_mb: mem.SwapTotal == null ? null : Math.round(mem.SwapTotal / 1024),
+    swap_free_mb: mem.SwapFree == null ? null : Math.round(mem.SwapFree / 1024),
     factory_state: planetiler || factoryJob ? 'building' : factoryService ? 'active' : 'idle',
-    planetiler_active: planetiler, local_ai_active: localAI,
+    factory_service_active: factoryService, factory_job_active: factoryJob,
+    factory_worker: factoryWorker ? { pid: factoryWorker.pid ?? null, phase: factoryWorker.phase ?? null, job: factoryWorker.job ?? null,
+      heartbeat_at: factoryWorker.heartbeat_at ?? null } : null,
+    planetiler_active: planetiler, local_ai_active: localAI, other_heavy_workload_active: otherHeavyActive, ollama_service_active: ollamaService,
     other_heavy_lease: validCurrentBootLease ? { owner: lease.owner, pid: lease.pid }
       : leaseExists && !lease ? { owner: 'unknown', status: 'unreadable' } : null,
     disk, scratch_bytes: telemetry.scratch_bytes ?? null,
-    other_heavy_processes: commands.filter((p) => /ollama|java.*planetiler|check-repro|geometry-match/i.test(p.cmdline)).map(({ pid, cmdline }) => ({ pid, cmdline: cmdline.slice(0, 240) })) };
+    other_heavy_processes: [...otherHeavy, ...commands.filter((p) => /ollama/.test(p.cmdline) && !/ollama\s+serve/.test(p.cmdline))
+      .map(({ pid, cmdline }) => ({ pid, cmdline: cmdline.slice(0, 240) }))] };
 }

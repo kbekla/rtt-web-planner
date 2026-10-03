@@ -1,9 +1,10 @@
 // Lightweight host telemetry sampled while a build runs.
 //
-// Each sample reads a handful of sysfs/procfs files (CPU, iGPU and NVMe
-// temperatures, iGPU load and VRAM, RAM and swap) plus `du` of the scratch dir.
-// The NVIDIA dGPU is queried with nvidia-smi only when it is already awake
-// (runtime PM "active"), so sampling never wakes it. Missing sensors read as null.
+// Each sample reads sysfs/procfs (CPU, iGPU and NVMe temperatures, iGPU load
+// and VRAM, RAM, swap and load) plus optional scratch size. NVIDIA is queried
+// for temperature, utilization, clocks and throttle reasons only when runtime
+// PM is already "active"; power.draw is intentionally excluded. Missing
+// sensors read as null.
 // The sampler times itself and reports its own cost in the summary.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,6 +33,23 @@ function findDrmDevice(driver) {
   return null;
 }
 
+// nvidia-smi fields deliberately exclude power.draw: this A17's GTX 1650 has
+// a known bogus ~170 W report despite its lower configured power limit.
+export function parseNvidiaTelemetry(csv) {
+  const fields = String(csv ?? '').trim().split(',').map((s) => s.trim());
+  if (fields.length < 5) return null;
+  return {
+    temp_c: num(fields[0]),
+    busy_pct: num(fields[1]),
+    vram_used_mb: num(fields[2]),
+    core_clock_mhz: num(fields[3]),
+    memory_clock_mhz: num(fields[4]),
+    throttle_reasons: fields[5] && !/^n\/a$/i.test(fields[5]) ? fields[5] : null,
+  };
+}
+
+export function nvidiaQueryAllowed(runtimeStatus) { return runtimeStatus === 'active'; }
+
 /** Locate sensors once; returns a sample() function. */
 export function createSampler() {
   const cpu = findHwmon('k10temp') ?? findHwmon('coretemp');
@@ -39,23 +57,24 @@ export function createSampler() {
   const amd = findDrmDevice('amdgpu');
   const amdHwmon = findHwmon('amdgpu');
   const nvidia = findDrmDevice('nvidia');
-  const hasSmi = nvidia && spawnSync('nvidia-smi', ['-L'], { encoding: 'utf8' }).status === 0;
+  const nvidiaRuntime = nvidia ? read(path.join(nvidia, 'power', 'runtime_status')) : null;
+  const hasSmi = nvidiaQueryAllowed(nvidiaRuntime) && spawnSync('nvidia-smi', ['-L'], { encoding: 'utf8', timeout: 1500 }).status === 0;
   const milliC = (dir) => (dir ? num(read(path.join(dir, 'temp1_input'))) : null);
   const sensors = {
     cpu_temp: cpu && `${cpu}/temp1_input (${read(`${cpu}/temp1_label`) ?? 'temp1'})`,
     nvme_temp: nvme && `${nvme}/temp1_input`,
     igpu: amd,
-    dgpu: hasSmi ? `${nvidia} via nvidia-smi (only when runtime PM is active)` : null,
+    dgpu: nvidia ? { device: nvidia, runtime_pm: nvidiaRuntime, query_available: Boolean(hasSmi) } : null,
   };
 
   function nvidiaSample() {
     if (!hasSmi) return null;
     const pm = read(path.join(nvidia, 'power', 'runtime_status'));
-    if (pm !== 'active') return { runtime_pm: pm, temp_c: null, busy_pct: null, vram_used_mb: null };
-    const res = spawnSync('nvidia-smi', ['--query-gpu=temperature.gpu,utilization.gpu,memory.used',
+    if (!nvidiaQueryAllowed(pm)) return { runtime_pm: pm, temp_c: null, busy_pct: null, vram_used_mb: null,
+      core_clock_mhz: null, memory_clock_mhz: null, throttle_reasons: null };
+    const clockRes = spawnSync('nvidia-smi', ['--query-gpu=temperature.gpu,utilization.gpu,memory.used,clocks.current.sm,clocks.current.memory,clocks_throttle_reasons.active',
       '--format=csv,noheader,nounits'], { encoding: 'utf8', timeout: 2000 });
-    const [t, u, m] = (res.stdout ?? '').split(',').map((s) => num(s.trim()));
-    return { runtime_pm: pm, temp_c: t ?? null, busy_pct: u ?? null, vram_used_mb: m ?? null };
+    return { runtime_pm: pm, ...(clockRes.status === 0 ? parseNvidiaTelemetry(clockRes.stdout) : null) };
   }
 
   function meminfo() {
