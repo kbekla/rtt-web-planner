@@ -58,6 +58,6 @@ M2A has a read-only `scoutctl host` probe, fail-closed factory/Ollama/lease dete
 
 M2B must use a selected real provider, recipient and securely mounted credentials. Delivery tests should first target a controlled test inbox/number; no production credentials are included in this repository.
 
-M2C must receive an explicit canonical-master path or read-only handle. The adapter must validate the expected 14,315-feature input and compute a checksum before matching; it has no write path to the master, staging files, or publication output.
+M2C has an explicit-input read-only bridge in `scripts/scout/canonical-readonly.mjs`. It has no fallback path, rejects symlinks/non-regular files, verifies exactly 14,315 unique `rtt_id` features, checks file stability during read, computes SHA-256, freezes the loaded master and exposes matching only. Its synthetic fixture proves the matching path does not alter supplied bytes. The real canonical path has not been opened; live validation still requires Karl to supply it explicitly.
 
 M2D must name one approved source and document its endpoint, reuse terms, politeness and provenance. Its adapter may only enqueue discovery observations into private staging. No source is selected or activated here, and no canonical import/promotion path is added.

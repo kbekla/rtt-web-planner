@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
+import { openCanonicalMasterReadOnly } from '../../scripts/scout/canonical-readonly.mjs';
 import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, ScoutHeavyWorkCoordinator, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rtt-scout-'));
@@ -348,6 +350,23 @@ test('private Scout files stay outside tracked public data and the trail whiteli
   assert.ok(fs.existsSync(path.join(store.state, 'candidates', `${c.candidate_id}.json`)));
   const schema = JSON.parse(fs.readFileSync(new URL('../../schema/rtt-trails.schema.json', import.meta.url)));
   assert.ok(JSON.stringify(schema).includes('provenance')); assert.equal(c.observations[0].source_key, 'synthetic-test');
+});
+
+test('canonical master integration requires explicit 14,315-feature input and only matches read-only', () => {
+  const f = path.join(tmp, 'explicit-canonical-master.geojson');
+  const features = Array.from({ length: 14315 }, (_, i) => ({ type: 'Feature', properties: { rtt_id: `rtt-trail-${String(i).padStart(6, '0')}` },
+    geometry: i === 0 ? line([[-1, 50], [-0.999, 50]]) : i === 1 ? line([[-1, 50.00001], [-0.999, 50.00001]]) : { type: 'Point', coordinates: [i % 170, -80 + (i % 160)] } }));
+  const content = JSON.stringify({ type: 'FeatureCollection', features }); fs.writeFileSync(f, content);
+  const before = crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+  assert.throws(() => openCanonicalMasterReadOnly(), /supplied explicitly/);
+  const link = `${f}.link`; fs.symlinkSync(f, link);
+  assert.throws(() => openCanonicalMasterReadOnly(link), /cannot open explicit canonical master read-only/);
+  const master = openCanonicalMasterReadOnly(f);
+  assert.equal(master.feature_count, 14315); assert.equal(master.sha256, before);
+  assert.deepEqual(Object.keys(master).sort(), ['feature_count', 'match', 'sha256', 'source_path'].sort(), 'matching API exposes no master record collection or write method');
+  const result = master.match(cand([[-1, 50], [-0.999, 50]]));
+  assert.equal(result.type, 'EXACT_EXISTING'); assert.deepEqual(result.rtt_ids, ['rtt-trail-000000']);
+  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'), before, 'matching must not mutate the supplied master');
 });
 
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
