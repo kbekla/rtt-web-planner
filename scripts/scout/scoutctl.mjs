@@ -3,14 +3,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ScoutStore, makeHeartbeat, normalizeObservation, candidateFromObservation, assessEvidence, matchMaster } from './core.mjs';
+import { ScoutStore } from './core.mjs';
+import { readHostSnapshot } from './resources.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const factory = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-factory');
 const store = new ScoutStore(factory);
 const [cmd, ...args] = process.argv.slice(2);
-const usage = 'scoutctl status|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>';
+const usage = 'scoutctl status|host|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>';
 if (cmd === 'status') console.log(JSON.stringify(store.status(), null, 2));
+else if (cmd === 'host') console.log(JSON.stringify(readHostSnapshot(), null, 2));
 else if (cmd === 'list') {
   try { console.log(JSON.stringify(store.list(args[0] || 'reviews'), null, 2)); }
   catch (e) { console.error(e.message); process.exitCode = 2; }

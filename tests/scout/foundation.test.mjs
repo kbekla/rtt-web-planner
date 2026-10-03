@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
-import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
+import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, ScoutHeavyWorkCoordinator, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rtt-scout-'));
 const line = (coords) => ({ type: 'LineString', coordinates: coords });
@@ -193,10 +193,18 @@ test('deterministic processing and candidate IDs repeat identically', () => {
   assert.equal(a.candidate_id, b.candidate_id); assert.deepEqual(a, b);
 });
 test('factory build, other heavy lease, RAM/swap pressure, and local AI prevent Scout heavy work', () => {
-  for (const s of [{ factory_state: 'building' }, { other_heavy_lease: true }, { mem_available_mb: 1000 }, { swap_used_mb: 3000 }, { local_ai_active: true }]) {
-    const r = classifyHost({ ...s, mem_available_mb: s.mem_available_mb ?? 6000, swap_used_mb: s.swap_used_mb ?? 0 });
+  for (const s of [{ factory_state: 'building' }, { other_heavy_lease: true }, { mem_available_mb: 1000 }, { local_ai_active: true }]) {
+    const r = classifyHost({ ...s, mem_available_mb: s.mem_available_mb ?? 6000, swap_used_mb: 0 });
     assert.equal(r.allow_heavy, false);
   }
+  const nowMs = 1_800_000_000_000, at = (delta) => new Date(nowMs - delta).toISOString();
+  assert.equal(classifyHost({ mem_available_mb: 6000, swap_used_mb: 3000, observed_at: at(0) }).allow_heavy, true, 'one swap sample does not trip contention');
+  assert.equal(classifyHost({ mem_available_mb: 6000, swap_used_mb: 3000, observed_at: at(0) },
+    [{ swap_used_mb: 3000, observed_at: at(10_000) }, { swap_used_mb: 3000, observed_at: at(20_000) }]).allow_heavy, false);
+  assert.equal(classifyHost({ mem_available_mb: 6000, swap_used_mb: 0, load1: 13, observed_at: at(0) },
+    [{ load1: 13, observed_at: at(10_000) }, { load1: 13, observed_at: at(20_000) }]).allow_heavy, false);
+  assert.equal(classifyHost({ mem_available_mb: 6000, swap_used_mb: 0, load1: 13, observed_at: at(0) },
+    [{ load1: 13, observed_at: at(1_000) }, { load1: 13, observed_at: at(2_000) }]).allow_heavy, true, 'rapid samples are not sustained load');
   assert.equal(classifyHost({ factory_state: 'idle', mem_available_mb: 6000, swap_used_mb: 0 }).allow_heavy, true);
 });
 test('Planetiler starting while heavy work is active causes a yield decision', () => {
@@ -211,6 +219,14 @@ test('host snapshot reuses factory job state and detects loaded Ollama without s
   assert.equal(snapshot.factory_state, 'building'); assert.equal(snapshot.planetiler_active, false);
   assert.equal(snapshot.local_ai_active, true); assert.equal(snapshot.other_heavy_lease, null);
 });
+test('host snapshot fails closed for unknown Ollama state and corrupt shared lease', () => {
+  const root = path.join(tmp, 'host-unknown'), leasePath = path.join(root, 'state', 'heavy-work.json'); fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+  fs.writeFileSync(leasePath, '{corrupt');
+  const snapshot = readHostSnapshot({ factoryDir: root, sample: () => ({ cpu_temp_c: 50, nvme_temp_c: 40 }),
+    commands: [{ pid: 1, cmdline: 'ollama serve' }], runCommand: () => null });
+  assert.equal(snapshot.local_ai_active, true); assert.deepEqual(snapshot.other_heavy_lease, { owner: 'unknown', status: 'unreadable' });
+  assert.equal(classifyHost({ ...snapshot, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
+});
 test('thermal warm, hot, critical states pause in increasing severity; bogus NVIDIA power is ignored', () => {
   assert.equal(classifyHost({ cpu_temp_c: 86 }).thermal, 'WARM');
   assert.equal(classifyHost({ cpu_temp_c: 91 }).thermal, 'HOT');
@@ -223,9 +239,17 @@ test('temperature trend considers recent history, while policy can set threshold
 });
 test('thermal hysteresis requires sustained cooling before resuming heavy work', () => {
   const g = new ThermalGovernor({ warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 3 });
-  assert.equal(g.update({ cpu_temp_c: 91 }).state, 'HOT');
-  assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, false); assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, false);
-  assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, true);
+  assert.equal(g.update({ cpu_temp_c: 91 }, 0).state, 'WARM');
+  assert.equal(g.update({ cpu_temp_c: 91 }, 10_000).state, 'WARM'); assert.equal(g.update({ cpu_temp_c: 91 }, 20_000).state, 'HOT');
+  assert.equal(g.update({ cpu_temp_c: 82 }, 30_000).allow_heavy, false); assert.equal(g.update({ cpu_temp_c: 82 }, 40_000).allow_heavy, false);
+  assert.equal(g.update({ cpu_temp_c: 82 }, 50_000).allow_heavy, true);
+});
+test('HOT needs sustained samples while CRITICAL immediately holds', () => {
+  const g = new ThermalGovernor({ hot_entry_samples: 3 });
+  assert.equal(g.update({ cpu_temp_c: 91 }, 1_000).state, 'WARM');
+  assert.equal(g.update({ cpu_temp_c: 91 }, 11_000).state, 'WARM');
+  assert.equal(g.update({ cpu_temp_c: 91 }, 21_000).state, 'HOT');
+  assert.equal(g.update({ cpu_temp_c: 98 }, 22_000).state, 'CRITICAL');
 });
 test('resource governor persists thermal state and defers work through a restart', () => {
   const store = new ScoutStore(path.join(tmp, 'resource-persist'));
@@ -234,15 +258,47 @@ test('resource governor persists thermal state and defers work through a restart
   assert.equal(governor.evaluate({ cpu_temp_c: 91, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
   governor = new ScoutResourceGovernor(store, { thermal: { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98,
     warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 2 } });
-  assert.equal(governor.evaluate({ cpu_temp_c: 82, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
-  const recovered = governor.evaluate({ cpu_temp_c: 82, mem_available_mb: 8000, swap_used_mb: 0 });
+  assert.equal(governor.evaluate({ cpu_temp_c: 79, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
+  const recovered = governor.evaluate({ cpu_temp_c: 79, mem_available_mb: 8000, swap_used_mb: 0 });
   assert.equal(recovered.allow_heavy, true); assert.equal(store.read('resource.json').state, 'GREEN');
+});
+test('cooperative heavy work is gated, checkpoints on factory/thermal holds, and resumes after cooldown', async () => {
+  const root = path.join(tmp, 'cooperative-work'), store = new ScoutStore(root);
+  const lease = new HeavyWorkLease(path.join(root, 'state', 'heavy-work.json'));
+  const resources = new ScoutResourceGovernor(store, { thermal: { hot_entry_samples: 2, recovery_samples: 2 } });
+  const saved = [], stoppedAI = [];
+  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-bulk',
+    checkpoint: async () => ({ offset: saved.length + 10 }), persistCheckpoint: async (point) => saved.push(point),
+    unloadAI: async () => stoppedAI.push(true) });
+  const cool = { factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0, cpu_temp_c: 70, nvme_temp_c: 40 };
+  assert.equal((await worker.start({ ...cool, factory_state: 'building' })).started, false);
+  const started = await worker.start(cool); assert.equal(started.started, true);
+  const yielded = await worker.observe({ ...cool, factory_state: 'building' });
+  assert.equal(yielded.yielded, true); assert.equal(yielded.lease_released, true); assert.deepEqual(saved, [{ offset: 10 }]); assert.equal(stoppedAI.length, 1);
+  const resumed = await worker.start(cool, yielded.checkpoint); assert.equal(resumed.started, true); assert.deepEqual(resumed.resume_from, yielded.checkpoint);
+  assert.equal(worker.complete(), true);
+  assert.equal((await worker.start(cool)).started, true);
+  const warm = await worker.observe({ ...cool, cpu_temp_c: 86 }); assert.equal(warm.yielded, true); assert.equal(warm.decision.thermal, 'WARM');
+  assert.equal(worker.active, false);
+  assert.equal((await worker.start(cool)).started, false, 'hysteresis must keep work paused until sustained cooldown');
+  resources.evaluate(cool); resources.evaluate(cool);
+  assert.equal((await worker.start(cool)).started, true); assert.equal(worker.complete(), true);
 });
 test('heavy lease permits one owner and recovers a lease from a previous boot', () => {
   const f = path.join(tmp, 'lease', 'heavy.json'); let boot = 'boot-a';
   const lease = new HeavyWorkLease(f, { bootId: () => boot, alive: () => true });
   assert.equal(lease.acquire('planetiler', { pid: 1 }).ok, true); assert.equal(lease.acquire('scout', { pid: 2 }).ok, false);
   boot = 'boot-b'; assert.equal(lease.acquire('scout', { pid: 2 }).recovered, true);
+});
+test('Scout heavy work waits for another local AI lease owner', async () => {
+  const root = path.join(tmp, 'ai-heavy-lease'), store = new ScoutStore(root);
+  const lease = new HeavyWorkLease(path.join(root, 'state', 'heavy-work.json'));
+  assert.equal(lease.acquire('ollama').ok, true);
+  const resources = new ScoutResourceGovernor(store);
+  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-ai', checkpoint: async () => null });
+  const result = await worker.start({ factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0 });
+  assert.equal(result.started, false); assert.match(result.reason, /ollama/);
+  assert.equal(lease.release('ollama'), true);
 });
 test('worker lock ignores stale boot ownership', () => {
   const f = path.join(tmp, 'worker-lock', 'lock.json'); fs.mkdirSync(path.dirname(f), { recursive: true });

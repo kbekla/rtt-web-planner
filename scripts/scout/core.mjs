@@ -19,6 +19,8 @@ const resourcePolicy = {
   min_mem_available_mb: SCOUT_CONFIG.resource_governor.minimum_available_ram_mb,
   red_mem_available_mb: SCOUT_CONFIG.resource_governor.red_available_ram_mb,
   max_swap_used_mb: SCOUT_CONFIG.resource_governor.maximum_swap_used_mb,
+  sustained_load_samples: SCOUT_CONFIG.resource_governor.sustained_load_samples,
+  sustained_swap_samples: SCOUT_CONFIG.resource_governor.sustained_swap_samples,
   min_free_disk_bytes: SCOUT_CONFIG.resource_governor.minimum_free_disk_gb * 1e9,
   max_load1: SCOUT_CONFIG.resource_governor.maximum_load1,
   thermal: SCOUT_CONFIG.resource_governor.thermal,
@@ -348,11 +350,18 @@ export function classifyHost(snapshot, history = [], policy = {}) {
   else if (cpu >= t.hot_cpu_c || nvme >= t.hot_nvme_c || gpu >= t.gpu_hot_c) thermal = 'HOT';
   else if (cpu >= t.warm_cpu_c || nvme >= t.warm_nvme_c) thermal = 'WARM';
   const lowDisk = snapshot.disk?.free_bytes != null && snapshot.disk.free_bytes < (policy.min_free_disk_bytes ?? 20 * 1e9);
-  const highLoad = snapshot.load1 != null && snapshot.load1 > (policy.max_load1 ?? 12);
+  const trend = [snapshot, ...history].slice(0, policy.trend_window_samples ?? 4);
+  const sustained = (key, limit, required) => {
+    const high = trend.filter((x) => Number.isFinite(x[key]) && x[key] > limit);
+    const times = high.map((x) => Date.parse(x.observed_at)).filter(Number.isFinite);
+    return high.length >= required && times.length >= required && Math.max(...times) - Math.min(...times) >= (required - 1) * policy.thermal.sample_interval_seconds * 1000;
+  };
+  const highLoad = sustained('load1', policy.max_load1, policy.sustained_load_samples);
+  const highSwap = sustained('swap_used_mb', policy.max_swap_used_mb, policy.sustained_swap_samples);
   const lowMemory = snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048);
   const contention = snapshot.factory_state === 'building' || snapshot.planetiler_active || snapshot.other_heavy_lease ||
     snapshot.local_ai_active || (snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048)) ||
-    (snapshot.swap_used_mb != null && snapshot.swap_used_mb > (policy.max_swap_used_mb ?? 2048)) || highLoad || lowDisk;
+    highSwap || highLoad || lowDisk;
   const unsafeHost = lowDisk || (lowMemory && snapshot.mem_available_mb < (policy.red_mem_available_mb ?? 512));
   return { thermal, contention, allow_heavy: thermal === 'NORMAL' && !contention,
     allow_ai: thermal === 'NORMAL' && !contention && !snapshot.local_ai_active,
@@ -361,23 +370,31 @@ export function classifyHost(snapshot, history = [], policy = {}) {
 }
 
 export class ThermalGovernor {
-  constructor(policy = {}, state = {}) { this.policy = { ...SCOUT_CONFIG.resource_governor.thermal, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; }
-  serialize() { return { state: this.state, cool: this.cool, updated_at: now() }; }
-  update(s) {
+  constructor(policy = {}, state = {}) { this.policy = { ...SCOUT_CONFIG.resource_governor.thermal, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; this.hotSamples = state.hot_samples ?? 0; this.hotSince = state.hot_since_ms ?? null; }
+  serialize() { return { state: this.state, cool: this.cool, hot_samples: this.hotSamples, hot_since_ms: this.hotSince, updated_at: now() }; }
+  update(s, now_ms = Date.now()) {
     const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity, gpu = s.dgpu?.temp_c ?? s.igpu?.temp_c ?? -Infinity;
     const requested = cpu >= p.critical_cpu_c || nvme >= p.critical_nvme_c ? 'CRITICAL'
       : cpu >= p.hot_cpu_c || nvme >= p.hot_nvme_c || gpu >= p.gpu_hot_c ? 'HOT'
         : cpu >= p.warm_cpu_c || nvme >= p.warm_nvme_c ? 'WARM' : 'NORMAL';
-    const rank = { NORMAL: 0, WARM: 1, HOT: 2, CRITICAL: 3 };
-    if (rank[requested] > rank[this.state]) { this.state = requested; this.cool = 0; }
-    else if (requested === this.state) this.cool = 0;
+    if (requested === 'CRITICAL') { this.state = 'CRITICAL'; this.cool = 0; this.hotSamples = 0; this.hotSince = null; }
+    else if (requested === 'WARM' && this.state === 'NORMAL') { this.state = 'WARM'; this.cool = 0; this.hotSamples = 0; this.hotSince = null; }
+    else if (requested === 'HOT' && this.state === 'NORMAL') { this.state = 'WARM'; this.hotSamples = 1; this.hotSince = now_ms; this.cool = 0; }
+    else if (requested === 'HOT' && this.state === 'WARM') {
+      this.hotSince ??= now_ms;
+      this.hotSamples++;
+      const duration = Math.max(0, p.hot_entry_samples - 1) * p.sample_interval_seconds * 1000;
+      if (this.hotSamples >= p.hot_entry_samples && now_ms - this.hotSince >= duration) { this.state = 'HOT'; this.hotSamples = 0; this.hotSince = null; this.cool = 0; }
+    }
+    else if (requested === this.state) { this.cool = 0; this.hotSamples = 0; this.hotSince = null; }
     else {
+      this.hotSamples = 0; this.hotSince = null;
       const margin = p.recovery_margin_c;
       const below = this.state === 'CRITICAL' ? cpu < p.critical_cpu_c - margin && nvme < p.critical_nvme_c - margin
         : this.state === 'HOT' ? cpu < p.hot_cpu_c - margin && nvme < p.hot_nvme_c - margin && gpu < p.gpu_hot_c - margin
           : cpu < p.warm_cpu_c - margin && nvme < p.warm_nvme_c - margin;
       this.cool = below ? this.cool + 1 : 0;
-      if (this.cool >= p.recovery_samples) { this.state = requested; this.cool = 0; }
+      if (this.cool >= p.recovery_samples) { this.state = requested; this.cool = 0; this.hotSamples = 0; this.hotSince = null; }
     }
     return { state: this.state, allow_heavy: this.state === 'NORMAL', allow_ai: this.state === 'NORMAL', cool_samples: this.cool };
   }
@@ -388,22 +405,28 @@ export class ScoutResourceGovernor {
     this.store = store; this.policy = { ...resourcePolicy, ...policy, thermal: { ...resourcePolicy.thermal, ...(policy.thermal ?? {}) } };
     this.thermal = new ThermalGovernor(this.policy.thermal, store.read('thermal-state.json') ?? {});
   }
-  evaluate(snapshot) {
-    const tempFree = { ...snapshot, cpu_temp_c: null, nvme_temp_c: null, dgpu: null, igpu: null };
-    const base = classifyHost(tempFree, [], this.policy);
-    const thermal = this.thermal.update(snapshot);
+  evaluate(snapshot, at_ms = Date.now()) {
+    const observedAt = new Date(at_ms).toISOString();
+    const tempFree = { ...snapshot, observed_at: observedAt, cpu_temp_c: null, nvme_temp_c: null, dgpu: null, igpu: null };
+    const history = this.store.read('resource-history.json') ?? [];
+    const base = classifyHost(tempFree, history, this.policy);
+    const thermal = this.thermal.update(snapshot, at_ms);
     const decision = { ...base, thermal: thermal.state,
       allow_heavy: base.allow_heavy && thermal.allow_heavy,
       allow_ai: base.allow_ai && thermal.allow_ai,
       state: base.state === 'RED' || thermal.state === 'CRITICAL' ? 'RED' : base.state === 'AMBER' || thermal.state !== 'NORMAL' ? 'AMBER' : 'GREEN',
       reasons: [...base.reasons, ...(thermal.state !== 'NORMAL' ? [`thermal ${thermal.state}`] : [])],
-      observed_at: now(), snapshot: { factory_state: snapshot.factory_state ?? 'unknown', planetiler_active: Boolean(snapshot.planetiler_active),
+      observed_at: observedAt, snapshot: { factory_state: snapshot.factory_state ?? 'unknown', planetiler_active: Boolean(snapshot.planetiler_active),
         local_ai_active: Boolean(snapshot.local_ai_active), mem_available_mb: snapshot.mem_available_mb ?? null,
         swap_used_mb: snapshot.swap_used_mb ?? null, load1: snapshot.load1 ?? null,
         cpu_temp_c: snapshot.cpu_temp_c ?? null, nvme_temp_c: snapshot.nvme_temp_c ?? null,
         dgpu_temp_c: snapshot.dgpu?.temp_c ?? null, igpu_temp_c: snapshot.igpu?.temp_c ?? null,
         disk_free_bytes: snapshot.disk?.free_bytes ?? null } };
     this.store.atomic(path.join(this.store.state, 'thermal-state.json'), this.thermal.serialize());
+    this.store.atomic(path.join(this.store.state, 'resource-history.json'), [...history, {
+      load1: snapshot.load1 ?? null, swap_used_mb: snapshot.swap_used_mb ?? null,
+      mem_available_mb: snapshot.mem_available_mb ?? null, observed_at: observedAt,
+    }].slice(-4));
     this.store.atomic(path.join(this.store.state, 'resource.json'), decision);
     return decision;
   }
@@ -421,6 +444,38 @@ export class HeavyWorkLease {
     catch (e) { if (e.code === 'EEXIST') return { ok: false, owner: this.read()?.owner ?? 'unknown' }; throw e; }
   }
   release(owner) { const old = this.read(); if (old?.owner !== owner || old?.pid !== process.pid || old.boot_id !== this.bootId() || old.process_start !== this.processStart(process.pid)) return false; fs.rmSync(this.file, { force: true }); return true; }
+}
+
+// Cooperative workload boundary. Call observe() between bounded processing chunks;
+// the chunk callback must persist its own resumable checkpoint before yielding.
+export class ScoutHeavyWorkCoordinator {
+  constructor({ lease, resources, owner, checkpoint, unloadAI = async () => {}, persistCheckpoint = async () => {} }) {
+    this.lease = lease; this.resources = resources; this.owner = owner;
+    this.checkpoint = checkpoint; this.unloadAI = unloadAI; this.persistCheckpoint = persistCheckpoint; this.active = false;
+  }
+  async start(snapshot, resumeFrom = null) {
+    if (this.active) throw new Error('Scout heavy-work session already active');
+    const decision = this.resources.evaluate(snapshot);
+    if (!decision.allow_heavy) return { started: false, state: decision.state, reason: decision.reasons.join('; ') || `host hold (${decision.thermal})` };
+    const acquired = this.lease.acquire(this.owner);
+    if (!acquired.ok) return { started: false, state: 'AMBER', reason: `heavy-work lease held by ${acquired.owner}` };
+    this.active = true;
+    return { started: true, owner: this.owner, recovered_lease: acquired.recovered, resume_from: clone(resumeFrom) };
+  }
+  async observe(snapshot) {
+    if (!this.active) throw new Error('Scout heavy-work session is not active');
+    const decision = this.resources.evaluate(snapshot);
+    if (decision.allow_heavy) return { yielded: false, decision };
+    if (typeof this.checkpoint !== 'function') throw new Error('cooperative heavy work requires a checkpoint callback');
+    const checkpoint = await this.checkpoint();
+    await this.persistCheckpoint(checkpoint);
+    try { await this.unloadAI(); }
+    catch (error) { return { yielded: true, checkpoint, decision, lease_released: false, fault: `optional AI stop failed: ${error.message ?? error}` }; }
+    const released = this.lease.release(this.owner);
+    this.active = !released;
+    return { yielded: true, checkpoint, decision, lease_released: released };
+  }
+  complete() { const released = this.lease.release(this.owner); this.active = !released; return released; }
 }
 
 export class NotificationCenter {

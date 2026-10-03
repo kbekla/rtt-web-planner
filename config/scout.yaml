@@ -16,6 +16,8 @@ resource_governor:
   maximum_swap_used_mb: 2048
   minimum_free_disk_gb: 20
   maximum_load1: 12
+  sustained_load_samples: 3
+  sustained_swap_samples: 3
   thermal:
     # Conservative initial hold points. Confirm against measured A17 successful-build
     # telemetry before any unattended service is activated.
@@ -26,6 +28,7 @@ resource_governor:
     hot_nvme_c: 72
     critical_nvme_c: 80
     gpu_hot_c: 85
+    hot_entry_samples: 3
     recovery_margin_c: 5
     recovery_samples: 6
     sample_interval_seconds: 10
