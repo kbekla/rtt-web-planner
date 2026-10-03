@@ -19,11 +19,11 @@ layers:
         # tile range always matches its header. When trails become visible is
         # decided by the style layer's minzoom.
         min_size: 0
-        # Published tiles carry rider-facing data only (scripts/rtt/publish-check.mjs):
-        # rtt_id, name, kind (legal classification), status (access status).
+        # Published tiles carry only the public whitelist (scripts/rtt/publish-check.mjs):
+        # rtt_id, name, kind (legal classification), access (access status).
         # Provenance, surface, version and all research data stay in the private master.
         attributes:
           - key: rtt_id
           - key: name
           - key: kind
-          - key: status
+          - key: access

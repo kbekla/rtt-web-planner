@@ -70,7 +70,7 @@ if (trails) {
   state.trailState = (id) => map.getFeatureState({ ...TRAIL, id });
   // Rendered trails: [{ id, rtt_id, kind, status }] for tests and inspection.
   state.renderedTrails = () => map.queryRenderedFeatures({ layers: lineLayers })
-    .map((f) => ({ id: f.id, rtt_id: f.properties.rtt_id, kind: f.properties.kind, status: f.properties.status }));
+    .map((f) => ({ id: f.id, rtt_id: f.properties.rtt_id, kind: f.properties.kind, access: f.properties.access }));
   map.on('click', (e) => {
     const hit = map.queryRenderedFeatures([[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]], { layers: lineLayers })[0];
     state.selectTrail(hit ? hit.id : null);

@@ -1,20 +1,23 @@
-// Privacy rule: published RT&T trail artefacts carry rider-facing data only
-// (rtt_id, name, kind = legal classification, status = access status, geometry).
-// Provenance, sources, research and licence notes stay private and local.
+// Privacy rule: published RT&T trail artefacts follow a strict PUBLIC FIELD
+// WHITELIST: features carry rtt_id, name, kind, access + geometry; the manifest
+// carries only minimal technical fields. Anything else fails the build. Values
+// are not censored. Provenance stays private and local.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { spawn, spawnSync } from 'node:child_process';
+import { VectorTile } from '@mapbox/vector-tile';
+import { PbfReader } from 'pbf';
 import * as yaml from 'js-yaml';
-import { FACTORY, REPO } from '../../scripts/lib/common.mjs';
-import { PUBLIC_TILE_FIELDS, checkPublishable, checkTileProperties, scanJson } from '../../scripts/rtt/publish-check.mjs';
+import { FACTORY, PLANETILER_JAR, REPO, lonLatToTile } from '../../scripts/lib/common.mjs';
+import { openArchive } from '../lib/archive.mjs';
+import { PUBLIC_MANIFEST, PUBLIC_TILE_FIELDS, checkPublishable, checkTileProperties, checkWhitelist } from '../../scripts/rtt/publish-check.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rtt-privacy-'));
 const fixture = () => JSON.parse(fs.readFileSync(path.join(REPO, 'tests/fixtures/rtt/trails-synthetic.geojson'), 'utf8'));
-const STYLE_KEYS = new Set(['source', 'source-layer', 'source_id']);
-
 function build(fc, name) {
   const input = path.join(tmp, `${name}.geojson`);
   fs.writeFileSync(input, JSON.stringify(fc));
@@ -23,69 +26,70 @@ function build(fc, name) {
   return { ...r, out, priv: `${out}-private` };
 }
 
-test('the guard rejects every class of sensitive field or text', () => {
-  assert.deepEqual(PUBLIC_TILE_FIELDS, ['rtt_id', 'name', 'kind', 'status']);
-  assert.deepEqual(checkTileProperties({ rtt_id: 'rtt-trail-000000000001', name: 'Ridge Lane', kind: 'byway', status: 'open' }, 't'), []);
-  for (const [props, re] of [
-    [{ surface: 'gravel' }, /non-public tile field 'surface'/],
-    [{ provenance: 'x' }, /non-public tile field 'provenance'/],
-    [{ name: 'Verified lane' }, /sensitive text/],
-    [{ name: 'grm-87' }, /sensitive text/],
-    [{ name: 'TrailVidz route 12' }, /sensitive text/],
-    [{ name: 'Wiltshire Council PRoW' }, /sensitive text/],
-    [{ name: 'see https://example.org' }, /sensitive text/],
-  ]) assert.match(checkTileProperties(props, 't').join(), re, JSON.stringify(props));
-  for (const [obj, re] of [
-    [{ source: 'x' }, /sensitive key/],
-    [{ licence: 'OGL' }, /sensitive key/],
-    [{ a: { research_notes: 'x' } }, /sensitive key/],
-    [{ a: ['evidence photo 3'] }, /sensitive value/],
-    [{ confidence_method: 'x' }, /sensitive key/],
-  ]) assert.match(scanJson(obj, 'j').join(), re, JSON.stringify(obj));
+test('whitelist: only rtt_id, name, kind, access; rider-facing text is never censored', () => {
+  assert.deepEqual(PUBLIC_TILE_FIELDS, ['rtt_id', 'name', 'kind', 'access']);
+  assert.deepEqual(checkTileProperties({ rtt_id: 'rtt-trail-000000000001', name: 'Council Verified TET Source Lane', kind: 'byway', access: 'open' }, 't'), []);
+  for (const k of ['status', 'surface', 'version', 'provenance', 'source', 'notes', 'evidence', 'confidence'])
+    assert.match(checkTileProperties({ rtt_id: 'x', [k]: 'v' }, 't').join(), new RegExp(`non-public tile field '${k}'`));
 });
 
-test('the trail build under test passes the guard (tiles, metadata, manifest, style)', async (t) => {
-  // The build being tested (pipeline-trails sets it) or, by default, the promoted one.
+test('manifest whitelist: minimal technical fields only', () => {
+  const ok = { build_id: 'a', layer: 'rtt-trails', created_at: 'now', tile_fields: PUBLIC_TILE_FIELDS,
+    features: { count: 1, rtt_ids: ['rtt-trail-000000000001'] }, output: { file: 'f', bytes: 1, sha256: 'h', header: {} } };
+  assert.deepEqual(checkWhitelist(ok, PUBLIC_MANIFEST, 'm'), []);
+  assert.match(checkWhitelist({ ...ok, sources: [] }, PUBLIC_MANIFEST, 'm').join(), /non-public field '\$\.sources'/);
+  assert.match(checkWhitelist({ ...ok, features: { ...ok.features, quarantined: 2 } }, PUBLIC_MANIFEST, 'm').join(), /\$\.features\.quarantined/);
+});
+
+test('the guard catches an extra field in a real Planetiler archive', async () => {
+  // Build directly with a profile that leaks `surface`, bypassing the build script's projection.
+  const fc = fixture();
+  fc.features = fc.features.slice(0, 2).map((f) => ({ ...f, properties: { rtt_id: f.properties.rtt_id, kind: f.properties.kind, surface: 'gravel' } }));
+  const input = path.join(tmp, 'leak.geojson');
+  fs.writeFileSync(input, JSON.stringify(fc));
+  const profile = path.join(tmp, 'leak.yml');
+  fs.writeFileSync(profile, fs.readFileSync(path.join(REPO, 'config/rtt/rtt-trails.planetiler.yml'), 'utf8')
+    .replaceAll('@INPUT@', input).replace('          - key: access', '          - key: access\n          - key: surface'));
+  const pm = path.join(tmp, 'leak.pmtiles');
+  const r = spawnSync('java', ['-Xmx512m', '-jar', PLANETILER_JAR, 'generate-custom', `--schema=${profile}`, `--output=${pm}`, '--force',
+    `--tmpdir=${path.join(tmp, 'pt')}`, '--maxzoom=14'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const check = await checkPublishable(pm);
+  assert.match(check.errors.join('\n'), /non-public field 'surface'/);
+  assert.match(check.errors.join('\n'), /non-public tile field 'surface'/);
+});
+
+test('the trail build under test passes the whitelist (tiles, metadata, manifest)', async (t) => {
   const dir = path.join(FACTORY, 'output', 'rtt-trails', process.env.RTT_TRAILS_BUILD_ID || 'current');
   if (!fs.existsSync(path.join(dir, 'manifest.json'))) return t.skip(`no trail build at ${dir}`);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['manifest.json', 'rtt-trails.pmtiles'], 'public output must hold only the archive and its public manifest');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['manifest.json', 'rtt-trails.pmtiles'], 'public output: archive + public manifest only');
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
-  const r = await checkPublishable(path.join(dir, 'rtt-trails.pmtiles'), { 'public manifest': manifest });
+  const r = await checkPublishable(path.join(dir, 'rtt-trails.pmtiles'), { manifest });
   assert.deepEqual(r.errors, []);
   assert.ok(r.tiles > 0);
-  const style = path.join(FACTORY, 'assets', 'styles', 'rtt-trails.json');
-  if (fs.existsSync(style)) assert.deepEqual(scanJson(JSON.parse(fs.readFileSync(style, 'utf8')), 'trail style', STYLE_KEYS), []);
 });
 
-test('a build whose output would leak research text fails and publishes nothing', () => {
+test('a legitimate name with words like verified/council/TET publishes unchanged', async () => {
   const fc = fixture();
-  fc.features[0].properties.name = 'Verified lane';
-  const r = build(fc, 'leak');
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /publish check failed/);
-  assert.ok(!fs.existsSync(r.out), 'public output must be deleted');
-  const rec = JSON.parse(fs.readFileSync(path.join(r.priv, 'build-record.json'), 'utf8'));
-  assert.match(rec.publish_check.errors.join(), /sensitive text in 'name'/);
-});
-
-test('a clean build publishes only the archive and a rider-facing manifest', () => {
-  const r = build(fixture(), 'clean');
+  fc.features[0].properties.name = 'Council Verified TET Source Lane';
+  const r = build(fc, 'words');
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(fs.readdirSync(r.out).sort(), ['manifest.json', 'rtt-trails.pmtiles']);
-  const m = JSON.parse(fs.readFileSync(path.join(r.out, 'manifest.json'), 'utf8'));
-  assert.deepEqual(scanJson(m, 'manifest'), []);
-  assert.deepEqual(m.tile_fields, PUBLIC_TILE_FIELDS);
   for (const f of ['build-record.json', 'quarantine.json', 'build.log']) assert.ok(fs.existsSync(path.join(r.priv, f)), `private ${f}`);
+  const { x, y } = lonLatToTile(7.4205, 43.7322, 14);
+  const res = await openArchive(path.join(r.out, 'rtt-trails.pmtiles')).getZxy(14, x, y);
+  let data = Buffer.from(res.data);
+  if (data[0] === 0x1f && data[1] === 0x8b) data = zlib.gunzipSync(data);
+  const tile = new VectorTile(new PbfReader(data));
+  const names = Array.from({ length: tile.layers.rtt_trails.length }, (_, i) => tile.layers.rtt_trails.feature(i).properties.name);
+  assert.ok(names.includes('Council Verified TET Source Lane'));
 });
 
-test('real sources never live in the repo; the repo registry is synthetic only', () => {
+test('real sources never live in the repo; nothing private or staged is tracked', () => {
   const repoSources = yaml.load(fs.readFileSync(path.join(REPO, 'config/rtt/sources.yaml'), 'utf8')).sources;
-  for (const [id, s] of Object.entries(repoSources)) {
-    assert.deepEqual(s.methods, ['synthetic'], `repo source '${id}' must be synthetic; real sources belong in the private registry`);
-    assert.match(id, /synthetic/, id);
-  }
+  for (const [id, s] of Object.entries(repoSources)) assert.deepEqual(s.methods, ['synthetic'], `repo source '${id}' must be synthetic`);
   const tracked = spawnSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8' }).stdout;
-  assert.doesNotMatch(tracked, /private\/|staging\//, 'private or staging data is tracked by git');
+  assert.doesNotMatch(tracked, /(^|\/)(private|staging)\//m);
 });
 
 test('the server cannot reach private or staging data', async () => {
@@ -97,8 +101,7 @@ test('the server cannot reach private or staging data', async () => {
     }
     for (const p of ['/private/rtt/sources.yaml', '/assets/../private/rtt/sources.yaml', '/tiles/../private/x',
       '/tiles/rtt-trails-private.pmtiles', '/staging/rtt-trails/', '/assets/%2e%2e/private/rtt/sources.yaml']) {
-      const res = await fetch(`http://127.0.0.1:${port}${p}`);
-      assert.equal(res.status, 404, p);
+      assert.equal((await fetch(`http://127.0.0.1:${port}${p}`)).status, 404, p);
     }
   } finally {
     srv.kill();

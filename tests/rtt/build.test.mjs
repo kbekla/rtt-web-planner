@@ -78,8 +78,8 @@ test('build: accepted features only, quarantine reported privately, one RT&T lay
     for (const s of Object.values(t)) {
       const f = JSON.parse(s);
       assert.equal(f.layer, 'rtt_trails');
-      assert.deepEqual(Object.keys(f.props).filter((k) => !['rtt_id', 'name', 'kind', 'status'].includes(k)), [],
-        'tiles may carry only rtt_id, name, kind and status');
+      assert.deepEqual(Object.keys(f.props).filter((k) => !['rtt_id', 'name', 'kind', 'access'].includes(k)), [],
+        'tiles may carry only rtt_id, name, kind and access');
     }
   }
 });

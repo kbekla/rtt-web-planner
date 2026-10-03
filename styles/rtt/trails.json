@@ -31,7 +31,7 @@
       "paint": {
         "line-color": "#ffffff",
         "line-width": ["interpolate", ["linear"], ["zoom"], 11, 3, 16, 8],
-        "line-opacity": ["match", ["get", "status"], "closed", 0.4, 0.9]
+        "line-opacity": ["match", ["get", "access"], "closed", 0.4, 0.9]
       }
     },
     {
@@ -40,14 +40,14 @@
       "source": "rtt-trails",
       "source-layer": "rtt_trails",
       "minzoom": 11,
-      "filter": ["!=", ["get", "status"], "proposed"],
+      "filter": ["!=", ["get", "access"], "proposed"],
       "layout": { "line-cap": "round", "line-join": "round" },
       "paint": {
         "line-color": ["match", ["get", "kind"],
           "trail", "#b5470b", "bridleway", "#7a4f9a", "byway", "#6b5b2e",
           "cycle_lane", "#1f6fb4", "shared_lane", "#2c9b8f", "connector", "#555555", "#b5470b"],
         "line-width": ["interpolate", ["linear"], ["zoom"], 11, 1.5, 16, 5],
-        "line-opacity": ["match", ["get", "status"], "closed", 0.4, "seasonal", 0.8, 1]
+        "line-opacity": ["match", ["get", "access"], "closed", 0.4, "seasonal", 0.8, 1]
       }
     },
     {
@@ -56,7 +56,7 @@
       "source": "rtt-trails",
       "source-layer": "rtt_trails",
       "minzoom": 11,
-      "filter": ["==", ["get", "status"], "proposed"],
+      "filter": ["==", ["get", "access"], "proposed"],
       "layout": { "line-join": "round" },
       "paint": {
         "line-color": ["match", ["get", "kind"],

@@ -54,13 +54,18 @@ if (v.errors.length) {
 if (!v.accepted.length) { console.error('[build-trails] no accepted features; nothing built'); process.exit(1); }
 
 // --- 2. canonical accepted features ---------------------------------------
-// Only the public, rider-facing fields go into the tiles.
+// The public projection of a master feature: whitelisted rider-facing fields only.
+// The master contract's `status` is published as `access`. Nothing else is copied.
+function publicProperties(p) {
+  const out = { rtt_id: p.rtt_id, name: p.name, kind: p.kind, access: p.status };
+  return Object.fromEntries(PUBLIC_TILE_FIELDS.filter((k) => out[k] !== undefined && out[k] !== null).map((k) => [k, out[k]]));
+}
 const canonical = {
   type: 'FeatureCollection',
   features: v.accepted
     .map((f) => ({
       type: 'Feature',
-      properties: Object.fromEntries(PUBLIC_TILE_FIELDS.filter((k) => f.properties[k] !== undefined).map((k) => [k, f.properties[k]])),
+      properties: publicProperties(f.properties),
       geometry: { type: f.geometry.type, coordinates: f.geometry.coordinates },
     }))
     .sort((a, b) => a.properties.rtt_id.localeCompare(b.properties.rtt_id)),
@@ -128,7 +133,7 @@ try {
   };
 
   // Publish guard: every tile, the archive metadata and the public manifest.
-  const check = await checkPublishable(pmtiles, { 'public manifest': publicManifest });
+  const check = await checkPublishable(pmtiles, { manifest: publicManifest });
   const git = (a) => spawnSync('git', a, { cwd: REPO, encoding: 'utf8' }).stdout.trim();
   const sources = [...new Set(v.accepted.map((f) => f.properties.provenance.source))].sort();
   const record = {

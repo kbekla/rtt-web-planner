@@ -6,40 +6,30 @@ This layer holds RT&T's proprietary trail and lane network. It is built into its
 
 ## Privacy rule (Phase 3c)
 
-The **published** trail map carries rider-facing data only:
+**Published** trail features carry a strict **whitelist** of fields: `rtt_id`, `name` (lane name), `kind` (legal classification) and `access` (access status), plus geometry. The master contract's `status` is published as `access`.
+- **Any other property fails the build.**
+- The public manifest likewise carries only minimal technical fields: build ID, layer, creation time, tile fields, feature count, the `rtt_id` inventory, and the file, size, hash and header.
+- **Values are not censored.** A lane legitimately named "Council Verified Byway" publishes as is. Provenance is kept out by never being copied into published artefacts, and the whitelist proves nothing else got in.
 
-| Published field | Meaning |
-|---|---|
-| `rtt_id` | stable RT&T identifier |
-| `name` | lane name |
-| `kind` | legal classification |
-| `status` | access status |
-| geometry | the line itself |
-
-Everything else stays in the **private master**, which is local to RT&T and is never published, served, uploaded or committed. That covers:
-- provenance
-- source names, URLs and registry IDs
-- council dataset references and GRM/TrailVidz references
-- verification method, research notes and evidence
-- confidence methodology
-- licence and reuse notes
-
-| | Published | Private master (local only) |
+| | Published (hosting receives only this) | Private master (local Control Centre side only) |
 |---|---|---|
-| Tiles | `rtt-trails.pmtiles` with the 4 fields above + geometry | — |
-| Build output | `output/rtt-trails/<id>/`: archive + public `manifest.json` (build ID, hash, `rtt_id` list) | `private/rtt-trails/<id>/`: `build-record.json` (inputs, sources, counts), `quarantine.json`, `build.log` |
+| Tiles | `rtt-trails.pmtiles`: `rtt_id`, `name`, `kind`, `access` + geometry | — |
+| Build output | `output/rtt-trails/<id>/`: the archive + `manifest.json` (minimal technical fields) | `private/rtt-trails/<id>/`: `build-record.json` (inputs, sources, counts), `quarantine.json`, `build.log` |
 | Source registry | — | `$FACTORY_DIR/private/rtt/sources.yaml` (or `RTT_PRIVATE_SOURCES`). The repo's `config/rtt/sources.yaml` holds synthetic test sources only. |
-| Master data / staging | — | `$FACTORY_DIR/private/…`, `$FACTORY_DIR/staging/…` |
+| Master data, provenance, evidence, staging | — | `$FACTORY_DIR/private/…`, `$FACTORY_DIR/staging/…` |
 
 How it's enforced:
-- **Every build runs the publish guard** (`scripts/rtt/publish-check.mjs`). It decodes every tile and scans the archive metadata and the public manifest. The build fails, and its public output is deleted, if any of these turns up:
-  - a tile field outside the four above
-  - any key or text that looks like provenance or research (source, licence, method, evidence, verification, confidence, council, PRoW, GRM, TrailVidz, TET, URLs, …)
-- **Tests** (`tests/rtt/privacy.test.mjs`) also check:
-  - the installed trail style
-  - that only synthetic sources are in the repo
-  - that nothing under `private/` or `staging/` is tracked by git
-  - that the server returns 404 for private and staging paths, including traversal attempts
+- **Every build runs the guard** (`scripts/rtt/publish-check.mjs`). It decodes every tile and checks the archive metadata keys, the layer fields and the manifest structure against the whitelist. Any extra field fails the build and deletes its public output.
+- **Tests** (`tests/rtt/privacy.test.mjs`) cover:
+  - the whitelists themselves
+  - a real Planetiler archive with an extra field, which the guard catches
+  - rider-facing names containing words like verified, council or TET, which publish unchanged
+  - only synthetic sources in the repo, and nothing under `private/` or `staging/` tracked by git
+  - the server returning 404 for private and staging paths, including traversal attempts
+
+**Import rules for the real app map** (when it's imported, not yet):
+- **"Verified lane":** it's a placeholder name on 10,483 features. Where there's no genuine lane name, the feature is published **unnamed** (`name` omitted), keeping its geometry, ID and legal state. The feature is not rejected.
+- **TET:** the 790 TET features are the existing TET dataset shown in the app under its own tab. They're kept **logically separate** from the RT&T master trail layer: not imported into it, and given no RT&T provenance.
 
 ## The contract
 
@@ -93,7 +83,7 @@ The public output directory contains only `rtt-trails.pmtiles` and a rider-facin
 - **Build ID:** a hash of the canonical accepted features, the schema, the source registry, the Planetiler profile, the pinned `planetiler.jar`, the Java version and the output arguments.
 - **Canonical features:** sorted by `rtt_id` with sorted keys and provenance stripped. So input order and thread count don't change the bytes.
 - **Manifest:** records the accepted IDs, the quarantine count, the sources used (with licence and attribution) and `contains_synthetic`.
-- **Tiles:** z0–16, because z16 is Planetiler's maximum. Viewers overzoom for z17+. Lines are kept at every zoom (`min_size: 0`), so the archive's tile range always matches its header. When trails become visible is a style decision (Phase 3b). Tiles carry only `rtt_id`, `name`, `kind` and `status` (the privacy rule). `surface`, `version` and provenance stay in the private master.
+- **Tiles:** z0–16, because z16 is Planetiler's maximum. Viewers overzoom for z17+. Lines are kept at every zoom (`min_size: 0`), so the archive's tile range always matches its header. When trails become visible is a style decision (Phase 3b). Tiles carry only `rtt_id`, `name`, `kind` and `access` (the master `status`), per the privacy whitelist. `surface`, `version` and provenance stay in the private master.
 
 ## What the tests prove (`tests/rtt/`)
 
@@ -106,7 +96,7 @@ The public output directory contains only `rtt-trails.pmtiles` and a rider-facin
 ## Viewer (Phase 3b)
 
 - **Style:** `styles/rtt/trails.json` is a separate style fragment: source `rtt-trails` (`pmtiles:///tiles/rtt-trails.pmtiles`) with RT&T-only attribution and `promoteId: { rtt_trails: "rtt_id" }`. `scripts/rtt/build-trail-style.mjs` validates it and installs it at `$FACTORY_DIR/assets/styles/rtt-trails.json`.
-  - **Layers:** `rtt-trails-selected` (feature-state halo), `-casing`, `-line` (colour by `kind`, opacity by `status`), `-line-proposed` (dashed), and `-label` (names from z14).
+  - **Layers:** `rtt-trails-selected` (feature-state halo), `-casing`, `-line` (colour by `kind`, opacity by `access`), `-line-proposed` (dashed), and `-label` (names from z14).
   - **Visibility:** trails show from z11 and are overzoomed beyond z16.
 - **Viewer:** `/viewer/?region=monaco&trails=1` merges the fragment into the basemap style at load time. The basemap `style.json` never contains RT&T data, and without `trails=1` nothing changes.
   - **Selection:** clicking a trail selects it with feature-state keyed by `rtt_id`.

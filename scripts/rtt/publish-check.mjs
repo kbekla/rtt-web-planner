@@ -1,54 +1,52 @@
-// Publish guard for the RT&T trail layer.
+// Publish guard for the RT&T trail layer: a strict PUBLIC FIELD WHITELIST.
 //
-// The published trail artefacts (rtt-trails.pmtiles, its public manifest, the
-// trail style fragment) may contain only rider-facing data:
-//   rtt_id, name (lane name), kind (legal classification), status (access status), geometry.
-// Provenance, source names/URLs/IDs, council dataset references, GRM/TrailVidz
-// references, verification methods, research notes, evidence, confidence
-// methodology and licence/reuse notes stay in the private master data
-// ($FACTORY_DIR/private/rtt...), never in anything that is published.
+// Published trail artefacts may contain only:
+//   features: rtt_id, name, kind (legal classification), access (access status) + geometry
+//   manifest: the minimal technical fields in PUBLIC_MANIFEST (build id, hash, id inventory)
+//   PMTiles metadata: the keys in PUBLIC_METADATA_KEYS
+// Anything else is a build failure. Values are NOT censored: a lane legitimately
+// named "Council Verified Byway" is fine. Provenance is excluded by never being
+// copied into published artefacts, and this guard proves nothing else got in.
 //
-// build-trails.mjs runs this after every build and deletes the public output
-// if it fails; tests/rtt/privacy.test.mjs exercises it.
+// Provenance, sources, evidence and research stay on the private master-data side
+// ($FACTORY_DIR/private/...). Hosting receives only the public output.
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { VectorTile } from '@mapbox/vector-tile';
 import { PbfReader } from 'pbf';
 import { PMTiles } from 'pmtiles';
 
-export const PUBLIC_TILE_FIELDS = ['rtt_id', 'name', 'kind', 'status'];
+export const PUBLIC_TILE_FIELDS = ['rtt_id', 'name', 'kind', 'access'];
 
-// Words that must never appear in a published key or string value.
-export const SENSITIVE = /provenance|licen[cs]e|\breuse\b|source|registry|method|captured|osm_derived|\bnotes?\b|evidence|research|confidence|verif|council|\bprow\b|\bboat-|\bgrm\b|grm-|trail\s*vidz|\btet\b|approved|https?:\/\/|www\./i;
+// Minimal public manifest: key -> nested whitelist (true = any value of a technical field).
+export const PUBLIC_MANIFEST = {
+  build_id: true,
+  layer: true,
+  created_at: true,
+  tile_fields: true,
+  features: { count: true, rtt_ids: true },
+  output: { file: true, bytes: true, sha256: true, header: true },
+};
 
-/** Walk any JSON value; report sensitive keys and string values. */
-export function scanJson(value, where, allowKeys = new Set()) {
+export const PUBLIC_METADATA_KEYS = ['name', 'description', 'attribution', 'type', 'vector_layers',
+  'planetiler:buildtime', 'planetiler:githash', 'planetiler:version'];
+
+/** Keys not in the whitelist (recursively). */
+export function checkWhitelist(obj, allowed, where, p = '$') {
   const errors = [];
-  const walk = (v, p) => {
-    if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`));
-    else if (v && typeof v === 'object') {
-      for (const [k, x] of Object.entries(v)) {
-        if (!allowKeys.has(k) && SENSITIVE.test(k)) errors.push(`${where}: sensitive key '${p}.${k}'`);
-        walk(x, `${p}.${k}`);
-      }
-    } else if (typeof v === 'string' && SENSITIVE.test(v)) {
-      errors.push(`${where}: sensitive value at ${p}: '${v.slice(0, 80)}'`);
-    }
-  };
-  walk(value, '$');
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [`${where}: ${p} must be an object`];
+  for (const [k, v] of Object.entries(obj)) {
+    const rule = allowed[k];
+    if (rule === undefined) errors.push(`${where}: non-public field '${p}.${k}'`);
+    else if (rule !== true) errors.push(...checkWhitelist(v, rule, where, `${p}.${k}`));
+  }
   return errors;
 }
 
-/** One decoded feature's properties: only the public fields, no sensitive text. */
+/** One decoded feature's properties: only whitelisted fields. */
 export function checkTileProperties(props, where) {
-  const errors = [];
-  for (const k of Object.keys(props)) {
-    if (!PUBLIC_TILE_FIELDS.includes(k)) errors.push(`${where}: non-public tile field '${k}'`);
-  }
-  for (const [k, v] of Object.entries(props)) {
-    if (typeof v === 'string' && SENSITIVE.test(v)) errors.push(`${where}: sensitive text in '${k}': '${v.slice(0, 80)}'`);
-  }
-  return errors;
+  return Object.keys(props).filter((k) => !PUBLIC_TILE_FIELDS.includes(k))
+    .map((k) => `${where}: non-public tile field '${k}'`);
 }
 
 class FileSource {
@@ -61,34 +59,27 @@ class FileSource {
   }
 }
 
-/**
- * Check every tile, the metadata of a trail PMTiles archive, and optional extra
- * public JSON files. Returns a list of errors ([] = publishable).
- */
-export async function checkPublishable(pmtilesFile, extras = {}) {
+/** Check every tile and the metadata of a trail PMTiles archive, plus the public manifest. */
+export async function checkPublishable(pmtilesFile, { manifest = null } = {}) {
   const archive = new PMTiles(new FileSource(pmtilesFile));
   const errors = [];
   const md = await archive.getMetadata();
-  // Planetiler's own tool-version keys are allowed; everything else is scanned.
-  errors.push(...scanJson(md, 'pmtiles metadata', new Set(['planetiler:buildtime', 'planetiler:githash', 'planetiler:version'])));
+  for (const k of Object.keys(md)) if (!PUBLIC_METADATA_KEYS.includes(k)) errors.push(`pmtiles metadata: non-public key '${k}'`);
   for (const layer of md.vector_layers ?? []) {
     if (layer.id !== 'rtt_trails') errors.push(`pmtiles metadata: unexpected layer '${layer.id}'`);
     for (const f of Object.keys(layer.fields ?? {})) if (!PUBLIC_TILE_FIELDS.includes(f)) errors.push(`pmtiles metadata: non-public field '${f}'`);
   }
-  // Every tile in the archive.
+  const h = await archive.getHeader();
   const tiles = [];
-  const visit = async (dirOffset, dirLength) => {
-    const dir = await archive.cache.getDirectory(archive.source, dirOffset, dirLength, await archive.getHeader());
-    for (const e of dir) {
-      if (e.runLength === 0) await visit((await archive.getHeader()).leafDirectoryOffset + e.offset, e.length);
+  const visit = async (offset, length) => {
+    for (const e of await archive.cache.getDirectory(archive.source, offset, length, h)) {
+      if (e.runLength === 0) await visit(h.leafDirectoryOffset + e.offset, e.length);
       else tiles.push(e);
     }
   };
-  const h = await archive.getHeader();
   await visit(h.rootDirectoryOffset, h.rootDirectoryLength);
   for (const e of tiles) {
-    const raw = await archive.source.getBytes(h.tileDataOffset + e.offset, e.length);
-    let data = Buffer.from(raw.data);
+    let data = Buffer.from((await archive.source.getBytes(h.tileDataOffset + e.offset, e.length)).data);
     if (data[0] === 0x1f && data[1] === 0x8b) data = zlib.gunzipSync(data);
     const t = new VectorTile(new PbfReader(data));
     for (const [name, layer] of Object.entries(t.layers)) {
@@ -96,6 +87,6 @@ export async function checkPublishable(pmtilesFile, extras = {}) {
       for (let i = 0; i < layer.length; i++) errors.push(...checkTileProperties(layer.feature(i).properties, `tile ${e.tileId}`));
     }
   }
-  for (const [name, json] of Object.entries(extras)) errors.push(...scanJson(json, name));
+  if (manifest) errors.push(...checkWhitelist(manifest, PUBLIC_MANIFEST, 'public manifest'));
   return { errors: [...new Set(errors)], tiles: tiles.length };
 }
