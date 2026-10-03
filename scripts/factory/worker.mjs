@@ -311,9 +311,17 @@ async function main() {
   log(`worker ${process.pid} up at ${commit.slice(0, 12)} (${REPO})`);
   while (!stopping) {
     const red = Q.red();
-    if (red) { heartbeat({ phase: 'red', wait_reason: red.reason }); await sleep(POLL_MS); continue; }
+    if (red) {
+      heartbeat({ phase: 'red', wait_reason: red.reason });
+      if (process.env.RTT_FACTORY_ONCE) break;
+      await sleep(POLL_MS); continue;
+    }
     const job = Q.next();
-    if (!job) { heartbeat({ phase: 'idle', wait_reason: null }); await sleep(POLL_MS); continue; }
+    if (!job) {
+      heartbeat({ phase: 'idle', wait_reason: null });
+      if (process.env.RTT_FACTORY_ONCE) break;
+      await sleep(POLL_MS); continue;
+    }
     await runOne(job);
     if (state.phase === 'waiting') await sleep(POLL_MS);
     if (process.env.RTT_FACTORY_ONCE && !Q.next()) break;
@@ -339,4 +347,3 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 }
 
 main().catch((e) => { log(`worker crashed: ${e.stack ?? e}`); process.exit(1); });
-

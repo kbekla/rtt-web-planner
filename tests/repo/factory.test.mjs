@@ -116,6 +116,9 @@ test('an integrity failure stops the queue (RED) until cleared', async () => {
   await new Promise((r) => w.on('close', r));
   assert.equal(where(next).state, 'pending', 'nothing runs while RED');
   assert.match(ctl('status').stdout, /status: RED/);
+  const blocked = runWorker({ verify: [['true']] });
+  assert.equal(blocked.status, 0, blocked.stdout + blocked.stderr);
+  assert.equal(where(next).state, 'pending', 'one-shot mode exits without running queued work while RED');
   ctl('clear-red');
   runWorker({ verify: [['true']] });
   assert.equal(where(next).state, 'done');
