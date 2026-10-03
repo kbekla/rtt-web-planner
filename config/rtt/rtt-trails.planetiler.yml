@@ -1,0 +1,30 @@
+# Planetiler custom profile for the proprietary RT&T trail layer.
+# Built by scripts/rtt/build-trails.mjs, which validates the input first and
+# substitutes @INPUT@ with the accepted (non-quarantined) features only.
+# The output is a separate PMTiles archive and source; it is never merged into
+# the OpenStreetMap basemap, so the licences stay separable.
+schema_name: RT&T Trails
+schema_description: Proprietary RT&T trail and lane network (schema rtt-trails/1)
+attribution: '&copy; RT&amp;T trail data (proprietary)'
+sources:
+  rtt_trails:
+    type: geojson
+    local_path: '@INPUT@'
+layers:
+  - id: rtt_trails
+    features:
+      - source: rtt_trails
+        geometry: line
+        # Present at every zoom z0-16, however short (min_size 0), so the archive's
+        # tile range always matches its header. When trails become visible is
+        # decided by the style layer's minzoom.
+        min_size: 0
+        # Provenance stays in the source data and the build manifest; tiles carry
+        # identity and display attributes only.
+        attributes:
+          - key: rtt_id
+          - key: kind
+          - key: status
+          - key: surface
+          - key: name
+          - key: version

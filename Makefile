@@ -2,7 +2,7 @@
 R ?= monaco
 export RTT_REGION := $(R)
 
-.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard test-ai
+.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard test-ai rtt-validate rtt-build test-rtt
 
 setup:            ## install pinned npm deps, browser, git hooks and tools
 	npm ci
@@ -47,3 +47,13 @@ dashboard:        ## unattended factory: worker, current job, queue, disk, therm
 
 test-ai:          ## live AI helper check (hybrid CPU/GPU placement); loads the model
 	node --test 'tests/ai/*.test.mjs'
+
+RTT_INPUT ?= tests/fixtures/rtt/trails-synthetic.geojson
+rtt-validate:     ## RT&T trails: validate RTT_INPUT against the schema + provenance rules
+	node scripts/rtt/validate.mjs $(RTT_INPUT)
+
+rtt-build:        ## RT&T trails: validate and build RTT_INPUT into its own PMTiles
+	node scripts/rtt/build-trails.mjs $(RTT_INPUT)
+
+test-rtt:         ## RT&T trail contract, build, reproducibility, diff and separation tests
+	node --test 'tests/rtt/*.test.mjs'

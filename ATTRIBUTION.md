@@ -42,3 +42,12 @@ The credit is embedded in the PMTiles metadata and in the style source. The view
 - RT&T trail and lane data is published as a **separate** source and tileset with its own attribution. It is never merged into the OSM tiles.
 - It must be **independently sourced and carry provenance**. Proprietary geometry or attributes must not be derived from OSM: no tracing, no snapping, no copying of tags.
 - Any feature that is OSM-derived must be kept isolated, flagged (`osm_derived: true` plus a provenance reference), and held for licensing review before release. Data derived from OSM may fall under ODbL share-alike.
+
+## RT&T trail layer (proprietary)
+
+The RT&T trail and lane network is built into its **own archive**, `rtt-trails.pmtiles` (layer `rtt_trails`). It is never merged into the OpenStreetMap basemap, so the two licences stay separable.
+- **Credit:** its attribution is RT&T's own ("© RT&T trail data (proprietary)"), with no OpenStreetMap credit.
+- **Data:** RT&T trail data must be independently sourced and is not derived from OpenStreetMap.
+- **Gate:** every feature names a source in `config/rtt/sources.yaml`, which records the licence, the attribution, the allowed capture methods, whether the source is OSM-derived, and the approval.
+- **Quarantine:** features from an OSM-derived, unknown or unapproved source are quarantined by `scripts/rtt/validate.mjs` and listed in each build's `quarantine.json` for licensing review. They are never built.
+- **Current content:** synthetic test fixtures only; no real RT&T data has been imported.
