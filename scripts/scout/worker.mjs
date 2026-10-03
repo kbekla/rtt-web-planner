@@ -2,7 +2,7 @@
 // Intentionally dormant worker entrypoint. It consumes only already queued local observations.
 import path from 'node:path';
 import os from 'node:os';
-import { ScoutStore, makeHeartbeat, workerLock, normalizeObservation, candidateFromObservation, assessEvidence, matchMaster } from './core.mjs';
+import { ScoutStore, makeHeartbeat, workerLock, normalizeObservation, candidateFromObservation, assessEvidence } from './core.mjs';
 
 const factory = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-factory');
 const store = new ScoutStore(factory);
@@ -30,7 +30,7 @@ async function cycle() {
   try {
     const { observation } = normalizeObservation(job.payload, { sourceKey: job.source_key });
     const c = candidateFromObservation(observation);
-    c.master_match = matchMaster(c, []);
+    c.master_match = { type: 'UNMATCHED', rtt_ids: [], reason: 'canonical master not loaded' };
     assessEvidence(c); store.saveCandidate(c);
     store.atomic(path.join(store.state, 'activity.json'), { at: new Date().toISOString(), source_key: job.source_key, candidate_id: c.candidate_id });
     store.finish(job); heartbeat('GREEN', null, 'idle'); return true;

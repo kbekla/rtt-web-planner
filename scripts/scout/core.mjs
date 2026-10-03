@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as yaml from 'js-yaml';
 
 export const STATES = Object.freeze({ exists: ['unknown', 'probable', 'confirmed', 'disproved'],
   motorcycle_access: ['unknown', 'probable', 'confirmed', 'prohibited'],
@@ -13,6 +14,15 @@ const idHash = (x) => crypto.createHash('sha256').update(canonicalJson(x)).diges
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const now = () => new Date().toISOString();
 const SAFE_SOURCES = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+export const SCOUT_CONFIG = yaml.load(fs.readFileSync(new URL('../../config/scout.yaml', import.meta.url), 'utf8'));
+const resourcePolicy = {
+  min_mem_available_mb: SCOUT_CONFIG.resource_governor.minimum_available_ram_mb,
+  red_mem_available_mb: SCOUT_CONFIG.resource_governor.red_available_ram_mb,
+  max_swap_used_mb: SCOUT_CONFIG.resource_governor.maximum_swap_used_mb,
+  min_free_disk_bytes: SCOUT_CONFIG.resource_governor.minimum_free_disk_gb * 1e9,
+  max_load1: SCOUT_CONFIG.resource_governor.maximum_load1,
+  thermal: SCOUT_CONFIG.resource_governor.thermal,
+};
 const procStart = (pid) => { try { const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null; } catch { return null; } };
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -107,7 +117,10 @@ function metrics(a, b) {
 }
 
 export function matchMaster(candidate, masterFeatures, thresholds = {}, trustedIdentity = () => false) {
-  const policy = { near_m: 35, partial_overlap: 0.25, likely_overlap: 0.95, likely_distance_m: 3, tight_coverage: 0.95, loose_coverage: 0.05, ...thresholds };
+  const configured = SCOUT_CONFIG.matching;
+  const policy = { near_m: configured.near_distance_m, partial_overlap: configured.partial_overlap,
+    likely_overlap: configured.likely_overlap, likely_distance_m: configured.likely_distance_m,
+    tight_coverage: configured.tight_coverage, loose_coverage: 0.05, ...thresholds };
   if (!candidate.geometry) return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'geometry unavailable' };
   const exact = [], scored = [];
   const candidatePoints = points(candidate.geometry);
@@ -167,7 +180,7 @@ export function assessEvidence(candidate) {
   return candidate;
 }
 
-export function clusterObservations(candidates, { distance_m = 2, overlap = 0.9 } = {}) {
+export function clusterObservations(candidates, { distance_m = SCOUT_CONFIG.matching.corridor_distance_m, overlap = SCOUT_CONFIG.matching.corridor_overlap } = {}) {
   const sorted = [...candidates].sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
   const groups = [];
   for (const c of sorted) {
@@ -272,7 +285,8 @@ export async function collectAdapter(adapter, store, cursor = null) {
 }
 
 export class SourceScheduler {
-  constructor(store, { minimum_interval_ms = 60 * 60 * 1000, maximum_failures = 3, max_per_minute = 10 } = {}) { this.store = store; this.minimumInterval = minimum_interval_ms; this.maximumFailures = maximum_failures; this.maxPerMinute = max_per_minute; }
+  constructor(store, { minimum_interval_ms = SCOUT_CONFIG.sources.minimum_interval_seconds * 1000,
+    maximum_failures = SCOUT_CONFIG.sources.maximum_attempts, max_per_minute = SCOUT_CONFIG.sources.rate_limit_per_minute } = {}) { this.store = store; this.minimumInterval = minimum_interval_ms; this.maximumFailures = maximum_failures; this.maxPerMinute = max_per_minute; }
   due(sourceKey, { now_ms = Date.now(), minimum_interval_ms = this.minimumInterval } = {}) {
     const source = this.store.list('sources').find((x) => x.key === sourceKey);
     if (source?.retry_at) return now_ms >= Date.parse(source.retry_at);
@@ -295,7 +309,7 @@ export class SourceScheduler {
   }
 }
 
-export async function consultAI(provider, request, { enabled = true, timeout_ms = 1000 } = {}) {
+export async function consultAI(provider, request, { enabled = SCOUT_CONFIG.ai.enabled, timeout_ms = SCOUT_CONFIG.ai.timeout_seconds * 1000 } = {}) {
   if (!enabled || !provider) return { status: 'disabled', result: null };
   let timer;
   try {
@@ -324,7 +338,8 @@ export async function consultAIAndRecord(provider, request, context, store, opti
 }
 
 export function classifyHost(snapshot, history = [], policy = {}) {
-  const t = policy.thermal ?? { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85 };
+  policy = { ...resourcePolicy, ...policy, thermal: { ...resourcePolicy.thermal, ...(policy.thermal ?? {}) } };
+  const t = policy.thermal;
   const max = (key) => Math.max(-Infinity, ...[snapshot, ...history].map((x) => x[key]).filter(Number.isFinite));
   const cpu = max('cpu_temp_c'), nvme = max('nvme_temp_c');
   const gpu = Math.max(-Infinity, ...[snapshot, ...history].flatMap((x) => [x.dgpu?.temp_c, x.igpu?.temp_c]).filter(Number.isFinite));
@@ -346,7 +361,7 @@ export function classifyHost(snapshot, history = [], policy = {}) {
 }
 
 export class ThermalGovernor {
-  constructor(policy = {}, state = {}) { this.policy = { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 6, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; }
+  constructor(policy = {}, state = {}) { this.policy = { ...SCOUT_CONFIG.resource_governor.thermal, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; }
   serialize() { return { state: this.state, cool: this.cool, updated_at: now() }; }
   update(s) {
     const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity, gpu = s.dgpu?.temp_c ?? s.igpu?.temp_c ?? -Infinity;
@@ -370,8 +385,8 @@ export class ThermalGovernor {
 
 export class ScoutResourceGovernor {
   constructor(store, policy = {}) {
-    this.store = store; this.policy = policy;
-    this.thermal = new ThermalGovernor(policy.thermal ?? {}, store.read('thermal-state.json') ?? {});
+    this.store = store; this.policy = { ...resourcePolicy, ...policy, thermal: { ...resourcePolicy.thermal, ...(policy.thermal ?? {}) } };
+    this.thermal = new ThermalGovernor(this.policy.thermal, store.read('thermal-state.json') ?? {});
   }
   evaluate(snapshot) {
     const tempFree = { ...snapshot, cpu_temp_c: null, nvme_temp_c: null, dgpu: null, igpu: null };
@@ -409,7 +424,8 @@ export class HeavyWorkLease {
 }
 
 export class NotificationCenter {
-  constructor(file, { providers = {}, cooldown_ms = 6 * 60 * 60 * 1000, repeat_reminder_ms = 24 * 60 * 60 * 1000, now_ms = () => Date.now(), max_events = 1000, max_digest = 5000 } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.repeatReminder = repeat_reminder_ms; this.clock = now_ms; this.maxEvents = max_events; this.maxDigest = max_digest; }
+  constructor(file, { providers = {}, cooldown_ms = SCOUT_CONFIG.notifications.cooldown_seconds * 1000,
+    repeat_reminder_ms = SCOUT_CONFIG.notifications.repeat_reminder_seconds * 1000, now_ms = () => Date.now(), max_events = 1000, max_digest = 5000 } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.repeatReminder = repeat_reminder_ms; this.clock = now_ms; this.maxEvents = max_events; this.maxDigest = max_digest; }
   state() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return { events: [], active: {} }; } }
   save(s) { fs.mkdirSync(path.dirname(this.file), { recursive: true }); const t = `${this.file}.tmp-${process.pid}`; const fd = fs.openSync(t, 'w'); fs.writeFileSync(fd, JSON.stringify(s, null, 2) + '\n'); fs.fsyncSync(fd); fs.closeSync(fd); fs.renameSync(t, this.file); }
   async emit({ key, severity, message, channels = ['EMAIL','SMS'], recovery = false }) { const s = this.state(), old = s.active[key], nowMs = this.clock();

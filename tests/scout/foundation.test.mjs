@@ -63,6 +63,12 @@ test('nearby parallel geometry cannot prove identity or join a corridor', () => 
   assert.equal(matchMaster(a, [master([[0, 0.0002], [0.01, 0.0002]])]).type, 'POSSIBLE_PARALLEL');
   assert.equal(clusterObservations([a, b]).length, 0);
 });
+test('master matching scales across a synthetic canonical-sized feature set', () => {
+  const c = cand([[0, 0], [0.001, 0]], 'scale');
+  const features = Array.from({ length: 14_315 }, (_, i) => master([[10 + i * 0.001, 20], [10.0005 + i * 0.001, 20]], `rtt-trail-${String(i).padStart(12, '0')}`));
+  const result = matchMaster(c, features);
+  assert.equal(result.type, 'NEW_CANDIDATE'); assert.deepEqual(result.scores, []);
+});
 test('close parallel tracks remain possible-parallel instead of likely-existing or a corridor merge', () => {
   const a = cand([[0, 0], [0.01, 0]], 'close-a'), b = cand([[0, 0.00009], [0.01, 0.00009]], 'close-b');
   const match = matchMaster(a, [master([[0, 0.00009], [0.01, 0.00009]])]);
@@ -109,13 +115,13 @@ test('source identifiers are path-safe and queue listing rejects traversal', () 
 test('AI disabled, absent, timed out, errored, malformed, and nonsense are non-authoritative', async () => {
   assert.equal((await consultAI(null, {}, { enabled: false })).status, 'disabled');
   assert.equal((await consultAI(null, {})).status, 'disabled');
-  assert.equal((await consultAI({ assess: () => new Promise(() => {}) }, {}, { timeout_ms: 5 })).status, 'unavailable');
-  assert.equal((await consultAI({ assess: () => { throw new Error('provider down'); } }, {})).status, 'unavailable');
-  assert.equal((await consultAI({ assess: async () => 'nonsense' }, {})).status, 'malformed');
-  assert.equal((await consultAI({ assess: async () => ({ summary: 4, confidence: 'permission granted', suggestions: [] }) }, {})).status, 'malformed');
+  assert.equal((await consultAI({ assess: () => new Promise(() => {}) }, {}, { enabled: true, timeout_ms: 5 })).status, 'unavailable');
+  assert.equal((await consultAI({ assess: () => { throw new Error('provider down'); } }, {}, { enabled: true })).status, 'unavailable');
+  assert.equal((await consultAI({ assess: async () => 'nonsense' }, {}, { enabled: true })).status, 'malformed');
+  assert.equal((await consultAI({ assess: async () => ({ summary: 4, confidence: 'permission granted', suggestions: [] }) }, {}, { enabled: true })).status, 'malformed');
 });
 test('AI result is constrained to a bounded advisory structure', async () => {
-  const result = await consultAI({ assess: async () => ({ summary: 'review clues', confidence: 'low', suggestions: ['inspect sign'] }) }, {});
+  const result = await consultAI({ assess: async () => ({ summary: 'review clues', confidence: 'low', suggestions: ['inspect sign'] }) }, {}, { enabled: true });
   assert.equal(result.status, 'ok'); assert.deepEqual(result.result.suggestions, ['inspect sign']);
 });
 test('queue restart recovery preserves jobs and duplicate submission returns same job', () => {
@@ -160,6 +166,14 @@ test('worker one-shot recovers, processes queued work, and persists full review 
   assert.equal(store.list('pending').length, 0); assert.equal(store.list('done').length, 1); assert.equal(store.list('reviews').length, 1);
   const review = store.list('reviews')[0]; assert.ok(review.reasons.includes('no usable geometry')); assert.equal(review.states.motorcycle_access, 'unknown');
   assert.ok(store.read('worker.json').heartbeat_at); assert.ok(store.read('activity.json'));
+});
+test('worker does not assert a new trail before the canonical master is loaded', () => {
+  const root = path.join(tmp, 'worker-unmatched'), store = new ScoutStore(root);
+  store.enqueue('synthetic', { source_id: 'unmatched-1', geometry: line([[0, 0], [0.01, 0]]) });
+  const r = spawnSync(process.execPath, ['scripts/scout/worker.mjs', '--once'], { cwd: process.cwd(), env: { ...process.env, FACTORY_DIR: root }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr); const candidateFile = path.join(store.state, 'candidates', fs.readdirSync(path.join(store.state, 'candidates'))[0]);
+  const candidate = JSON.parse(fs.readFileSync(candidateFile));
+  assert.equal(candidate.master_match.type, 'UNMATCHED'); assert.equal(candidate.master_match.reason, 'canonical master not loaded');
 });
 test('source retry is bounded and ultimately held for review', () => {
   const store = new ScoutStore(path.join(tmp, 'retry')); store.enqueue('synthetic', { x: 2 }, { max_attempts: 2 });
