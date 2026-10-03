@@ -7,6 +7,8 @@
 //   /vendor/pmtiles/         node_modules/pmtiles/dist
 //   /assets/                 $FACTORY_DIR/assets (styles, glyphs, sprites)
 //   /tiles/<region>.pmtiles  $FACTORY_DIR/output/<region>/<RTT_BUILD_ID|current>/<region>.pmtiles
+//   /tiles/rtt-trails.pmtiles  $FACTORY_DIR/output/rtt-trails/<RTT_TRAILS_BUILD_ID|current>/rtt-trails.pmtiles
+//                            (the separate RT&T trail layer; never part of a region build)
 //
 // PMTiles are read by the browser with HTTP Range requests, which sirv supports.
 // usage: PORT=8080 RTT_BUILD_ID=<id> scripts/serve.mjs
@@ -38,7 +40,15 @@ const server = http.createServer((req, res) => {
   const tile = /^\/tiles\/([a-z0-9-]+)\.pmtiles$/.exec(url.pathname);
   if (tile) {
     const region = tile[1];
-    req.url = '/' + path.relative(path.join(FACTORY, 'output'), path.join(buildDir(region), `${region}.pmtiles`));
+    let dir;
+    if (region === 'rtt-trails') {
+      const id = process.env.RTT_TRAILS_BUILD_ID || 'current';
+      if (!/^(current|[0-9a-f]{16})$/.test(id)) return notFound(res);
+      dir = path.join(FACTORY, 'output', 'rtt-trails', id);
+    } else {
+      dir = buildDir(region);
+    }
+    req.url = '/' + path.relative(path.join(FACTORY, 'output'), path.join(dir, `${region}.pmtiles`));
     return tiles(req, res, () => notFound(res));
   }
   for (const [prefix, handler] of mounts) {

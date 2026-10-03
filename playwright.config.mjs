@@ -25,7 +25,8 @@ export default defineConfig({
   webServer: {
     command: 'node scripts/serve.mjs',
     url: `http://127.0.0.1:${PORT}/viewer/`,
-    env: { PORT: String(PORT), RTT_BUILD_ID: process.env.RTT_BUILD_ID || 'current' },
+    env: { PORT: String(PORT), RTT_BUILD_ID: process.env.RTT_BUILD_ID || 'current',
+      RTT_TRAILS_BUILD_ID: process.env.RTT_TRAILS_BUILD_ID || 'current' },
     reuseExistingServer: false,
   },
 });

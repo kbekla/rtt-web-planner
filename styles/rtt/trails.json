@@ -1,0 +1,86 @@
+{
+  "$comment": "RT&T trail layer style fragment. Its own source (rtt-trails.pmtiles), never part of the OSM basemap style. scripts/rtt/build-trail-style.mjs validates it and installs it at $FACTORY_DIR/assets/styles/rtt-trails.json; the viewer merges it in with ?trails=1. promoteId makes rtt_id the feature id, so feature-state (selected) is keyed by the stable RT&T id.",
+  "source_id": "rtt-trails",
+  "source": {
+    "type": "vector",
+    "url": "pmtiles:///tiles/rtt-trails.pmtiles",
+    "promoteId": { "rtt_trails": "rtt_id" },
+    "attribution": "&copy; RT&amp;T trail data (proprietary)"
+  },
+  "layers": [
+    {
+      "id": "rtt-trails-selected",
+      "type": "line",
+      "source": "rtt-trails",
+      "source-layer": "rtt_trails",
+      "minzoom": 11,
+      "layout": { "line-cap": "round", "line-join": "round" },
+      "paint": {
+        "line-color": "#ffcc00",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 7, 16, 16],
+        "line-opacity": ["case", ["boolean", ["feature-state", "selected"], false], 0.9, 0]
+      }
+    },
+    {
+      "id": "rtt-trails-casing",
+      "type": "line",
+      "source": "rtt-trails",
+      "source-layer": "rtt_trails",
+      "minzoom": 11,
+      "layout": { "line-cap": "round", "line-join": "round" },
+      "paint": {
+        "line-color": "#ffffff",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 3, 16, 8],
+        "line-opacity": ["match", ["get", "status"], "closed", 0.4, 0.9]
+      }
+    },
+    {
+      "id": "rtt-trails-line",
+      "type": "line",
+      "source": "rtt-trails",
+      "source-layer": "rtt_trails",
+      "minzoom": 11,
+      "filter": ["!=", ["get", "status"], "proposed"],
+      "layout": { "line-cap": "round", "line-join": "round" },
+      "paint": {
+        "line-color": ["match", ["get", "kind"],
+          "trail", "#b5470b", "bridleway", "#7a4f9a", "byway", "#6b5b2e",
+          "cycle_lane", "#1f6fb4", "shared_lane", "#2c9b8f", "connector", "#555555", "#b5470b"],
+        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 1.5, 16, 5],
+        "line-opacity": ["match", ["get", "status"], "closed", 0.4, "seasonal", 0.8, 1]
+      }
+    },
+    {
+      "id": "rtt-trails-line-proposed",
+      "type": "line",
+      "source": "rtt-trails",
+      "source-layer": "rtt_trails",
+      "minzoom": 11,
+      "filter": ["==", ["get", "status"], "proposed"],
+      "layout": { "line-join": "round" },
+      "paint": {
+        "line-color": ["match", ["get", "kind"],
+          "trail", "#b5470b", "bridleway", "#7a4f9a", "byway", "#6b5b2e",
+          "cycle_lane", "#1f6fb4", "shared_lane", "#2c9b8f", "connector", "#555555", "#b5470b"],
+        "line-width": ["interpolate", ["linear"], ["zoom"], 11, 1.5, 16, 5],
+        "line-dasharray": [2, 1.5]
+      }
+    },
+    {
+      "id": "rtt-trails-label",
+      "type": "symbol",
+      "source": "rtt-trails",
+      "source-layer": "rtt_trails",
+      "minzoom": 14,
+      "filter": ["has", "name"],
+      "layout": {
+        "symbol-placement": "line",
+        "text-field": ["get", "name"],
+        "text-font": ["Noto Sans Bold"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 14, 11, 17, 14],
+        "text-offset": [0, -0.9]
+      },
+      "paint": { "text-color": "#5a2a06", "text-halo-color": "#ffffff", "text-halo-width": 1.5 }
+    }
+  ]
+}

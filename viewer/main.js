@@ -21,6 +21,15 @@ for (const source of Object.values(style.sources)) {
   if (source.url?.startsWith('pmtiles://')) source.url = `pmtiles://${abs(source.url.slice('pmtiles://'.length))}`;
 }
 
+// RT&T trail layer (?trails=1): a separate source and style fragment, merged in at
+// load time so the basemap style itself never contains RT&T data.
+const trails = params.get('trails') === '1';
+if (trails) {
+  const frag = await (await fetch('/assets/styles/rtt-trails.json')).json();
+  style.sources[frag.source_id] = { ...frag.source, url: `pmtiles://${abs(frag.source.url.slice('pmtiles://'.length))}` };
+  style.layers.push(...frag.layers);
+}
+
 // Default view: the archive's own center, unless the URL hash sets one.
 const archive = new pmtiles.PMTiles(abs(`/tiles/${region}.pmtiles`));
 protocol.add(archive);
@@ -46,3 +55,28 @@ map.on('styleimagemissing', (e) => state.missingImages.push(e.id));
 map.on('idle', () => { state.ready = true; });
 map.on('movestart', () => { state.ready = false; });
 window.__map = map;
+
+// Trail selection: feature-state keyed by the stable rtt_id (promoteId).
+if (trails) {
+  const TRAIL = { source: 'rtt-trails', sourceLayer: 'rtt_trails' };
+  const lineLayers = ['rtt-trails-line', 'rtt-trails-line-proposed'];
+  let selected = null;
+  state.selectTrail = (id) => {
+    if (selected) map.setFeatureState({ ...TRAIL, id: selected }, { selected: false });
+    selected = id ?? null;
+    if (selected) map.setFeatureState({ ...TRAIL, id: selected }, { selected: true });
+    return selected;
+  };
+  state.trailState = (id) => map.getFeatureState({ ...TRAIL, id });
+  // Rendered trails: [{ id, rtt_id, kind, status }] for tests and inspection.
+  state.renderedTrails = () => map.queryRenderedFeatures({ layers: lineLayers })
+    .map((f) => ({ id: f.id, rtt_id: f.properties.rtt_id, kind: f.properties.kind, status: f.properties.status }));
+  map.on('click', (e) => {
+    const hit = map.queryRenderedFeatures([[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]], { layers: lineLayers })[0];
+    state.selectTrail(hit ? hit.id : null);
+  });
+  for (const l of lineLayers) {
+    map.on('mouseenter', l, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', l, () => { map.getCanvas().style.cursor = ''; });
+  }
+}

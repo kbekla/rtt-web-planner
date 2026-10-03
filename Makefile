@@ -2,7 +2,7 @@
 R ?= monaco
 export RTT_REGION := $(R)
 
-.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard test-ai rtt-validate rtt-build test-rtt
+.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard test-ai rtt-validate rtt-build test-rtt test-rtt-render
 
 setup:            ## install pinned npm deps, browser, git hooks and tools
 	npm ci
@@ -57,3 +57,6 @@ rtt-build:        ## RT&T trails: validate and build RTT_INPUT into its own PMTi
 
 test-rtt:         ## RT&T trail contract, build, reproducibility, diff and separation tests
 	node --test 'tests/rtt/*.test.mjs'
+
+test-rtt-render:  ## RT&T trails over the Monaco basemap (viewer, feature-state, goldens)
+	RTT_TRAILS=1 RTT_REGION=monaco npx playwright test tests/render/trails.spec.mjs
