@@ -100,7 +100,9 @@ test('the server cannot reach private or staging data', async () => {
       try { await fetch(`http://127.0.0.1:${port}/viewer/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
     for (const p of ['/private/rtt/sources.yaml', '/assets/../private/rtt/sources.yaml', '/tiles/../private/x',
-      '/tiles/rtt-trails-private.pmtiles', '/staging/rtt-trails/', '/assets/%2e%2e/private/rtt/sources.yaml']) {
+      '/tiles/rtt-trails-private.pmtiles', '/staging/rtt-trails/', '/assets/%2e%2e/private/rtt/sources.yaml',
+      '/scout/candidates/synthetic-private.json', '/assets/../scout/candidates/synthetic-private.json',
+      '/tiles/%2e%2e/scout/candidates/synthetic-private.json']) {
       assert.equal((await fetch(`http://127.0.0.1:${port}${p}`)).status, 404, p);
     }
   } finally {

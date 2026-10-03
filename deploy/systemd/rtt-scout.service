@@ -4,8 +4,9 @@ After=default.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/rtt-map-factory/runner/repo
-ExecStart=/usr/bin/node scripts/scout/worker.mjs
+WorkingDirectory=@SCOUT_DIR@
+Environment=FACTORY_DIR=@FACTORY_DIR@
+ExecStart=/usr/bin/node @SCOUT_DIR@/scripts/scout/worker.mjs
 Restart=on-failure
 RestartSec=30
 Nice=10

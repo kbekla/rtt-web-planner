@@ -12,6 +12,7 @@ export const STATES = Object.freeze({ exists: ['unknown', 'probable', 'confirmed
 const idHash = (x) => crypto.createHash('sha256').update(canonicalJson(x)).digest('hex');
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const now = () => new Date().toISOString();
+const SAFE_SOURCES = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const procStart = (pid) => { try { const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null; } catch { return null; } };
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -21,7 +22,7 @@ function canonicalJson(value) {
 
 export function normalizeObservation(raw, { sourceKey, observedAt = now() } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('observation must be an object');
-  if (!sourceKey || typeof sourceKey !== 'string') throw new Error('synthetic/source adapter key required');
+  if (!sourceKey || !SAFE_SOURCES.test(sourceKey)) throw new Error('source adapter key must be 1-64 safe identifier characters');
   const geometry = raw.geometry == null ? null : clone(raw.geometry);
   if (geometry) {
     if (!['LineString', 'MultiLineString'].includes(geometry.type)) throw new Error('geometry must be LineString or MultiLineString');
@@ -107,10 +108,23 @@ function metrics(a, b) {
 
 export function matchMaster(candidate, masterFeatures, thresholds = {}, trustedIdentity = () => false) {
   const policy = { near_m: 35, partial_overlap: 0.25, likely_overlap: 0.95, likely_distance_m: 3, tight_coverage: 0.95, loose_coverage: 0.05, ...thresholds };
+  if (!candidate.geometry) return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'geometry unavailable' };
   const exact = [], scored = [];
+  const candidatePoints = points(candidate.geometry);
+  const bounds = (pts) => ({ minLon: Math.min(...pts.map((p) => p[0])), maxLon: Math.max(...pts.map((p) => p[0])), minLat: Math.min(...pts.map((p) => p[1])), maxLat: Math.max(...pts.map((p) => p[1])) });
+  if (!candidatePoints.length || candidatePoints.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1])))
+    return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'invalid geometry' };
+  const cb = bounds(candidatePoints), midLat = (cb.minLat + cb.maxLat) / 2;
+  if (cb.maxLon - cb.minLon > 3 || cb.maxLat - cb.minLat > 3)
+    return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'geometry exceeds local projection extent' };
+  const padLat = policy.near_m / 110540, padLon = policy.near_m / Math.max(1113, 111320 * Math.cos(midLat * Math.PI / 180));
   for (const f of masterFeatures) {
     const id = f?.properties?.rtt_id;
     if (!id || !f.geometry) continue;
+    const fp = points(f.geometry);
+    if (fp.length < 2) continue;
+    const fb = bounds(fp);
+    if (fb.maxLon < cb.minLon - padLon || fb.minLon > cb.maxLon + padLon || fb.maxLat < cb.minLat - padLat || fb.minLat > cb.maxLat + padLat) continue;
     if (eq(canonicalGeometry(candidate.geometry), canonicalGeometry(f.geometry))) { exact.push(id); continue; }
     const m = metrics(candidate.geometry, f.geometry);
     if (m) scored.push({ id, ...m, identity_corroborated: Boolean(trustedIdentity(candidate, f)) });
@@ -138,21 +152,22 @@ export function assessEvidence(candidate) {
   const exists = qualified.filter((e) => e.question === 'physical_existence' && ['supports', 'contradicts'].includes(e.position));
   const access = qualified.filter((e) => e.question === 'motorcycle_access' && ['supports', 'contradicts'].includes(e.position));
   const state = (arr, yes, no) => arr.some((e) => e.position === 'supports') && arr.some((e) => e.position === 'contradicts') ? 'contradictory'
-    : arr.some((e) => e.position === 'supports') ? yes : arr.some((e) => e.position === 'contradicts') ? no : 'unknown';
+    : arr.some((e) => e.position === 'supports') ? (arr.some((e) => e.position === 'supports' && e.certainty === 'probable') ? 'probable' : yes)
+      : arr.some((e) => e.position === 'contradicts') ? no : 'unknown';
   candidate.states.exists = state(exists, 'confirmed', 'disproved');
   candidate.states.motorcycle_access = state(access, 'confirmed', 'prohibited');
   if (!['unknown', 'yes', 'no'].includes(candidate.states.routability)) candidate.states.routability = 'unknown';
   const reasons = [];
   if (!candidate.geometry) reasons.push('no usable geometry');
-  if (candidate.states.exists === 'unknown' || candidate.states.exists === 'contradictory') reasons.push('physical existence needs review');
-  if (candidate.states.motorcycle_access === 'unknown' || candidate.states.motorcycle_access === 'contradictory') reasons.push('motorcycle access needs review');
+  if (['unknown', 'probable', 'contradictory'].includes(candidate.states.exists)) reasons.push('physical existence needs review');
+  if (['unknown', 'probable', 'contradictory'].includes(candidate.states.motorcycle_access)) reasons.push('motorcycle access needs review');
   if (candidate.master_match && !['UNMATCHED', 'NEW_CANDIDATE', 'EXACT_EXISTING'].includes(candidate.master_match.type)) reasons.push(`master match requires review (${candidate.master_match.type})`);
   if (reasons.length) { candidate.review = { state: 'queued', reasons, recommended_action: 'review evidence and source records' }; candidate.lifecycle = 'awaiting_review'; }
-  else candidate.review = { state: 'not_required', reasons: [], recommended_action: null };
+  else { candidate.review = { state: 'not_required', reasons: [], recommended_action: null }; if (candidate.lifecycle === 'awaiting_review') candidate.lifecycle = 'investigating'; }
   return candidate;
 }
 
-export function clusterObservations(candidates, { distance_m = 4, overlap = 0.9 } = {}) {
+export function clusterObservations(candidates, { distance_m = 2, overlap = 0.9 } = {}) {
   const sorted = [...candidates].sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
   const groups = [];
   for (const c of sorted) {
@@ -166,7 +181,14 @@ export function clusterObservations(candidates, { distance_m = 4, overlap = 0.9 
 
 export class ScoutStore {
   constructor(root) { this.root = root; this.state = path.join(root, 'scout'); this.queue = path.join(this.state, 'queue'); }
-  ensure() { for (const d of ['pending', 'running', 'held', 'done', 'reviews', 'sources']) fs.mkdirSync(path.join(this.queue, d), { recursive: true }); fs.mkdirSync(this.state, { recursive: true }); }
+  ensure() { for (const d of ['pending', 'running', 'held', 'done', 'reviews', 'sources']) fs.mkdirSync(path.join(this.queue, d), { recursive: true }); fs.mkdirSync(this.state, { recursive: true }); this.cleanTemps(); }
+  cleanTemps() {
+    const visit = (dir) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else { const pid = Number(/\.tmp-(\d+)$/.exec(entry.name)?.[1]); if (!pid || pid === process.pid) continue; try { process.kill(pid, 0); } catch { fs.rmSync(file, { force: true }); } }
+    } };
+    for (const dir of [this.state, this.queue]) if (fs.existsSync(dir)) visit(dir);
+  }
   atomic(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.tmp-${process.pid}`; const fd = fs.openSync(tmp, 'w'); fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fsyncSync(fd); fs.closeSync(fd); fs.renameSync(tmp, file); }
   enqueue(source_key, payload, { max_attempts = 3 } = {}) {
     this.ensure(); const key = idHash({ source_key, payload });
@@ -174,7 +196,7 @@ export class ScoutStore {
     const job = { job_id: key, source_key, payload: clone(payload), state: 'pending', attempts: 0, max_attempts, not_before: null, created_at: now(), updated_at: now() };
     this.atomic(path.join(this.queue, 'pending', `${key}.json`), job); return job;
   }
-  list(state) { const d = path.join(this.queue, state); return fs.existsSync(d) ? fs.readdirSync(d).filter((x) => x.endsWith('.json')).sort().map((x) => JSON.parse(fs.readFileSync(path.join(d, x)))) : []; }
+  list(state) { if (!['pending','running','held','done','reviews','sources'].includes(state)) throw new Error(`invalid Scout queue '${state}'`); const d = path.join(this.queue, state); return fs.existsSync(d) ? fs.readdirSync(d).filter((x) => x.endsWith('.json')).sort().map((x) => JSON.parse(fs.readFileSync(path.join(d, x)))) : []; }
   claim({ now_ms = Date.now() } = {}) { this.ensure(); const job = this.list('pending').find((j) => !j.not_before || Date.parse(j.not_before) <= now_ms); if (!job) return null;
     const from = path.join(this.queue, 'pending', `${job.job_id}.json`), to = path.join(this.queue, 'running', `${job.job_id}.json`);
     try { fs.renameSync(from, to); job.state = 'running'; job.attempts++; job.updated_at = now(); this.atomic(to, job); return job; } catch { return null; } }
@@ -185,7 +207,20 @@ export class ScoutStore {
     else job.state = state;
     this.atomic(path.join(this.queue, job.state, `${job.job_id}.json`), job); fs.rmSync(from, { force: true }); return job;
   }
-  recover() { this.ensure(); const running = this.list('running'); for (const j of running) { j.state = 'pending'; j.recovered_at = now(); this.atomic(path.join(this.queue, 'pending', `${j.job_id}.json`), j); fs.rmSync(path.join(this.queue, 'running', `${j.job_id}.json`), { force: true }); } return running.length; }
+  recover() {
+    this.ensure();
+    // Validate every persisted queue before the worker can claim or skip an item.
+    for (const state of ['pending', 'held', 'done', 'reviews', 'sources']) this.list(state);
+    const running = this.list('running'); let recovered = 0;
+    for (const j of running) {
+      const runningFile = path.join(this.queue, 'running', `${j.job_id}.json`);
+      const terminal = ['done','held'].some((state) => fs.existsSync(path.join(this.queue, state, `${j.job_id}.json`)));
+      const pendingFile = path.join(this.queue, 'pending', `${j.job_id}.json`);
+      if (!terminal && !fs.existsSync(pendingFile)) { j.state = 'pending'; j.recovered_at = now(); this.atomic(pendingFile, j); recovered++; }
+      fs.rmSync(runningFile, { force: true });
+    }
+    return recovered;
+  }
   saveCandidate(c) {
     this.atomic(path.join(this.state, 'candidates', `${c.candidate_id}.json`), c);
     const reviewFile = path.join(this.queue, 'reviews', `${c.candidate_id}.json`);
@@ -194,6 +229,14 @@ export class ScoutStore {
       source_observations: c.observations.map((o) => ({ source_key: o.source_key, hints: clone(o.hints), evidence_metadata: clone(o.evidence_metadata), provenance: clone(o.provenance) })), issues: clone(c.issues),
       reasons: clone(c.review.reasons), recommended_action: c.review.recommended_action, created_at: c.created_at });
     else fs.rmSync(reviewFile, { force: true });
+  }
+  updateCandidate(candidateId, update) {
+    if (!/^scout-[a-f0-9]{20}$/.test(candidateId)) throw new Error('invalid candidate ID');
+    const file = path.join(this.state, 'candidates', `${candidateId}.json`);
+    const candidate = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const updated = update(clone(candidate)) ?? candidate;
+    updated.version = candidate.version + 1; updated.updated_at = now();
+    this.saveCandidate(updated); return updated;
   }
   status() {
     const worker = this.read('worker.json');
@@ -223,8 +266,33 @@ export class ScoutStore {
 
 export class FakeAdapter { constructor(key, observations = []) { this.key = key; this.observations = observations; } async collect(cursor = null) { return { observations: clone(this.observations), cursor, checked_at: now() }; } }
 export async function collectAdapter(adapter, store, cursor = null) {
+  if (!adapter?.key || !SAFE_SOURCES.test(adapter.key)) throw new Error('adapter key must be 1-64 safe identifier characters');
   try { const result = await adapter.collect(cursor); for (const raw of result.observations ?? []) store.enqueue(adapter.key, raw); store.atomic(path.join(store.queue, 'sources', `${adapter.key}.json`), { key: adapter.key, cursor: result.cursor ?? cursor, last_checked: result.checked_at ?? now(), state: 'GREEN' }); return { queued: result.observations?.length ?? 0 }; }
   catch (e) { store.atomic(path.join(store.queue, 'sources', `${adapter.key}.json`), { key: adapter.key, cursor, last_checked: now(), state: 'AMBER', error: String(e) }); return { queued: 0, error: String(e) }; }
+}
+
+export class SourceScheduler {
+  constructor(store, { minimum_interval_ms = 60 * 60 * 1000, maximum_failures = 3, max_per_minute = 10 } = {}) { this.store = store; this.minimumInterval = minimum_interval_ms; this.maximumFailures = maximum_failures; this.maxPerMinute = max_per_minute; }
+  due(sourceKey, { now_ms = Date.now(), minimum_interval_ms = this.minimumInterval } = {}) {
+    const source = this.store.list('sources').find((x) => x.key === sourceKey);
+    if (source?.retry_at) return now_ms >= Date.parse(source.retry_at);
+    return !source?.last_checked || now_ms - Date.parse(source.last_checked) >= minimum_interval_ms;
+  }
+  async run(adapter, { now_ms = Date.now(), minimum_interval_ms = this.minimumInterval } = {}) {
+    const previous = this.store.list('sources').find((x) => x.key === adapter.key);
+    const recent = (previous?.recent_checks ?? []).filter((t) => now_ms - Date.parse(t) < 60_000);
+    if (recent.length >= this.maxPerMinute) return { queued: 0, deferred: true, reason: 'source rate limit' };
+    if (!this.due(adapter.key, { now_ms, minimum_interval_ms })) return { queued: 0, deferred: true, reason: 'source politeness interval' };
+    const failures = previous?.state === 'AMBER' ? (previous.failures ?? 1) : 0;
+    if (failures >= this.maximumFailures) return { queued: 0, deferred: true, state: 'AMBER', reason: 'bounded source retry budget exhausted' };
+    const result = await collectAdapter(adapter, this.store, previous?.cursor ?? null);
+    const file = path.join(this.store.queue, 'sources', `${adapter.key}.json`);
+    const status = JSON.parse(fs.readFileSync(file, 'utf8'));
+    status.recent_checks = [...recent, new Date(now_ms).toISOString()];
+    if (result.error) { status.failures = failures + 1; status.retry_at = new Date(now_ms + Math.min(30 * 60_000, 60_000 * (2 ** failures))).toISOString(); this.store.atomic(file, status); }
+    else { status.failures = 0; delete status.retry_at; this.store.atomic(file, status); }
+    return { ...result, state: status.state, failures: status.failures };
+  }
 }
 
 export async function consultAI(provider, request, { enabled = true, timeout_ms = 1000 } = {}) {
@@ -237,6 +305,22 @@ export async function consultAI(provider, request, { enabled = true, timeout_ms 
     return { status: 'ok', result: safe };
   } catch (e) { return { status: 'unavailable', result: null, reason: String(e.message ?? e) }; }
   finally { clearTimeout(timer); }
+}
+
+export async function consultAIAndRecord(provider, request, context, store, options = {}) {
+  const result = await consultAI(provider, request, options);
+  const auditFile = path.join(store.state, 'ai-audit.json');
+  let records = []; try { records = JSON.parse(fs.readFileSync(auditFile, 'utf8')); } catch { /* first consultation */ }
+  records.push({ at: now(), provider: context.provider ?? 'unknown', model: context.model ?? null,
+    reason: context.reason ?? 'unspecified', candidate_id: context.candidate_id ?? null,
+    job_id: context.job_id ?? null, evidence_refs: clone(context.evidence_refs ?? []), status: result.status,
+    result: clone(result.result), uncertainty: result.result?.confidence ?? null,
+    usage: context.usage ?? null, action_taken: context.action_taken ?? 'advisory only' });
+  if (records.length > 1000) records.splice(0, records.length - 1000);
+  store.atomic(auditFile, records);
+  store.atomic(path.join(store.state, 'ai.json'), { enabled: options.enabled !== false, available: result.status === 'ok',
+    last_status: result.status, last_at: now(), consultations: records.length });
+  return result;
 }
 
 export function classifyHost(snapshot, history = [], policy = {}) {
@@ -262,7 +346,8 @@ export function classifyHost(snapshot, history = [], policy = {}) {
 }
 
 export class ThermalGovernor {
-  constructor(policy = {}) { this.policy = { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 6, ...policy }; this.state = 'NORMAL'; this.cool = 0; }
+  constructor(policy = {}, state = {}) { this.policy = { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 6, ...policy }; this.state = state.state ?? 'NORMAL'; this.cool = state.cool ?? 0; }
+  serialize() { return { state: this.state, cool: this.cool, updated_at: now() }; }
   update(s) {
     const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity, gpu = s.dgpu?.temp_c ?? s.igpu?.temp_c ?? -Infinity;
     const requested = cpu >= p.critical_cpu_c || nvme >= p.critical_nvme_c ? 'CRITICAL'
@@ -283,6 +368,32 @@ export class ThermalGovernor {
   }
 }
 
+export class ScoutResourceGovernor {
+  constructor(store, policy = {}) {
+    this.store = store; this.policy = policy;
+    this.thermal = new ThermalGovernor(policy.thermal ?? {}, store.read('thermal-state.json') ?? {});
+  }
+  evaluate(snapshot) {
+    const tempFree = { ...snapshot, cpu_temp_c: null, nvme_temp_c: null, dgpu: null, igpu: null };
+    const base = classifyHost(tempFree, [], this.policy);
+    const thermal = this.thermal.update(snapshot);
+    const decision = { ...base, thermal: thermal.state,
+      allow_heavy: base.allow_heavy && thermal.allow_heavy,
+      allow_ai: base.allow_ai && thermal.allow_ai,
+      state: base.state === 'RED' || thermal.state === 'CRITICAL' ? 'RED' : base.state === 'AMBER' || thermal.state !== 'NORMAL' ? 'AMBER' : 'GREEN',
+      reasons: [...base.reasons, ...(thermal.state !== 'NORMAL' ? [`thermal ${thermal.state}`] : [])],
+      observed_at: now(), snapshot: { factory_state: snapshot.factory_state ?? 'unknown', planetiler_active: Boolean(snapshot.planetiler_active),
+        local_ai_active: Boolean(snapshot.local_ai_active), mem_available_mb: snapshot.mem_available_mb ?? null,
+        swap_used_mb: snapshot.swap_used_mb ?? null, load1: snapshot.load1 ?? null,
+        cpu_temp_c: snapshot.cpu_temp_c ?? null, nvme_temp_c: snapshot.nvme_temp_c ?? null,
+        dgpu_temp_c: snapshot.dgpu?.temp_c ?? null, igpu_temp_c: snapshot.igpu?.temp_c ?? null,
+        disk_free_bytes: snapshot.disk?.free_bytes ?? null } };
+    this.store.atomic(path.join(this.store.state, 'thermal-state.json'), this.thermal.serialize());
+    this.store.atomic(path.join(this.store.state, 'resource.json'), decision);
+    return decision;
+  }
+}
+
 export class HeavyWorkLease {
   constructor(file, { bootId = () => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(); } catch { return null; } }, alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, processStart = procStart } = {}) { this.file = file; this.bootId = bootId; this.alive = alive; this.processStart = processStart; }
   read() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return null; } }
@@ -294,22 +405,28 @@ export class HeavyWorkLease {
     try { const fd = fs.openSync(this.file, 'wx', 0o600); fs.writeFileSync(fd, JSON.stringify({ owner, pid, process_start: this.processStart(pid), boot_id: boot, acquired_at: now() })); fs.fsyncSync(fd); fs.closeSync(fd); return { ok: true, recovered: Boolean(old) }; }
     catch (e) { if (e.code === 'EEXIST') return { ok: false, owner: this.read()?.owner ?? 'unknown' }; throw e; }
   }
-  release(owner) { const old = this.read(); if (old?.owner !== owner || old?.pid !== process.pid) return false; fs.rmSync(this.file, { force: true }); return true; }
+  release(owner) { const old = this.read(); if (old?.owner !== owner || old?.pid !== process.pid || old.boot_id !== this.bootId() || old.process_start !== this.processStart(process.pid)) return false; fs.rmSync(this.file, { force: true }); return true; }
 }
 
 export class NotificationCenter {
-  constructor(file, { providers = {}, cooldown_ms = 6 * 60 * 60 * 1000, now_ms = () => Date.now() } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.clock = now_ms; }
+  constructor(file, { providers = {}, cooldown_ms = 6 * 60 * 60 * 1000, repeat_reminder_ms = 24 * 60 * 60 * 1000, now_ms = () => Date.now(), max_events = 1000, max_digest = 5000 } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.repeatReminder = repeat_reminder_ms; this.clock = now_ms; this.maxEvents = max_events; this.maxDigest = max_digest; }
   state() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return { events: [], active: {} }; } }
-  save(s) { fs.mkdirSync(path.dirname(this.file), { recursive: true }); const t = `${this.file}.tmp-${process.pid}`; fs.writeFileSync(t, JSON.stringify(s, null, 2) + '\n'); fs.renameSync(t, this.file); }
+  save(s) { fs.mkdirSync(path.dirname(this.file), { recursive: true }); const t = `${this.file}.tmp-${process.pid}`; const fd = fs.openSync(t, 'w'); fs.writeFileSync(fd, JSON.stringify(s, null, 2) + '\n'); fs.fsyncSync(fd); fs.closeSync(fd); fs.renameSync(t, this.file); }
   async emit({ key, severity, message, channels = ['EMAIL','SMS'], recovery = false }) { const s = this.state(), old = s.active[key], nowMs = this.clock();
+    if (!key || !['INFO','AMBER','RED'].includes(severity) || typeof message !== 'string') throw new Error('notification requires a dedupe key, valid severity, and short message');
     if (recovery) { if (!old || old.resolved) return { sent: false, reason: 'not-active' }; }
-    else if (old && old.severity === severity && nowMs - old.last_sent_ms < this.cooldown) return { sent: false, reason: 'cooldown' };
+    else if (old && !old.resolved) {
+      const rank = { INFO: 0, AMBER: 1, RED: 2 };
+      if (rank[severity] < rank[old.severity]) return { sent: false, reason: 'lower-severity' };
+      if (rank[severity] === rank[old.severity] && nowMs - old.last_sent_ms < Math.max(this.cooldown, this.repeatReminder)) return { sent: false, reason: 'cooldown' };
+    }
     const event = { key, severity: recovery ? 'INFO' : severity, message, recovery, at: new Date(nowMs).toISOString(), delivery: {} };
     for (const channel of channels) { try { await this.providers[channel]?.send(event); event.delivery[channel] = this.providers[channel] ? 'sent' : 'unconfigured'; } catch (e) { event.delivery[channel] = `failed: ${e.message ?? e}`; } }
-    s.events.push(event); if (recovery) s.active[key] = { ...old, resolved: true, recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: nowMs, resolved: false };
+    s.events.push(event); if (s.events.length > this.maxEvents) s.events.splice(0, s.events.length - this.maxEvents);
+    if (recovery) s.active[key] = { ...old, resolved: true, recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: nowMs, resolved: false };
     this.save(s); return { sent: true, event };
   }
-  digest(items) { const s = this.state(); s.digest = [...(s.digest ?? []), ...clone(items)]; this.save(s); return s.digest.length; }
+  digest(items) { const s = this.state(); s.digest = [...(s.digest ?? []), ...clone(items)].slice(-this.maxDigest); this.save(s); return s.digest.length; }
 }
 
 export class TestDeliveryProvider { constructor() { this.deliveries = []; } async send(event) { this.deliveries.push(clone(event)); } }

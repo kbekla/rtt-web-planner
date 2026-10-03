@@ -23,7 +23,9 @@ export function readHostSnapshot({ factoryDir = process.env.FACTORY_DIR || path.
   const active = (unit) => runCommand('systemctl', ['--user', 'is-active', unit]) === 'active';
   const factoryService = active('rtt-factory.service');
   const planetiler = commands.some((p) => /planetiler|build-region\.mjs/.test(p.cmdline));
-  const ollama = active('rtt-ollama.service') ? runCommand('ollama', ['ps']) : null;
+  const runningJobs = path.join(factoryDir, 'queue', 'running');
+  const factoryJob = fs.existsSync(runningJobs) && fs.readdirSync(runningJobs).some((f) => f.endsWith('.json'));
+  const ollama = active('rtt-ollama.service') || commands.some((p) => /ollama serve/.test(p.cmdline)) ? runCommand('ollama', ['ps']) : null;
   const localAI = Boolean(ollama && ollama.split('\n').filter((line) => line.trim()).length > 1);
   const leaseFile = path.join(factoryDir, 'state', 'heavy-work.json');
   let lease = null; try { lease = JSON.parse(fs.readFileSync(leaseFile, 'utf8')); } catch { /* no shared lease */ }
@@ -31,7 +33,7 @@ export function readHostSnapshot({ factoryDir = process.env.FACTORY_DIR || path.
   try { const s = fs.statfsSync(factoryDir); disk = { free_bytes: s.bavail * s.bsize, total_bytes: s.blocks * s.bsize }; } catch { /* not mounted */ }
   return { ...telemetry,
     mem_available_mb: mem.MemAvailable == null ? null : Math.round(mem.MemAvailable / 1024),
-    factory_state: factoryService ? (planetiler ? 'building' : 'active') : 'idle',
+    factory_state: planetiler || factoryJob ? 'building' : factoryService ? 'active' : 'idle',
     planetiler_active: planetiler, local_ai_active: localAI,
     other_heavy_lease: lease && lease.boot_id === (() => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return null; } })()
       ? { owner: lease.owner, pid: lease.pid } : null,

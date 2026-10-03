@@ -6,9 +6,17 @@ import { ScoutStore, makeHeartbeat, workerLock, normalizeObservation, candidateF
 
 const factory = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-factory');
 const store = new ScoutStore(factory);
+const redFile = path.join(store.state, 'red.json');
+const recordRed = (reason) => {
+  store.atomic(redFile, { status: 'RED', reason: String(reason), at: new Date().toISOString(), requires_manual_review: true });
+  store.atomic(path.join(store.state, 'worker.json'), makeHeartbeat({ status: 'RED', current_step: 'integrity-hold' }));
+};
 const lock = workerLock(path.join(store.state, 'worker.lock'));
 if (!lock.ok) { console.error(`another Scout worker owns pid ${lock.owner}`); process.exit(1); }
-store.ensure(); store.recover();
+store.ensure();
+if (store.read('red.json')) { console.error(`Scout is held RED: ${store.read('red.json').reason}`); process.exit(0); }
+try { store.recover(); }
+catch (e) { recordRed(`queue recovery failed: ${e.message ?? e}`); console.error(store.read('red.json').reason); process.exit(0); }
 const heartbeat = (status, job_id, current_step, source_key = null) => store.atomic(path.join(store.state, 'worker.json'), makeHeartbeat({ status, job_id, current_step, source_key }));
 heartbeat('GREEN', null, 'idle');
 const once = process.argv.includes('--once');
@@ -31,5 +39,12 @@ async function cycle() {
     heartbeat(result.state === 'held' ? 'AMBER' : 'GREEN', null, 'source-error'); return true;
   }
 }
-do { if (stopping) break; const processed = await cycle(); if (once) break; if (!processed) await new Promise((r) => setTimeout(r, 30_000)); } while (!stopping);
-heartbeat('GREEN', null, stopping ? 'stopped' : 'idle');
+do {
+  if (stopping) break;
+  let processed;
+  try { processed = await cycle(); }
+  catch (e) { recordRed(`worker state failure: ${e.message ?? e}`); break; }
+  if (once) break;
+  if (!processed) await new Promise((r) => setTimeout(r, 30_000));
+} while (!stopping);
+if (!store.read('red.json')) heartbeat('GREEN', null, stopping ? 'stopped' : 'idle');

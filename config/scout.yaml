@@ -5,6 +5,11 @@ worker:
   max_attempts: 3
   retry_backoff_seconds: [60, 300, 1800]
   heavy_work_concurrency: 1
+sources:
+  minimum_interval_seconds: 3600
+  maximum_attempts: 3
+  rate_limit_per_minute: 10
+  concurrency: 1
 resource_governor:
   minimum_available_ram_mb: 2048
   red_available_ram_mb: 512
@@ -27,9 +32,10 @@ resource_governor:
 matching:
   near_distance_m: 35
   partial_overlap: 0.25
-  likely_overlap: 0.8
-  likely_distance_m: 10
-  corridor_distance_m: 18
+  likely_overlap: 0.95
+  likely_distance_m: 3
+  tight_coverage: 0.95
+  corridor_distance_m: 2
   corridor_overlap: 0.9
 notifications:
   cooldown_seconds: 21600

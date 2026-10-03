@@ -16,7 +16,7 @@
       "motorcycle_access": { "enum": ["unknown", "probable", "confirmed", "prohibited"] },
       "routability": { "enum": ["unknown", "yes", "no"] }
     } },
-    "evidence": { "type": "array", "items": { "type": "object", "required": ["question", "position", "reference", "eligible_for_state", "review_status"], "properties": { "eligible_for_state": { "type": "boolean" }, "review_status": { "enum": ["unreviewed", "qualified", "rejected"] } } } },
+    "evidence": { "type": "array", "items": { "type": "object", "required": ["question", "position", "reference", "eligible_for_state", "review_status"], "properties": { "question": { "enum": ["physical_existence", "motorcycle_access", "routability"] }, "position": { "enum": ["supports", "contradicts"] }, "reference": { "type": "string", "minLength": 1 }, "certainty": { "enum": ["probable", "confirmed"] }, "eligible_for_state": { "type": "boolean" }, "review_status": { "enum": ["unreviewed", "qualified", "rejected"] } } } },
     "issues": { "type": "array", "items": { "type": "object" } },
     "lifecycle": { "enum": ["discovered", "investigating", "awaiting_review", "approved_for_import", "rejected", "archived"] },
     "review": { "type": "object", "required": ["state", "reasons"], "properties": { "state": { "enum": ["not_required", "queued", "in_review", "resolved"] }, "reasons": { "type": "array", "items": { "type": "string" } }, "recommended_action": { "type": ["string", "null"] } } }

@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ScoutStore, FakeAdapter, collectAdapter, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, classifyHost, ThermalGovernor, HeavyWorkLease, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
+import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
+import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rtt-scout-'));
 const line = (coords) => ({ type: 'LineString', coordinates: coords });
@@ -85,10 +86,25 @@ test('contradictory legal evidence stays explicit and queues review', () => {
     { question: 'motorcycle_access', position: 'contradicts', reference: 'synthetic-e2', eligible_for_state: true, review_status: 'qualified' }];
   assessEvidence(c); assert.equal(c.states.motorcycle_access, 'contradictory'); assert.equal(c.review.state, 'queued');
 });
+test('qualified but provisional evidence stays probable and remains reviewable', () => {
+  const c = cand([[0, 0], [0.01, 0]]); c.evidence = [
+    { question: 'physical_existence', position: 'supports', certainty: 'probable', reference: 'synthetic-e3', eligible_for_state: true, review_status: 'qualified' },
+    { question: 'motorcycle_access', position: 'supports', certainty: 'probable', reference: 'synthetic-e4', eligible_for_state: true, review_status: 'qualified' }];
+  assessEvidence(c); assert.equal(c.states.exists, 'probable'); assert.equal(c.states.motorcycle_access, 'probable'); assert.equal(c.review.state, 'queued');
+});
 test('missing geometry and missing name are retained for review', () => {
   const c = candidateFromObservation(obs(null, null)); assessEvidence(c);
   assert.equal(c.geometry, null); assert.equal(c.observations[0].name, null); assert.equal(c.review.state, 'queued');
   assert.ok(c.review.reasons.includes('no usable geometry'));
+});
+test('geometry-less candidates cannot be asserted new against an empty master view', () => {
+  const result = matchMaster(cand(null), []);
+  assert.equal(result.type, 'AMBIGUOUS'); assert.equal(result.reason, 'geometry unavailable');
+});
+test('source identifiers are path-safe and queue listing rejects traversal', () => {
+  assert.throws(() => normalizeObservation({}, { sourceKey: '../private' }), /safe identifier/);
+  const store = new ScoutStore(path.join(tmp, 'path-safe'));
+  assert.throws(() => store.list('../private'), /invalid Scout queue/);
 });
 test('AI disabled, absent, timed out, errored, malformed, and nonsense are non-authoritative', async () => {
   assert.equal((await consultAI(null, {}, { enabled: false })).status, 'disabled');
@@ -105,6 +121,36 @@ test('AI result is constrained to a bounded advisory structure', async () => {
 test('queue restart recovery preserves jobs and duplicate submission returns same job', () => {
   const store = new ScoutStore(path.join(tmp, 'queue-recover')); const a = store.enqueue('synthetic', { x: 1 }), b = store.enqueue('synthetic', { x: 1 });
   assert.equal(a.job_id, b.job_id); store.claim(); assert.equal(store.list('running').length, 1); assert.equal(store.recover(), 1); assert.equal(store.list('pending').length, 1);
+});
+test('crash recovery does not resurrect an already completed queue item', () => {
+  const store = new ScoutStore(path.join(tmp, 'queue-terminal')); const j = store.enqueue('synthetic', { x: 9 });
+  store.claim(); const completed = { ...j, state: 'done' };
+  store.atomic(path.join(store.queue, 'done', `${j.job_id}.json`), completed);
+  assert.equal(store.recover(), 0); assert.equal(store.list('pending').length, 0); assert.equal(store.list('done').length, 1);
+});
+test('source scheduler obeys politeness interval and bounded retry backoff', async () => {
+  const store = new ScoutStore(path.join(tmp, 'source-scheduler')); let calls = 0;
+  const broken = { key: 'temporary-api', collect: async () => { calls++; throw new Error('offline'); } };
+  const scheduler = new SourceScheduler(store, { minimum_interval_ms: 60_000, maximum_failures: 2 });
+  const first = await scheduler.run(broken, { now_ms: 1_000_000 }); assert.equal(first.failures, 1); assert.equal(calls, 1);
+  assert.equal((await scheduler.run(broken, { now_ms: 1_000_001 })).deferred, true); assert.equal(calls, 1);
+  const second = await scheduler.run(broken, { now_ms: 1_061_000 }); assert.equal(second.failures, 2);
+  const exhausted = await scheduler.run(broken, { now_ms: 1_181_000 }); assert.equal(exhausted.deferred, true); assert.equal(exhausted.state, 'AMBER'); assert.equal(calls, 2);
+});
+test('source scheduler enforces a rolling per-minute request cap', async () => {
+  const store = new ScoutStore(path.join(tmp, 'source-rate-limit')), nowMs = Date.now();
+  const adapter = new FakeAdapter('polite-source', [{ source_id: 'one' }]);
+  const scheduler = new SourceScheduler(store, { minimum_interval_ms: 0, max_per_minute: 1 });
+  assert.equal((await scheduler.run(adapter, { now_ms: nowMs })).queued, 1);
+  assert.equal((await scheduler.run(adapter, { now_ms: nowMs + 1 })).reason, 'source rate limit');
+  assert.equal((await scheduler.run(adapter, { now_ms: nowMs + 60_001 })).queued, 1);
+});
+test('candidate updates are versioned and AI consultations are privately audited', async () => {
+  const store = new ScoutStore(path.join(tmp, 'audit')); const c = cand([[0, 0], [0.01, 0]], 'audit'); store.saveCandidate(c);
+  const updated = store.updateCandidate(c.candidate_id, (value) => { value.issues.push('inspect junction'); return value; });
+  assert.equal(updated.version, 2); assert.ok(updated.issues.includes('inspect junction'));
+  await consultAIAndRecord(null, {}, { provider: 'fake', reason: 'synthetic-test', candidate_id: c.candidate_id, evidence_refs: ['synthetic-e1'] }, store, { enabled: true });
+  const audit = store.read('ai-audit.json'); assert.equal(audit[0].status, 'disabled'); assert.equal(audit[0].action_taken, 'advisory only');
 });
 test('worker one-shot recovers, processes queued work, and persists full review context', () => {
   const root = path.join(tmp, 'worker-run'), store = new ScoutStore(root);
@@ -143,6 +189,14 @@ test('Planetiler starting while heavy work is active causes a yield decision', (
   const decision = classifyHost({ planetiler_active: true, mem_available_mb: 8000, swap_used_mb: 0 });
   assert.equal(decision.allow_heavy, false); assert.ok(decision.reasons.length);
 });
+test('host snapshot reuses factory job state and detects loaded Ollama without starting services', () => {
+  const root = path.join(tmp, 'host-snapshot'), running = path.join(root, 'queue', 'running'); fs.mkdirSync(running, { recursive: true });
+  fs.writeFileSync(path.join(running, 'job.json'), '{}');
+  const snapshot = readHostSnapshot({ factoryDir: root, sample: () => ({ cpu_temp_c: 50, nvme_temp_c: 40, dgpu: { power_w: 170 } }),
+    commands: [{ pid: 1, cmdline: 'ollama serve' }], runCommand: (bin, args) => args[0] === 'is-active' ? 'active' : 'NAME ID SIZE PROCESSOR UNTIL\nqwen2.5 123 4GB 100% GPU 2m' });
+  assert.equal(snapshot.factory_state, 'building'); assert.equal(snapshot.planetiler_active, false);
+  assert.equal(snapshot.local_ai_active, true); assert.equal(snapshot.other_heavy_lease, null);
+});
 test('thermal warm, hot, critical states pause in increasing severity; bogus NVIDIA power is ignored', () => {
   assert.equal(classifyHost({ cpu_temp_c: 86 }).thermal, 'WARM');
   assert.equal(classifyHost({ cpu_temp_c: 91 }).thermal, 'HOT');
@@ -158,6 +212,17 @@ test('thermal hysteresis requires sustained cooling before resuming heavy work',
   assert.equal(g.update({ cpu_temp_c: 91 }).state, 'HOT');
   assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, false); assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, false);
   assert.equal(g.update({ cpu_temp_c: 82 }).allow_heavy, true);
+});
+test('resource governor persists thermal state and defers work through a restart', () => {
+  const store = new ScoutStore(path.join(tmp, 'resource-persist'));
+  let governor = new ScoutResourceGovernor(store, { thermal: { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98,
+    warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 2 } });
+  assert.equal(governor.evaluate({ cpu_temp_c: 91, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
+  governor = new ScoutResourceGovernor(store, { thermal: { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98,
+    warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 2 } });
+  assert.equal(governor.evaluate({ cpu_temp_c: 82, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
+  const recovered = governor.evaluate({ cpu_temp_c: 82, mem_available_mb: 8000, swap_used_mb: 0 });
+  assert.equal(recovered.allow_heavy, true); assert.equal(store.read('resource.json').state, 'GREEN');
 });
 test('heavy lease permits one owner and recovers a lease from a previous boot', () => {
   const f = path.join(tmp, 'lease', 'heavy.json'); let boot = 'boot-a';
@@ -178,6 +243,23 @@ test('notification dedupe, escalation, recovery, and provider errors never throw
   clock += 101; assert.equal((await center.emit({ key: 'hot', severity: 'RED', message: 'critical' })).sent, true);
   assert.equal((await center.emit({ key: 'hot', severity: 'INFO', message: 'recovered', recovery: true })).sent, true);
   assert.equal(email.deliveries.length, 3); assert.match(center.state().events[0].delivery.SMS, /failed/);
+});
+test('notification severity cannot downgrade an active RED and can remind after its interval', async () => {
+  let clock = 10_000; const center = new NotificationCenter(path.join(tmp, 'notify-escalation', 'state.json'),
+    { cooldown_ms: 100, repeat_reminder_ms: 500, now_ms: () => clock });
+  await center.emit({ key: 'integrity', severity: 'RED', message: 'integrity hold' });
+  assert.equal((await center.emit({ key: 'integrity', severity: 'AMBER', message: 'degraded' })).reason, 'lower-severity');
+  clock += 501; assert.equal((await center.emit({ key: 'integrity', severity: 'RED', message: 'still held' })).sent, true);
+  const restarted = new NotificationCenter(path.join(tmp, 'notify-escalation', 'state.json'), { now_ms: () => clock });
+  assert.equal(restarted.state().events.length, 2);
+});
+test('corrupt persistent queue enters durable RED and refuses another worker pass', () => {
+  const root = path.join(tmp, 'worker-corrupt'), store = new ScoutStore(root); store.ensure();
+  fs.writeFileSync(path.join(store.queue, 'pending', 'bad.json'), '{broken');
+  const first = spawnSync(process.execPath, ['scripts/scout/worker.mjs', '--once'], { cwd: process.cwd(), env: { ...process.env, FACTORY_DIR: root }, encoding: 'utf8' });
+  assert.equal(first.status, 0); assert.match(store.read('red.json').reason, /queue recovery failed/);
+  const second = spawnSync(process.execPath, ['scripts/scout/worker.mjs', '--once'], { cwd: process.cwd(), env: { ...process.env, FACTORY_DIR: root }, encoding: 'utf8' });
+  assert.equal(second.status, 0); assert.equal(store.read('red.json').status, 'RED');
 });
 test('notifications queue a digest without credentials', () => {
   const c = new NotificationCenter(path.join(tmp, 'digest', 'state.json'));

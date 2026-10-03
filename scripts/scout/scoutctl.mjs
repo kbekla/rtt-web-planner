@@ -11,7 +11,10 @@ const store = new ScoutStore(factory);
 const [cmd, ...args] = process.argv.slice(2);
 const usage = 'scoutctl status|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>';
 if (cmd === 'status') console.log(JSON.stringify(store.status(), null, 2));
-else if (cmd === 'list') console.log(JSON.stringify(store.list(args[0] || 'reviews'), null, 2));
+else if (cmd === 'list') {
+  try { console.log(JSON.stringify(store.list(args[0] || 'reviews'), null, 2)); }
+  catch (e) { console.error(e.message); process.exitCode = 2; }
+}
 else if (cmd === 'show') {
   const file = path.join(factory, 'scout', 'candidates', `${args[0]}.json`);
   if (!fs.existsSync(file)) { console.error(`candidate not found: ${args[0]}`); process.exitCode = 1; }
