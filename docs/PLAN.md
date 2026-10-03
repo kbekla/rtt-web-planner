@@ -1,6 +1,6 @@
 # RT&T Self-Hosted Map Build: Plan
 
-Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below), followed by a factory-hardening pass. Phase 3 waits for an explicit go-ahead.
+Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below), followed by a factory-hardening pass and the unattended factory. **Phase 3a** (the RT&T trail contract and build, synthetic data only) is done; Phase 3b waits for a go-ahead.
 
 ## 0. Decisions recorded at approval (these override anything below)
 1. RT&T trail and lane data must be independently sourced and carry provenance. Nothing proprietary may be derived from OSM. Any OSM-derived feature is isolated and flagged for licensing review.
@@ -272,6 +272,20 @@ The A17 can now run unattended: a systemd user-service job queue, GREEN/AMBER/RE
 - [ ] Rebuilding after editing one feature changes only that feature. All other `rtt_id`s and geometries are unchanged, checked by diffing a tile-decode.
 - [ ] `queryRenderedFeatures` in the viewer returns `rtt_id`, and feature-state highlighting works through `promoteId`.
 - [ ] The RT&T source carries its own attribution string. The OSM tileset contains zero RT&T features.
+
+#### Phase 3a results (2026-10-03, synthetic fixture only)
+Details are in [RTT-TRAILS.md](RTT-TRAILS.md).
+- Schema v1, the source registry with an approval gate, and the validator. Errors reject the input. OSM-derived, unknown or unapproved sources, and disallowed methods, are quarantined, never silently built.
+- The Planetiler custom profile builds a separate `rtt-trails.pmtiles` (layer `rtt_trails`, z0–16, RT&T-only attribution) with a content-addressed build ID and a manifest.
+- [x] Every input feature has a unique, non-empty `rtt_id`. The build fails on duplicates or missing IDs.
+- [x] Rebuilding after editing one feature changes only that feature (tile-decode diff, z0–16).
+- [x] Byte-identical across thread counts and input order.
+- [x] The RT&T source carries its own attribution. The OSM tilesets (Monaco, UK) contain zero RT&T features.
+- [ ] `queryRenderedFeatures` / `promoteId` feature-state in the viewer → Phase 3b.
+- Deviations from the original plan:
+  - z16 is the maximum zoom: it's Planetiler's limit, and viewers overzoom for z17.
+  - No integer MVT feature IDs: the custom YAML profile can't set them, and `promoteId` uses the string `rtt_id`.
+  - Lines are kept at every zoom so the archive header and tile range agree (`pmtiles verify`).
 
 ### Phase 4: Contrasting region (Colorado, then full US)
 - Add a config file only. **Pass criterion: no pipeline code changes required.** Any change that is needed gets made generically and re-tested on UK.

@@ -81,6 +81,7 @@ tests/        repo hygiene, schema, attribution, render (+ golden screenshots)
 docs/PLAN.md  phased plan and acceptance criteria
 docs/STYLE-BACKLOG.md  open style issues from the visual reviews
 docs/FACTORY.md        unattended factory: queue, systemd, autonomy rules, AI helper
+docs/RTT-TRAILS.md     RT&T trail layer: data contract, provenance rules, build
 ```
 
 See [ATTRIBUTION.md](ATTRIBUTION.md) for licensing. The OSM and OpenMapTiles credit must be visible on every map.
