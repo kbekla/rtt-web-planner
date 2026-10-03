@@ -26,6 +26,13 @@ test('duplicate rtt_id fails the whole input', () => {
   assert.match(validate(fc, contract).errors.join('\n'), /duplicate rtt_id/);
 });
 
+test('v2: kind and status optional; canonical legal/access strings accepted exactly', () => {
+  assert.deepEqual(one((f) => { delete f.properties.kind; delete f.properties.status; }).errors, []);
+  for (const k of ['BOAT', 'Restricted Byway', 'Bridleway', 'Footpath']) assert.deepEqual(one((f) => { f.properties.kind = k; }).errors, [], k);
+  for (const s of ['none_recorded', 'restricted_tro', 'temporary_tro', 'closed_tro', 'review_required']) assert.deepEqual(one((f) => { f.properties.status = s; }).errors, [], s);
+  assert.match(one((f) => { f.properties.kind = 'boat'; }).errors.join(), /kind='boat' not in/);
+});
+
 test('rtt_id must be present and well-formed', () => {
   assert.match(one((f) => { delete f.properties.rtt_id; }).errors.join(), /missing 'rtt_id'/);
   assert.match(one((f) => { f.properties.rtt_id = 'way/123456'; }).errors.join(), /does not match/);
@@ -43,7 +50,9 @@ test('schema: enums, unknown properties and provenance fields are enforced', () 
 test('geometry: lines only, >= 2 points, finite, in range, non-zero length', () => {
   assert.match(one((f) => { f.geometry = { type: 'Point', coordinates: [7.42, 43.73] }; }).errors.join(), /LineString or MultiLineString/);
   assert.match(one((f) => { f.geometry.coordinates = [[7.42, 43.73]]; }).errors.join(), /fewer than 2 points/);
-  assert.match(one((f) => { f.geometry.coordinates = [[7.42, 43.73], [7.42, 43.73]]; }).errors.join(), /shorter than 1 m/);
+  const tiny = one((f) => { f.geometry.coordinates = [[7.42, 43.73], [7.42, 43.73]]; });
+  assert.deepEqual(tiny.errors, [], 'a sub-1 m line is a review flag, not an error (v2)');
+  assert.match(tiny.reviews[0].reasons.join(), /shorter than 1 m \(geometry review\)/);
   assert.match(one((f) => { f.geometry.coordinates = [[7.42, 43.73], [7.42, 89]]; }).errors.join(), /outside/);
   assert.match(one((f) => { f.geometry.coordinates = [[7.42, 43.73], [7.43, null]]; }).errors.join(), /non-numeric/);
 });

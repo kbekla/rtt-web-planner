@@ -8,6 +8,8 @@
 //                OSM-derived, unknown/unapproved source, or a method the source
 //                doesn't allow. They are reported for licensing review, never
 //                dropped silently.
+//   reviews      accepted features with a geometry review flag (a line part shorter than 1 m);
+//                the geometry is never altered
 //   accepted     everything else
 //
 // usage: scripts/rtt/validate.mjs <features.geojson> [--report out.json]
@@ -53,6 +55,12 @@ function lineLengthM(coords) {
   return m;
 }
 
+/** Review flags (not errors): reported, never altered. */
+function geometryReviews(g) {
+  const lines = g?.type === 'LineString' ? [g.coordinates] : g?.type === 'MultiLineString' ? g.coordinates : [];
+  return lines.map((l, i) => (Array.isArray(l) && l.length >= 2 && lineLengthM(l) < 1 ? `line ${i} is shorter than 1 m (geometry review)` : null)).filter(Boolean);
+}
+
 function geometryErrors(g) {
   if (!g || typeof g !== 'object') return ['missing geometry'];
   const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : null;
@@ -65,7 +73,6 @@ function geometryErrors(g) {
       if (!Array.isArray(p) || p.length < 2 || !p.slice(0, 2).every(Number.isFinite)) { errs.push(`line ${i} has a non-numeric coordinate`); return; }
       if (p[0] < -180 || p[0] > 180 || p[1] < -85.05112878 || p[1] > 85.05112878) { errs.push(`line ${i} coordinate ${p} outside WGS84/Web Mercator range`); return; }
     }
-    if (lineLengthM(line) < 1) errs.push(`line ${i} is shorter than 1 m`);
   });
   return errs;
 }
@@ -115,7 +122,7 @@ function provenanceIssues(p, sources) {
 
 export function validate(fc, contract = loadContract()) {
   const { schema, sources } = contract;
-  const out = { schema_version: schema.schema_version, errors: [], accepted: [], quarantined: [] };
+  const out = { schema_version: schema.schema_version, errors: [], accepted: [], quarantined: [], reviews: [] };
   if (!fc || fc.type !== 'FeatureCollection' || !Array.isArray(fc.features)) {
     out.errors.push('input is not a GeoJSON FeatureCollection');
     return out;
@@ -134,6 +141,8 @@ export function validate(fc, contract = loadContract()) {
       else seen.set(id, i);
     }
     if (errs.length) { out.errors.push(...errs.map((e) => `${where}: ${e}`)); return; }
+    const reviews = geometryReviews(f.geometry);
+    if (reviews.length) out.reviews.push({ rtt_id: id, reasons: reviews });
     const issues = provenanceIssues(f.properties.provenance, sources);
     if (issues.length) out.quarantined.push({ rtt_id: id, reasons: issues, feature: f });
     else out.accepted.push(f);
@@ -149,7 +158,8 @@ if (process.argv[1] && import.meta.url === `file://${path.resolve(process.argv[1
   const r = validate(fc);
   const ri = process.argv.indexOf('--report');
   if (ri > 0) fs.writeFileSync(process.argv[ri + 1], JSON.stringify({ ...r, accepted: r.accepted.map((f) => f.properties.rtt_id), quarantined: r.quarantined.map(({ rtt_id, reasons }) => ({ rtt_id, reasons })) }, null, 2) + '\n');
-  console.log(`accepted ${r.accepted.length}, quarantined ${r.quarantined.length}, errors ${r.errors.length}`);
+  console.log(`accepted ${r.accepted.length}, quarantined ${r.quarantined.length}, errors ${r.errors.length}, geometry reviews ${r.reviews.length}`);
+  for (const g of r.reviews.slice(0, 20)) console.log(`REVIEW ${g.rtt_id}: ${g.reasons.join('; ')}`);
   for (const q of r.quarantined) console.log(`QUARANTINED ${q.rtt_id}: ${q.reasons.join('; ')}`);
   for (const e of r.errors) console.log(`ERROR ${e}`);
   process.exit(r.errors.length ? 1 : 0);

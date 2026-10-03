@@ -43,25 +43,25 @@ How it's enforced:
 | Planetiler profile | `config/rtt/rtt-trails.planetiler.yml` | What goes into the tiles. |
 | Build | `scripts/rtt/build-trails.mjs` | Validate → canonicalise → content-addressed build → verify → manifest. |
 
-### Feature fields (schema v1)
+### Feature fields (schema v2)
 
 Every feature is a GeoJSON `LineString` or `MultiLineString` (WGS84) with exactly these properties. Any other property is an error, so stray OSM tags can't slip in.
 
 | Field | Rule |
 |---|---|
 | `rtt_id` | Required. `rtt-trail-` plus 12 hex digits. Assigned once when the feature first enters RT&T. It is opaque: never derived from geometry or from any OSM id, never reused, and **unchanged by edits**. |
-| `kind` | Required. `trail`, `bridleway`, `byway`, `cycle_lane`, `shared_lane` or `connector`. |
-| `status` | Required. `open`, `closed`, `seasonal` or `proposed`. |
+| `kind` | Optional (v2). Legal classification: `trail`, `bridleway`, `byway`, `cycle_lane`, `shared_lane`, `connector`, or the canonical map's exact strings `BOAT`, `Restricted Byway`, `Bridleway`, `Footpath`. Absent when the canonical record has none. |
+| `status` | Optional (v2). Access status, **published as `access`**: `open`, `closed`, `seasonal`, `proposed`, or the canonical map's exact strings `none_recorded`, `restricted_tro`, `temporary_tro`, `closed_tro`, `review_required`. |
 | `surface` | Optional. `paved`, `gravel`, `compacted`, `dirt`, `grass`, `boardwalk`, `mixed` or `unknown`. |
 | `name` | Optional, at most 120 characters. |
 | `version` | Required integer ≥ 1. Bumped on every edit. |
 | `provenance.source` | Required. A key in `config/rtt/sources.yaml`. |
-| `provenance.method` | Required. `field_survey`, `gps_trace`, `rtt_digitised`, `licensed_import` or `synthetic`. |
+| `provenance.method` | Required. `field_survey`, `gps_trace`, `rtt_digitised`, `licensed_import`, `synthetic` or `rtt_verified` (v2: the RT&T verified master). |
 | `provenance.captured` | Required. `YYYY-MM-DD`. |
 | `provenance.osm_derived` | Required and explicit (`true`/`false`). True if any part was traced, snapped or copied from OpenStreetMap. |
 | `provenance.notes` | Optional, at most 500 characters. |
 
-Geometry rules: every line has ≥ 2 finite points, lies within the WGS84 / Web Mercator range, and is at least 1 m long.
+Geometry rules: every line has ≥ 2 finite points and lies within the WGS84 / Web Mercator range. A line or line part shorter than 1 m is a **geometry review flag** (v2), never an error, and the geometry is never altered.
 
 ### What happens to each feature
 
