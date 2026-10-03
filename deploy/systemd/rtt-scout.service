@@ -1,0 +1,21 @@
+[Unit]
+Description=RT&T Scout private candidate worker (dormant foundation)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/rtt-map-factory/runner/repo
+ExecStart=/usr/bin/node scripts/scout/worker.mjs
+Restart=on-failure
+RestartSec=30
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+IOWeight=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/rtt-map-factory
+
+# Deliberately not installed or enabled by Milestone 1.

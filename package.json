@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test:unit": "node --test 'tests/repo/*.test.mjs' 'tests/schema/*.test.mjs' 'tests/attribution/*.test.mjs'",
+    "test:scout": "node --test tests/scout/*.test.mjs",
     "test:render": "playwright test"
   },
   "dependencies": {

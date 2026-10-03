@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rtt.invalid/schema/scout-candidate-v1.json",
+  "title": "Private RT&T Scout candidate",
+  "type": "object",
+  "required": ["schema_version", "candidate_id", "version", "observations", "states", "lifecycle", "review"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^scout-[a-f0-9]{20}$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "geometry": { "type": ["object", "null"] },
+    "observations": { "type": "array", "items": { "type": "object" } },
+    "master_match": { "type": "object", "properties": { "type": { "enum": ["UNMATCHED", "EXACT_EXISTING", "LIKELY_EXISTING", "PARTIAL_OVERLAP", "POSSIBLE_PARALLEL", "AMBIGUOUS", "NEW_CANDIDATE"] }, "rtt_ids": { "type": "array", "items": { "type": "string" } } } },
+    "states": { "type": "object", "required": ["exists", "motorcycle_access", "routability"], "properties": {
+      "exists": { "enum": ["unknown", "probable", "confirmed", "disproved"] },
+      "motorcycle_access": { "enum": ["unknown", "probable", "confirmed", "prohibited"] },
+      "routability": { "enum": ["unknown", "yes", "no"] }
+    } },
+    "evidence": { "type": "array", "items": { "type": "object", "required": ["question", "position", "reference", "eligible_for_state", "review_status"], "properties": { "eligible_for_state": { "type": "boolean" }, "review_status": { "enum": ["unreviewed", "qualified", "rejected"] } } } },
+    "issues": { "type": "array", "items": { "type": "object" } },
+    "lifecycle": { "enum": ["discovered", "investigating", "awaiting_review", "approved_for_import", "rejected", "archived"] },
+    "review": { "type": "object", "required": ["state", "reasons"], "properties": { "state": { "enum": ["not_required", "queued", "in_review", "resolved"] }, "reasons": { "type": "array", "items": { "type": "string" } }, "recommended_action": { "type": ["string", "null"] } } }
+  }
+}

@@ -1,0 +1,306 @@
+// Private, deterministic Scout foundation. No network collectors are registered here.
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+export const STATES = Object.freeze({ exists: ['unknown', 'probable', 'confirmed', 'disproved'],
+  motorcycle_access: ['unknown', 'probable', 'confirmed', 'prohibited'],
+  routability: ['unknown', 'yes', 'no'],
+  lifecycle: ['discovered', 'investigating', 'awaiting_review', 'approved_for_import', 'rejected', 'archived'],
+  review: ['not_required', 'queued', 'in_review', 'resolved'] });
+const idHash = (x) => crypto.createHash('sha256').update(canonicalJson(x)).digest('hex');
+const clone = (x) => JSON.parse(JSON.stringify(x));
+const now = () => new Date().toISOString();
+const procStart = (pid) => { try { const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null; } catch { return null; } };
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+export function normalizeObservation(raw, { sourceKey, observedAt = now() } = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('observation must be an object');
+  if (!sourceKey || typeof sourceKey !== 'string') throw new Error('synthetic/source adapter key required');
+  const geometry = raw.geometry == null ? null : clone(raw.geometry);
+  if (geometry) {
+    if (!['LineString', 'MultiLineString'].includes(geometry.type)) throw new Error('geometry must be LineString or MultiLineString');
+    const lines = geometry.type === 'LineString' ? [geometry.coordinates] : geometry.coordinates;
+    if (!Array.isArray(lines) || !lines.length || lines.some((l) => !Array.isArray(l) || l.length < 2 || l.some((p) => !Array.isArray(p) || p.length < 2 || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || Math.abs(p[0]) > 180 || Math.abs(p[1]) > 90))) throw new Error('geometry must contain valid WGS84 line coordinates');
+  }
+  const observation = { source_key: sourceKey, source_id: raw.source_id ?? null, name: raw.name ?? null,
+    geometry, provenance: clone(raw.provenance ?? {}), hints: clone(raw.hints ?? []),
+    evidence_metadata: clone(raw.evidence ?? []), observed_at: observedAt,
+    geometry_sha256: geometry ? idHash(geometry) : null };
+  return { observation, transformations: [] };
+}
+
+export function candidateFromObservation(observation) {
+  const candidateId = `scout-${idHash({ source_key: observation.source_key, source_id: observation.source_id,
+    geometry_sha256: observation.geometry_sha256, name: observation.name }).slice(0, 20)}`;
+  return { schema_version: 1, candidate_id: candidateId, version: 1, created_at: observation.observed_at,
+    updated_at: observation.observed_at, geometry: clone(observation.geometry), geometry_sha256: observation.geometry_sha256,
+    observations: [clone(observation)], master_match: { type: 'UNMATCHED', rtt_ids: [] },
+    evidence: [], states: { exists: 'unknown', motorcycle_access: 'unknown', routability: 'unknown' },
+    confidence: null, duplicate_cluster_id: null, corridor_cluster_id: null, issues: [],
+    lifecycle: 'discovered', review: { state: 'not_required', reasons: [], recommended_action: null } };
+}
+
+function coordinates(g) { return g?.type === 'LineString' ? [g.coordinates] : g?.type === 'MultiLineString' ? g.coordinates : []; }
+function points(g) { return coordinates(g).flat().filter((p) => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1])); }
+const eq = (a, b) => canonicalJson(a) === canonicalJson(b);
+function canonicalGeometry(g) {
+  const lines = coordinates(g).map((line) => {
+    const forward = canonicalJson(line), reverse = canonicalJson([...line].reverse());
+    return forward <= reverse ? line : [...line].reverse();
+  }).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
+  return g?.type === 'LineString' ? { type: 'LineString', coordinates: lines[0] ?? [] } : { type: 'MultiLineString', coordinates: lines };
+}
+function project(pointsList, lat0) {
+  const scale = Math.cos(lat0 * Math.PI / 180) * 111320;
+  return pointsList.map(([lon, lat]) => [lon * scale, lat * 110540]);
+}
+function projectedLines(g, lat0) { return coordinates(g).map((line) => project(line, lat0)); }
+function sampleLines(lines, spacing = 25, cap = 4096) {
+  const total = lines.reduce((sum, line) => sum + line.slice(1).reduce((n, p, i) => n + Math.hypot(p[0] - line[i][0], p[1] - line[i][1]), 0), 0);
+  const step = Math.max(spacing, total / cap);
+  const out = [];
+  for (const line of lines) {
+    if (line.length < 2) continue;
+    for (let i = 1; i < line.length; i++) {
+      const a = line[i - 1], b = line[i], length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const n = Math.max(1, Math.ceil(length / step));
+      for (let j = 0; j < n; j++) { const t = (j + 0.5) / n; out.push({ point: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], weight: length / n }); }
+    }
+  }
+  return out;
+}
+function pointSegmentDistance(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const d = dx * dx + dy * dy;
+  const t = d ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / d)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+function nearest(p, line) {
+  let d = Infinity;
+  for (let i = 1; i < line.length; i++) d = Math.min(d, pointSegmentDistance(p, line[i - 1], line[i]));
+  if (line.length === 1) d = Math.hypot(p[0] - line[0][0], p[1] - line[0][1]);
+  return d;
+}
+function metrics(a, b) {
+  const rawA = points(a), rawB = points(b);
+  if (rawA.length < 2 || rawB.length < 2) return null;
+  const lat0 = [...rawA, ...rawB].reduce((s, p) => s + p[1], 0) / (rawA.length + rawB.length);
+  const linesA = projectedLines(a, lat0), linesB = projectedLines(b, lat0);
+  const pa = sampleLines(linesA), pb = sampleLines(linesB);
+  const directed = (src, dstLines) => src.map(({ point, weight }) => ({ distance: Math.min(...dstLines.map((l) => nearest(point, l))), weight }));
+  const da = directed(pa, linesB), db = directed(pb, linesA);
+  const coverage = (d, tolerance) => d.reduce((s, v) => s + (v.distance <= tolerance ? v.weight : 0), 0) / Math.max(Number.EPSILON, d.reduce((s, v) => s + v.weight, 0));
+  const meanA = da.reduce((s, n) => s + n.distance * n.weight, 0) / da.reduce((s, n) => s + n.weight, 0);
+  const meanB = db.reduce((s, n) => s + n.distance * n.weight, 0) / db.reduce((s, n) => s + n.weight, 0);
+  const mean = Math.min(meanA, meanB);
+  const coverage3 = [coverage(da, 3), coverage(db, 3)], coverage15 = [coverage(da, 15), coverage(db, 15)];
+  const overlapA = coverage(da, 18), overlapB = coverage(db, 18);
+  return { mean_m: mean, overlap: Math.min(overlapA, overlapB), one_way_overlap: Math.max(overlapA, overlapB),
+    tight_coverage: Math.min(...coverage3), loose_coverage: Math.min(...coverage15), candidate_coverage: coverage3[0], master_coverage: coverage3[1] };
+}
+
+export function matchMaster(candidate, masterFeatures, thresholds = {}, trustedIdentity = () => false) {
+  const policy = { near_m: 35, partial_overlap: 0.25, likely_overlap: 0.95, likely_distance_m: 3, tight_coverage: 0.95, loose_coverage: 0.05, ...thresholds };
+  const exact = [], scored = [];
+  for (const f of masterFeatures) {
+    const id = f?.properties?.rtt_id;
+    if (!id || !f.geometry) continue;
+    if (eq(canonicalGeometry(candidate.geometry), canonicalGeometry(f.geometry))) { exact.push(id); continue; }
+    const m = metrics(candidate.geometry, f.geometry);
+    if (m) scored.push({ id, ...m, identity_corroborated: Boolean(trustedIdentity(candidate, f)) });
+  }
+  if (exact.length) return { type: 'EXACT_EXISTING', rtt_ids: exact.sort(), scores: [], thresholds: policy };
+  scored.sort((a, b) => a.mean_m - b.mean_m || a.id.localeCompare(b.id));
+  const near = scored.filter((x) => x.mean_m <= policy.near_m || x.loose_coverage >= policy.partial_overlap);
+  if (!near.length) return { type: 'NEW_CANDIDATE', rtt_ids: [], scores: scored.slice(0, 3), thresholds: policy };
+  const overlap = near.filter((x) => x.loose_coverage >= policy.partial_overlap);
+  if (overlap.length > 1 && overlap[0].mean_m - overlap[1].mean_m < 5) return { type: 'AMBIGUOUS', rtt_ids: overlap.map((x) => x.id), scores: overlap, thresholds: policy };
+  if (overlap.length && overlap[0].tight_coverage >= policy.tight_coverage && overlap[0].mean_m <= policy.likely_distance_m)
+    return { type: overlap[0].identity_corroborated ? 'LIKELY_EXISTING' : 'AMBIGUOUS', rtt_ids: [overlap[0].id], scores: overlap, thresholds: policy };
+  if (overlap.length && overlap[0].tight_coverage < policy.tight_coverage && overlap[0].loose_coverage >= policy.partial_overlap) {
+    const bothLoose = overlap[0].candidate_coverage === 0 && overlap[0].master_coverage === 0 && overlap[0].loose_coverage >= 0.95;
+    return { type: bothLoose ? 'POSSIBLE_PARALLEL' : 'PARTIAL_OVERLAP', rtt_ids: overlap.map((x) => x.id), scores: overlap, thresholds: policy };
+  }
+  return { type: 'POSSIBLE_PARALLEL', rtt_ids: near.map((x) => x.id), scores: near, thresholds: policy };
+}
+
+export function assessEvidence(candidate) {
+  const ev = candidate.evidence ?? [];
+  // Source-provided metadata stays descriptive. Only separately reviewed/qualified
+  // evidence records may affect deterministic states.
+  const qualified = ev.filter((e) => e.eligible_for_state === true && e.review_status === 'qualified');
+  const exists = qualified.filter((e) => e.question === 'physical_existence' && ['supports', 'contradicts'].includes(e.position));
+  const access = qualified.filter((e) => e.question === 'motorcycle_access' && ['supports', 'contradicts'].includes(e.position));
+  const state = (arr, yes, no) => arr.some((e) => e.position === 'supports') && arr.some((e) => e.position === 'contradicts') ? 'contradictory'
+    : arr.some((e) => e.position === 'supports') ? yes : arr.some((e) => e.position === 'contradicts') ? no : 'unknown';
+  candidate.states.exists = state(exists, 'confirmed', 'disproved');
+  candidate.states.motorcycle_access = state(access, 'confirmed', 'prohibited');
+  if (!['unknown', 'yes', 'no'].includes(candidate.states.routability)) candidate.states.routability = 'unknown';
+  const reasons = [];
+  if (!candidate.geometry) reasons.push('no usable geometry');
+  if (candidate.states.exists === 'unknown' || candidate.states.exists === 'contradictory') reasons.push('physical existence needs review');
+  if (candidate.states.motorcycle_access === 'unknown' || candidate.states.motorcycle_access === 'contradictory') reasons.push('motorcycle access needs review');
+  if (candidate.master_match && !['UNMATCHED', 'NEW_CANDIDATE', 'EXACT_EXISTING'].includes(candidate.master_match.type)) reasons.push(`master match requires review (${candidate.master_match.type})`);
+  if (reasons.length) { candidate.review = { state: 'queued', reasons, recommended_action: 'review evidence and source records' }; candidate.lifecycle = 'awaiting_review'; }
+  else candidate.review = { state: 'not_required', reasons: [], recommended_action: null };
+  return candidate;
+}
+
+export function clusterObservations(candidates, { distance_m = 4, overlap = 0.9 } = {}) {
+  const sorted = [...candidates].sort((a, b) => a.candidate_id.localeCompare(b.candidate_id));
+  const groups = [];
+  for (const c of sorted) {
+    let group = groups.find((g) => g.some((m) => { const v = metrics(c.geometry, m.geometry); return v && v.mean_m <= distance_m && v.overlap >= overlap; }));
+    if (!group) groups.push(group = []);
+    group.push(c);
+  }
+  return groups.filter((g) => g.length > 1).map((members) => ({ cluster_id: `corridor-${idHash(members.map((m) => m.candidate_id).sort()).slice(0, 16)}`,
+    candidate_ids: members.map((m) => m.candidate_id).sort() }));
+}
+
+export class ScoutStore {
+  constructor(root) { this.root = root; this.state = path.join(root, 'scout'); this.queue = path.join(this.state, 'queue'); }
+  ensure() { for (const d of ['pending', 'running', 'held', 'done', 'reviews', 'sources']) fs.mkdirSync(path.join(this.queue, d), { recursive: true }); fs.mkdirSync(this.state, { recursive: true }); }
+  atomic(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.tmp-${process.pid}`; const fd = fs.openSync(tmp, 'w'); fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fsyncSync(fd); fs.closeSync(fd); fs.renameSync(tmp, file); }
+  enqueue(source_key, payload, { max_attempts = 3 } = {}) {
+    this.ensure(); const key = idHash({ source_key, payload });
+    for (const s of ['pending', 'running', 'held', 'done']) { const file = path.join(this.queue, s, `${key}.json`); if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file)); }
+    const job = { job_id: key, source_key, payload: clone(payload), state: 'pending', attempts: 0, max_attempts, not_before: null, created_at: now(), updated_at: now() };
+    this.atomic(path.join(this.queue, 'pending', `${key}.json`), job); return job;
+  }
+  list(state) { const d = path.join(this.queue, state); return fs.existsSync(d) ? fs.readdirSync(d).filter((x) => x.endsWith('.json')).sort().map((x) => JSON.parse(fs.readFileSync(path.join(d, x)))) : []; }
+  claim({ now_ms = Date.now() } = {}) { this.ensure(); const job = this.list('pending').find((j) => !j.not_before || Date.parse(j.not_before) <= now_ms); if (!job) return null;
+    const from = path.join(this.queue, 'pending', `${job.job_id}.json`), to = path.join(this.queue, 'running', `${job.job_id}.json`);
+    try { fs.renameSync(from, to); job.state = 'running'; job.attempts++; job.updated_at = now(); this.atomic(to, job); return job; } catch { return null; } }
+  finish(job, state = 'done', error = null, { base_backoff_ms = 60_000 } = {}) {
+    const from = path.join(this.queue, 'running', `${job.job_id}.json`); job.updated_at = now();
+    if (error && job.attempts < job.max_attempts) { job.state = 'pending'; job.last_error = String(error); job.not_before = new Date(Date.now() + base_backoff_ms * (2 ** (job.attempts - 1))).toISOString(); }
+    else if (error) { job.state = 'held'; job.last_error = String(error); job.review_reason = 'source failed after bounded retries'; }
+    else job.state = state;
+    this.atomic(path.join(this.queue, job.state, `${job.job_id}.json`), job); fs.rmSync(from, { force: true }); return job;
+  }
+  recover() { this.ensure(); const running = this.list('running'); for (const j of running) { j.state = 'pending'; j.recovered_at = now(); this.atomic(path.join(this.queue, 'pending', `${j.job_id}.json`), j); fs.rmSync(path.join(this.queue, 'running', `${j.job_id}.json`), { force: true }); } return running.length; }
+  saveCandidate(c) {
+    this.atomic(path.join(this.state, 'candidates', `${c.candidate_id}.json`), c);
+    const reviewFile = path.join(this.queue, 'reviews', `${c.candidate_id}.json`);
+    if (c.review.state === 'queued') this.atomic(reviewFile, { candidate_id: c.candidate_id, name: c.observations[0]?.name ?? null,
+      states: clone(c.states), master_match: clone(c.master_match), evidence: clone(c.evidence),
+      source_observations: c.observations.map((o) => ({ source_key: o.source_key, hints: clone(o.hints), evidence_metadata: clone(o.evidence_metadata), provenance: clone(o.provenance) })), issues: clone(c.issues),
+      reasons: clone(c.review.reasons), recommended_action: c.review.recommended_action, created_at: c.created_at });
+    else fs.rmSync(reviewFile, { force: true });
+  }
+  status() { return { worker: this.read('worker.json'), candidates: this.candidateCount(), queue: Object.fromEntries(['pending','running','held','done','reviews'].map((s) => [s, this.list(s).length])), last_activity: this.read('activity.json') }; }
+  read(name) { try { return JSON.parse(fs.readFileSync(path.join(this.state, name), 'utf8')); } catch { return null; } }
+  candidateCount() { const d = path.join(this.state, 'candidates'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.json')).length : 0; }
+}
+
+export class FakeAdapter { constructor(key, observations = []) { this.key = key; this.observations = observations; } async collect(cursor = null) { return { observations: clone(this.observations), cursor, checked_at: now() }; } }
+export async function collectAdapter(adapter, store, cursor = null) {
+  try { const result = await adapter.collect(cursor); for (const raw of result.observations ?? []) store.enqueue(adapter.key, raw); store.atomic(path.join(store.queue, 'sources', `${adapter.key}.json`), { key: adapter.key, cursor: result.cursor ?? cursor, last_checked: result.checked_at ?? now(), state: 'GREEN' }); return { queued: result.observations?.length ?? 0 }; }
+  catch (e) { store.atomic(path.join(store.queue, 'sources', `${adapter.key}.json`), { key: adapter.key, cursor, last_checked: now(), state: 'AMBER', error: String(e) }); return { queued: 0, error: String(e) }; }
+}
+
+export async function consultAI(provider, request, { enabled = true, timeout_ms = 1000 } = {}) {
+  if (!enabled || !provider) return { status: 'disabled', result: null };
+  let timer;
+  try {
+    const result = await Promise.race([provider.assess(clone(request)), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('AI timeout')), timeout_ms); })]);
+    if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.summary !== 'string' || !['low','medium','high'].includes(result.confidence)) return { status: 'malformed', result: null };
+    const safe = { summary: result.summary.slice(0, 1000), confidence: result.confidence, suggestions: Array.isArray(result.suggestions) ? result.suggestions.filter((s) => typeof s === 'string').slice(0, 10) : [] };
+    return { status: 'ok', result: safe };
+  } catch (e) { return { status: 'unavailable', result: null, reason: String(e.message ?? e) }; }
+  finally { clearTimeout(timer); }
+}
+
+export function classifyHost(snapshot, history = [], policy = {}) {
+  const t = policy.thermal ?? { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85 };
+  const max = (key) => Math.max(-Infinity, ...[snapshot, ...history].map((x) => x[key]).filter(Number.isFinite));
+  const cpu = max('cpu_temp_c'), nvme = max('nvme_temp_c');
+  const gpu = Math.max(-Infinity, ...[snapshot, ...history].flatMap((x) => [x.dgpu?.temp_c, x.igpu?.temp_c]).filter(Number.isFinite));
+  let thermal = 'NORMAL';
+  if (cpu >= t.critical_cpu_c || nvme >= t.critical_nvme_c) thermal = 'CRITICAL';
+  else if (cpu >= t.hot_cpu_c || nvme >= t.hot_nvme_c || gpu >= t.gpu_hot_c) thermal = 'HOT';
+  else if (cpu >= t.warm_cpu_c || nvme >= t.warm_nvme_c) thermal = 'WARM';
+  const lowDisk = snapshot.disk?.free_bytes != null && snapshot.disk.free_bytes < (policy.min_free_disk_bytes ?? 20 * 1e9);
+  const highLoad = snapshot.load1 != null && snapshot.load1 > (policy.max_load1 ?? 12);
+  const lowMemory = snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048);
+  const contention = snapshot.factory_state === 'building' || snapshot.planetiler_active || snapshot.other_heavy_lease ||
+    snapshot.local_ai_active || (snapshot.mem_available_mb != null && snapshot.mem_available_mb < (policy.min_mem_available_mb ?? 2048)) ||
+    (snapshot.swap_used_mb != null && snapshot.swap_used_mb > (policy.max_swap_used_mb ?? 2048)) || highLoad || lowDisk;
+  const unsafeHost = lowDisk || (lowMemory && snapshot.mem_available_mb < (policy.red_mem_available_mb ?? 512));
+  return { thermal, contention, allow_heavy: thermal === 'NORMAL' && !contention,
+    allow_ai: thermal === 'NORMAL' && !contention && !snapshot.local_ai_active,
+    state: thermal === 'CRITICAL' || unsafeHost ? 'RED' : thermal === 'HOT' || thermal === 'WARM' || contention ? 'AMBER' : 'GREEN',
+    reasons: [...(contention ? ['shared workload or resource pressure'] : []), ...(thermal !== 'NORMAL' ? [`thermal ${thermal}`] : [])] };
+}
+
+export class ThermalGovernor {
+  constructor(policy = {}) { this.policy = { warm_cpu_c: 85, hot_cpu_c: 90, critical_cpu_c: 98, warm_nvme_c: 65, hot_nvme_c: 72, critical_nvme_c: 80, gpu_hot_c: 85, recovery_margin_c: 5, recovery_samples: 6, ...policy }; this.state = 'NORMAL'; this.cool = 0; }
+  update(s) {
+    const p = this.policy, cpu = s.cpu_temp_c ?? -Infinity, nvme = s.nvme_temp_c ?? -Infinity, gpu = s.dgpu?.temp_c ?? s.igpu?.temp_c ?? -Infinity;
+    const requested = cpu >= p.critical_cpu_c || nvme >= p.critical_nvme_c ? 'CRITICAL'
+      : cpu >= p.hot_cpu_c || nvme >= p.hot_nvme_c || gpu >= p.gpu_hot_c ? 'HOT'
+        : cpu >= p.warm_cpu_c || nvme >= p.warm_nvme_c ? 'WARM' : 'NORMAL';
+    const rank = { NORMAL: 0, WARM: 1, HOT: 2, CRITICAL: 3 };
+    if (rank[requested] > rank[this.state]) { this.state = requested; this.cool = 0; }
+    else if (requested === this.state) this.cool = 0;
+    else {
+      const margin = p.recovery_margin_c;
+      const below = this.state === 'CRITICAL' ? cpu < p.critical_cpu_c - margin && nvme < p.critical_nvme_c - margin
+        : this.state === 'HOT' ? cpu < p.hot_cpu_c - margin && nvme < p.hot_nvme_c - margin && gpu < p.gpu_hot_c - margin
+          : cpu < p.warm_cpu_c - margin && nvme < p.warm_nvme_c - margin;
+      this.cool = below ? this.cool + 1 : 0;
+      if (this.cool >= p.recovery_samples) { this.state = requested; this.cool = 0; }
+    }
+    return { state: this.state, allow_heavy: this.state === 'NORMAL', allow_ai: this.state === 'NORMAL', cool_samples: this.cool };
+  }
+}
+
+export class HeavyWorkLease {
+  constructor(file, { bootId = () => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(); } catch { return null; } }, alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, processStart = procStart } = {}) { this.file = file; this.bootId = bootId; this.alive = alive; this.processStart = processStart; }
+  read() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return null; } }
+  acquire(owner, { pid = process.pid } = {}) {
+    const old = this.read(), boot = this.bootId(), existed = fs.existsSync(this.file);
+    if (old && old.boot_id === boot && this.alive(old.pid) && old.process_start === this.processStart(old.pid)) return { ok: false, owner: old.owner };
+    if (old || existed) fs.rmSync(this.file, { force: true });
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    try { const fd = fs.openSync(this.file, 'wx', 0o600); fs.writeFileSync(fd, JSON.stringify({ owner, pid, process_start: this.processStart(pid), boot_id: boot, acquired_at: now() })); fs.fsyncSync(fd); fs.closeSync(fd); return { ok: true, recovered: Boolean(old) }; }
+    catch (e) { if (e.code === 'EEXIST') return { ok: false, owner: this.read()?.owner ?? 'unknown' }; throw e; }
+  }
+  release(owner) { const old = this.read(); if (old?.owner !== owner || old?.pid !== process.pid) return false; fs.rmSync(this.file, { force: true }); return true; }
+}
+
+export class NotificationCenter {
+  constructor(file, { providers = {}, cooldown_ms = 6 * 60 * 60 * 1000, now_ms = () => Date.now() } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.clock = now_ms; }
+  state() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return { events: [], active: {} }; } }
+  save(s) { fs.mkdirSync(path.dirname(this.file), { recursive: true }); const t = `${this.file}.tmp-${process.pid}`; fs.writeFileSync(t, JSON.stringify(s, null, 2) + '\n'); fs.renameSync(t, this.file); }
+  async emit({ key, severity, message, channels = ['EMAIL','SMS'], recovery = false }) { const s = this.state(), old = s.active[key], nowMs = this.clock();
+    if (recovery) { if (!old || old.resolved) return { sent: false, reason: 'not-active' }; }
+    else if (old && old.severity === severity && nowMs - old.last_sent_ms < this.cooldown) return { sent: false, reason: 'cooldown' };
+    const event = { key, severity: recovery ? 'INFO' : severity, message, recovery, at: new Date(nowMs).toISOString(), delivery: {} };
+    for (const channel of channels) { try { await this.providers[channel]?.send(event); event.delivery[channel] = this.providers[channel] ? 'sent' : 'unconfigured'; } catch (e) { event.delivery[channel] = `failed: ${e.message ?? e}`; } }
+    s.events.push(event); if (recovery) s.active[key] = { ...old, resolved: true, recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: nowMs, resolved: false };
+    this.save(s); return { sent: true, event };
+  }
+  digest(items) { const s = this.state(); s.digest = [...(s.digest ?? []), ...clone(items)]; this.save(s); return s.digest.length; }
+}
+
+export class TestDeliveryProvider { constructor() { this.deliveries = []; } async send(event) { this.deliveries.push(clone(event)); } }
+
+export function workerLock(file, { bootId = () => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(); } catch { return null; } }, alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, processStart = procStart } = {}) {
+  let old = null; try { old = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* no lock */ }
+  const existed = fs.existsSync(file);
+  const boot = bootId(); if (old && old.boot_id === boot && alive(old.pid) && old.process_start === processStart(old.pid)) return { ok: false, owner: old.pid };
+  if (old || existed) fs.rmSync(file, { force: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try { const fd = fs.openSync(file, 'wx', 0o600); fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, process_start: processStart(process.pid), boot_id: boot, heartbeat_at: now() })); fs.fsyncSync(fd); fs.closeSync(fd); return { ok: true, recovered: Boolean(old) }; }
+  catch (e) { if (e.code === 'EEXIST') return { ok: false, owner: (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).pid; } catch { return null; } })() }; throw e; }
+}
+
+export function makeHeartbeat({ status = 'GREEN', job_id = null, source_key = null, current_step = 'idle' } = {}) { return { status, job_id, source_key, current_step, pid: process.pid, boot_id: (() => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim(); } catch { return null; } })(), heartbeat_at: now() }; }

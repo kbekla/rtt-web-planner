@@ -1,0 +1,41 @@
+# Foundation policy only. Nothing schedules or enables Scout automatically yet.
+version: 1
+worker:
+  poll_seconds: 30
+  max_attempts: 3
+  retry_backoff_seconds: [60, 300, 1800]
+  heavy_work_concurrency: 1
+resource_governor:
+  minimum_available_ram_mb: 2048
+  red_available_ram_mb: 512
+  maximum_swap_used_mb: 2048
+  minimum_free_disk_gb: 20
+  maximum_load1: 12
+  thermal:
+    # Conservative initial hold points. Confirm against measured A17 successful-build
+    # telemetry before any unattended service is activated.
+    warm_cpu_c: 85
+    hot_cpu_c: 90
+    critical_cpu_c: 98
+    warm_nvme_c: 65
+    hot_nvme_c: 72
+    critical_nvme_c: 80
+    gpu_hot_c: 85
+    recovery_margin_c: 5
+    recovery_samples: 6
+    sample_interval_seconds: 10
+matching:
+  near_distance_m: 35
+  partial_overlap: 0.25
+  likely_overlap: 0.8
+  likely_distance_m: 10
+  corridor_distance_m: 18
+  corridor_overlap: 0.9
+notifications:
+  cooldown_seconds: 21600
+  repeat_reminder_seconds: 86400
+  digest_period: daily
+ai:
+  enabled: false
+  timeout_seconds: 30
+  max_escalations_per_candidate: 1
