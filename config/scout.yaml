@@ -11,6 +11,9 @@ sources:
   rate_limit_per_minute: 10
   concurrency: 1
 resource_governor:
+  # Keep heavyweight Scout work disabled until the factory runner also honors
+  # the shared lease and joint admission/yield behavior has been verified.
+  factory_coordination_verified: false
   minimum_available_ram_mb: 2048
   red_available_ram_mb: 512
   maximum_swap_used_mb: 2048

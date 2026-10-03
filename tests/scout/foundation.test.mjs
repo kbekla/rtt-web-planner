@@ -267,7 +267,7 @@ test('cooperative heavy work is gated, checkpoints on factory/thermal holds, and
   const lease = new HeavyWorkLease(path.join(root, 'state', 'heavy-work.json'));
   const resources = new ScoutResourceGovernor(store, { thermal: { hot_entry_samples: 2, recovery_samples: 2 } });
   const saved = [], stoppedAI = [];
-  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-bulk',
+  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-bulk', factoryCoordinationVerified: true,
     checkpoint: async () => ({ offset: saved.length + 10 }), persistCheckpoint: async (point) => saved.push(point),
     unloadAI: async () => stoppedAI.push(true) });
   const cool = { factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0, cpu_temp_c: 70, nvme_temp_c: 40 };
@@ -290,12 +290,20 @@ test('heavy lease permits one owner and recovers a lease from a previous boot', 
   assert.equal(lease.acquire('planetiler', { pid: 1 }).ok, true); assert.equal(lease.acquire('scout', { pid: 2 }).ok, false);
   boot = 'boot-b'; assert.equal(lease.acquire('scout', { pid: 2 }).recovered, true);
 });
+test('idle host still fails closed for heavy work until factory coordination is verified', async () => {
+  const root = path.join(tmp, 'unverified-factory-coordination'), store = new ScoutStore(root);
+  const lease = new HeavyWorkLease(path.join(root, 'state', 'heavy-work.json'));
+  const worker = new ScoutHeavyWorkCoordinator({ lease, resources: new ScoutResourceGovernor(store), owner: 'scout-bulk' });
+  const result = await worker.start({ factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0, cpu_temp_c: 60, nvme_temp_c: 35 });
+  assert.deepEqual([result.started, result.state, result.reason], [false, 'AMBER', 'BLOCKED_FACTORY_COORDINATION_UNAVAILABLE']);
+  assert.equal(fs.existsSync(path.join(root, 'state', 'heavy-work.json')), false, 'blocked start must not take the shared lease');
+});
 test('Scout heavy work waits for another local AI lease owner', async () => {
   const root = path.join(tmp, 'ai-heavy-lease'), store = new ScoutStore(root);
   const lease = new HeavyWorkLease(path.join(root, 'state', 'heavy-work.json'));
   assert.equal(lease.acquire('ollama').ok, true);
   const resources = new ScoutResourceGovernor(store);
-  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-ai', checkpoint: async () => null });
+  const worker = new ScoutHeavyWorkCoordinator({ lease, resources, owner: 'scout-ai', checkpoint: async () => null, factoryCoordinationVerified: true });
   const result = await worker.start({ factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0 });
   assert.equal(result.started, false); assert.match(result.reason, /ollama/);
   assert.equal(lease.release('ollama'), true);
