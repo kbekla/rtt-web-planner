@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rtt-trails/1",
+  "title": "RT&T trail/lane feature (schema version 1)",
+  "description": "Contract for every RT&T trail or lane entering the proprietary layer. scripts/rtt/validate.mjs enforces it, reading enums and patterns from this file. Provenance rules (which sources may enter) live in config/rtt/sources.yaml. Changing this file is a schema change: bump schema_version and review the importers.",
+  "schema_version": 1,
+  "type": "object",
+  "required": ["type", "geometry", "properties"],
+  "properties": {
+    "type": { "const": "Feature" },
+    "geometry": {
+      "description": "WGS84 lon/lat. LineString or MultiLineString; every line has >= 2 points and non-zero length.",
+      "type": "object",
+      "properties": { "type": { "enum": ["LineString", "MultiLineString"] } }
+    },
+    "properties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rtt_id", "kind", "status", "version", "provenance"],
+      "properties": {
+        "rtt_id": {
+          "description": "Opaque, permanent identifier assigned when the feature first enters RT&T. Never derived from geometry or from any OSM id, never reused, and unchanged by edits (edits bump version).",
+          "type": "string", "pattern": "^rtt-trail-[0-9a-f]{12}$"
+        },
+        "kind": { "enum": ["trail", "bridleway", "byway", "cycle_lane", "shared_lane", "connector"] },
+        "status": { "enum": ["open", "closed", "seasonal", "proposed"] },
+        "surface": { "enum": ["paved", "gravel", "compacted", "dirt", "grass", "boardwalk", "mixed", "unknown"] },
+        "name": { "type": "string", "maxLength": 120 },
+        "version": { "type": "integer", "minimum": 1 },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "method", "captured", "osm_derived"],
+          "properties": {
+            "source": { "description": "Key in config/rtt/sources.yaml.", "type": "string", "pattern": "^[a-z0-9-]+$" },
+            "method": { "enum": ["field_survey", "gps_trace", "rtt_digitised", "licensed_import", "synthetic"] },
+            "captured": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+            "osm_derived": { "description": "True if any part was traced, snapped or copied from OpenStreetMap. Such features are quarantined for licensing review and never built into the proprietary layer.", "type": "boolean" },
+            "notes": { "type": "string", "maxLength": 500 }
+          }
+        }
+      }
+    }
+  }
+}

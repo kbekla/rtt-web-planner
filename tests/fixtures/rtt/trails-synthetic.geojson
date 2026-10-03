@@ -1,0 +1,32 @@
+{
+  "type": "FeatureCollection",
+  "name": "rtt-trails-synthetic",
+  "description": "Synthetic RT&T trails near Monaco for Phase 3a. Invented coordinates, not traced from any map. Features ...a1 and ...a2 must be quarantined.",
+  "features": [
+    { "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[7.4180, 43.7310], [7.4205, 43.7322], [7.4231, 43.7329], [7.4262, 43.7341]] },
+      "properties": { "rtt_id": "rtt-trail-000000000001", "kind": "trail", "status": "open", "surface": "gravel", "name": "Synthetic Harbour Trail", "version": 1,
+        "provenance": { "source": "rtt-synthetic-fixture", "method": "synthetic", "captured": "2026-10-03", "osm_derived": false } } },
+    { "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[7.4300, 43.7385], [7.4321, 43.7398], [7.4347, 43.7410]] },
+      "properties": { "rtt_id": "rtt-trail-000000000002", "kind": "cycle_lane", "status": "open", "surface": "paved", "version": 3,
+        "provenance": { "source": "rtt-synthetic-fixture", "method": "synthetic", "captured": "2026-10-03", "osm_derived": false } } },
+    { "type": "Feature",
+      "geometry": { "type": "MultiLineString", "coordinates": [[[7.4150, 43.7280], [7.4163, 43.7291]], [[7.4166, 43.7294], [7.4182, 43.7306]]] },
+      "properties": { "rtt_id": "rtt-trail-000000000003", "kind": "connector", "status": "seasonal", "surface": "boardwalk", "version": 1,
+        "provenance": { "source": "rtt-synthetic-fixture", "method": "synthetic", "captured": "2026-10-03", "osm_derived": false } } },
+    { "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[7.4100, 43.7420], [7.4128, 43.7433], [7.4161, 43.7441], [7.4190, 43.7452], [7.4222, 43.7460]] },
+      "properties": { "rtt_id": "rtt-trail-000000000004", "kind": "bridleway", "status": "proposed", "surface": "dirt", "name": "Synthetic Ridge Bridleway", "version": 2,
+        "provenance": { "source": "rtt-synthetic-fixture", "method": "synthetic", "captured": "2026-10-03", "osm_derived": false } } },
+    { "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[7.4250, 43.7360], [7.4270, 43.7372]] },
+      "properties": { "rtt_id": "rtt-trail-0000000000a1", "kind": "trail", "status": "open", "version": 1,
+        "provenance": { "source": "rtt-synthetic-fixture", "method": "synthetic", "captured": "2026-10-03", "osm_derived": true,
+          "notes": "Synthetic stand-in for a feature traced from OSM: must be quarantined." } } },
+    { "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[7.4280, 43.7330], [7.4300, 43.7342]] },
+      "properties": { "rtt_id": "rtt-trail-0000000000a2", "kind": "shared_lane", "status": "open", "version": 1,
+        "provenance": { "source": "rtt-synthetic-unreviewed", "method": "synthetic", "captured": "2026-10-03", "osm_derived": false } } }
+  ]
+}

@@ -1,0 +1,23 @@
+# RT&T trail data sources. Every feature's provenance.source must be listed here.
+# A feature enters the proprietary layer only if its source is approved, is not
+# OSM-derived, and allows the feature's capture method; otherwise it is
+# quarantined for licensing review (scripts/rtt/validate.mjs). Approving a source
+# is a human licensing decision: record who/when in `approved_by`.
+#
+# Only synthetic test sources exist so far. Real RT&T data is not imported yet.
+sources:
+  rtt-synthetic-fixture:
+    name: RT&T synthetic test fixture (invented geometry, no real-world data)
+    licence: RT&T proprietary (synthetic)
+    attribution: '© RT&T'
+    methods: [synthetic]
+    osm_derived: false
+    approved: true
+    approved_by: 'Phase 3a test contract, 2026-10-03'
+  rtt-synthetic-unreviewed:
+    name: Synthetic source awaiting licensing review (test of the approval gate)
+    licence: unknown
+    attribution: '© RT&T'
+    methods: [synthetic]
+    osm_derived: false
+    approved: false
