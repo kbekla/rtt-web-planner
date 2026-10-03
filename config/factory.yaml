@@ -38,12 +38,24 @@ thermal:
 power:
   require_ac: true
 
-# Local AI helper (scripts/factory/ai.mjs). Advisory only, GPU-only.
+# Local AI helper (scripts/factory/ai.mjs). Advisory only.
+# Hybrid placement: while a job runs it may only use the GPU (never CPU/RAM needed by
+# Planetiler); when the factory is idle it may use the whole machine, fastest first.
+# Measured on this A17 (qwen2.5-coder:3b, 200 tokens): CPU 6 threads 13 tok/s, power-capped
+# GTX 1650 6.3 tok/s, so idle prefers the CPU. Put gpu first if the GPU is ever fixed.
 ai:
   enabled: true
   model: qwen2.5-coder:3b   # chosen by scripts/factory/ai-bench.mjs (docs/FACTORY.md)
-  min_mem_available_mb: 2048
+  modes:
+    busy: [gpu]
+    idle: [cpu, gpu]
+  min_mem_available_mb: 2048      # GPU mode
   max_swap_used_mb: 2048
+  cpu_threads: 6                  # CPU mode (idle only)
+  cpu_min_mem_available_mb: 6144
+  cpu_max_load: 4
+  cpu_memory_high: 5G             # rtt-ollama cap while a CPU call runs; restored afterwards
+  cpu_memory_max: 6G
 
 worker:
   poll_s: 30

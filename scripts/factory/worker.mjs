@@ -58,16 +58,48 @@ function heartbeat(patch = {}) {
 }
 
 // --- single instance --------------------------------------------------------
+const bootId = () => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return null; } };
+
+/** Is `pid` a live factory worker (not just any process that reused the pid)? */
+function isWorker(pid) {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').some((a) => a.endsWith('factory/worker.mjs')); } catch { return false; }
+}
+
+/**
+ * Single-instance lock. The lock records the pid and the boot it was taken in.
+ * It only counts if it is from this boot and the pid is still a worker, so a
+ * pid reused after a reboot (or by an unrelated process) never blocks startup.
+ */
 function acquire() {
   Q.ensureDirs();
   const lockFile = path.join(Q.STATE_DIR, 'worker.pid');
+  let held = null;
   try {
-    const pid = Number(fs.readFileSync(lockFile, 'utf8'));
-    if (pid && pid !== process.pid) {
-      try { process.kill(pid, 0); log(`another worker (pid ${pid}) is running; exiting`); process.exit(1); } catch { /* stale */ }
-    }
+    const text = fs.readFileSync(lockFile, 'utf8').trim();
+    held = text.startsWith('{') ? JSON.parse(text) : { pid: Number(text), boot_id: null }; // old plain-pid format
   } catch { /* no lock */ }
-  fs.writeFileSync(lockFile, String(process.pid));
+  if (held?.pid && held.pid !== process.pid && (held.boot_id === null || held.boot_id === bootId()) && isWorker(held.pid)) {
+    log(`another worker (pid ${held.pid}) is running; exiting`);
+    process.exit(1);
+  }
+  if (held?.pid && held.pid !== process.pid) log(`replacing stale worker lock (pid ${held.pid}${held.boot_id && held.boot_id !== bootId() ? ', previous boot' : ', not a worker'})`);
+  Q.writeJsonAtomic(lockFile, { pid: process.pid, boot_id: bootId(), started_at: new Date().toISOString() });
+}
+
+/** Remove temp files left by atomic writes of processes that are gone (e.g. killed workers). */
+function cleanTempFiles() {
+  let n = 0;
+  for (const dir of [Q.STATE_DIR, ...Q.STATES.map((s) => path.join(Q.QUEUE, s))]) {
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir)) {
+      const pid = Number(/\.tmp-(\d+)$/.exec(f)?.[1]);
+      if (!pid || pid === process.pid) continue;
+      try { process.kill(pid, 0); continue; } catch { /* writer is gone */ }
+      fs.rmSync(path.join(dir, f), { force: true });
+      n++;
+    }
+  }
+  return n;
 }
 
 // --- job commands -----------------------------------------------------------
@@ -132,7 +164,10 @@ async function handleFailure(job, from, text, meta = {}) {
   if (policy.ai?.enabled && !process.env.RTT_FACTORY_NO_AI && !stopping && classify(text).class === 'unknown') {
     const lastStage = readPipelineStep(job.region);
     ai = await diagnose({ job: `${job.type} ${job.region}`, stage: meta.stage ?? lastStage, exit_code: meta.exit_code,
-      error: text.split('\n')[0], log_tail: text }, policy.ai).catch((e) => ({ suggestion: null, mode: 'rules-only', reason: e.message }));
+      // The failed job's processes have exited, so the factory is idle: the helper may use
+      // the whole machine. Its CPU mode still checks load and RAM, so stragglers keep it on the GPU.
+      error: text.split('\n')[0], log_tail: text }, policy.ai, { busy: false })
+      .catch((e) => ({ suggestion: null, mode: 'rules-only', reason: e.message }));
   }
   const d = decide(job, text, ai?.suggestion ?? null);
   const attempt = job.attempts.at(-1);
@@ -167,6 +202,8 @@ async function recover() {
   // Killed or interrupted builds leave scratch behind; clear what no live process owns.
   const freed = cleanScratch();
   if (freed) log(`startup: cleaned ${(freed / 1e6).toFixed(0)} MB of stale scratch`);
+  const temps = cleanTempFiles();
+  if (temps) log(`startup: removed ${temps} stale temp file(s)`);
   for (const job of orphans) {
     const a = job.attempts.at(-1);
     if (a && !a.ended_at) Object.assign(a, { ended_at: new Date().toISOString(), result: 'aborted' });

@@ -11,7 +11,7 @@ The factory keeps building, validating and promoting regional basemaps without a
 | `rtt-factory.service` | The worker (`scripts/factory/worker.mjs`). It runs one queued job at a time from the **runner checkout** `$FACTORY_DIR/runner/repo`. It restarts on any exit, after 30 s, and blocks sleep while it is up through a `systemd-inhibit` child. The worker is the unit's main process, so a stop's SIGTERM reaches it first. |
 | `rtt-factory-schedule.timer` | Runs daily at 03:15 and catches up after downtime. It enqueues `verify` daily and `repro` on Sundays for each enabled region (`config/factory.yaml`). |
 | `rtt-mapwatch-report.timer` | Writes `$FACTORY_DIR/reports/latest.{json,md}` every hour. |
-| `rtt-ollama.service` | Local AI runtime: localhost only, GPU-only, cgroup memory capped. Optional; the factory works without it. |
+| `rtt-ollama.service` | Local AI runtime: localhost only, cgroup memory capped. GPU-only while a job runs; may use the CPU when the factory is idle. Optional; the factory works without it. |
 | `factoryctl` (`scripts/factory/factoryctl.mjs`) | Dashboard and control. |
 
 The runner checkout is a git worktree pinned to a commit. The worker never runs your working copy, so edits in progress can't leak into unattended builds. To change what the factory runs, commit and then run `factoryctl deploy`. Deploy checks out the commit, runs the factory and hygiene tests there, reinstalls the units and restarts the worker. The worker stops (RED) if the runner's tracked files are modified.
@@ -105,7 +105,11 @@ Model: **qwen2.5-coder:3b** (Q4_K_M, 1.9 GB), pinned by digest in `config/ai.loc
 
 - **Role:** it is consulted only for failures the rules classify as `unknown`. It returns `{class, remediation, summary}` under a JSON schema whose remediation enum is `AI_SELECTABLE`: `resume`, `retry-after-backoff`, `retry-reduced-threads`, `retry-render-tests` or `hold`.
 - **Limits:** a job may use at most one AI-chosen remediation; after that it is held. The model can't run commands, edit files, override RED/AMBER outcomes, or pick `clean-scratch` or `stop-queue`.
-- **GPU-only:** before each call, the helper requires free VRAM ≥ model size + 700 MB, at least 2 GB of system RAM available, and no more than 2 GB of swap in use. After loading, it checks that Ollama placed 100 % of the model on the GPU. Otherwise it unloads the model and the worker continues **rules-only**.
+- **Hybrid placement** (`ai.modes` in `config/factory.yaml`):
+  - **While a job runs (busy): GPU only.** The helper requires free VRAM ≥ model size + 700 MB, at least 2 GB of system RAM available, and no more than 2 GB of swap in use. After loading, it checks that Ollama placed 100 % of the model on the GPU. Otherwise it unloads the model and the worker continues **rules-only**. It never takes CPU or RAM from Planetiler.
+  - **When the factory is idle: the whole machine, fastest first** (default `[cpu, gpu]`). The worker asks the AI only after a job's processes have exited, so in practice every diagnosis runs in idle mode. CPU mode requires at least 6 GB of RAM available, swap within limits, and a 1-minute load ≤ 4, so a build started outside the factory keeps it off the CPU. It raises the `rtt-ollama` memory cap to 6 GB for that call only, then always unloads the model and restores the exact previous cap.
+  - Any caller that doesn't say it is idle gets the busy (GPU-only) behaviour.
+  - Measured on the same diagnosis (`make test-ai`): **CPU 12.9 tok/s, 17 s; GPU 6 tok/s, 56 s.** If the GPU is ever fixed, put `gpu` first in `modes.idle`.
 - **RAM cap:** the service has `MemoryHigh=1.5G`, `MemoryMax=2.5G` and no swap. CPU and IO weight are 20, and it runs at nice 10.
 
 Benchmark (16 labelled failures in `tests/fixtures/ai-eval.json`; `scripts/factory/ai-bench.mjs`; GTX 1650, 4 GB):
@@ -121,7 +125,16 @@ Benchmark (16 labelled failures in `tests/fixtures/ai-eval.json`; `scripts/facto
 
 \* Mostly reclaimable page cache from the memory-mapped model file. Anonymous memory is about 0.3 GB. Every model was 100 % in VRAM.
 
-**Known issue:** the GTX 1650 is stuck at 300 MHz because the NVIDIA driver reads an implausible 170 W power draw against a 60 W cap ("SW Power Cap"). This is why tokens/s are about 6 instead of the 40+ the card should give. A diagnosis takes about 20–60 s, which is acceptable for its occasional use. Fixing it needs root (for example `nvidia-powerd`, clock limits or the driver) and is left to the owner.
+**Known issue:** the GTX 1650 is stuck at 300 MHz because NVIDIA's power management reads an implausible ~172 W draw against a 60 W cap ("SW Power Cap"), so GPU inference runs at about 6 tok/s instead of the 40+ the card should give. The hardware is fine: it worked under Windows 11 days before this install. Tested on 2026-10-02/03, with no improvement from any of:
+- drivers 595 and 580, open and proprietary modules, GSP on and off
+- runtime power management, platform profiles, an EC power drain
+- nouveau/NVK: 4 tok/s; nouveau also runs NVIDIA's GSP firmware
+
+Details and the bug report are in `~/gpu-debug/FINDINGS.md`. The hybrid mode works around it by using the CPU when idle.
+
+## Worker lock
+
+`state/worker.pid` records the worker's pid and the boot it started in. A lock only blocks startup if it is from the current boot **and** that pid is still running `factory/worker.mjs`. A pid reused after a reboot can no longer stall the factory, which happened once on 2026-10-02. At startup the worker also removes temp files left by killed writers.
 
 ## Install / operate
 

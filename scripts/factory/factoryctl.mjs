@@ -61,7 +61,9 @@ async function dashboard() {
   const host = createSampler().sample(null);
   const st = fs.statfsSync(FACTORY);
   const nextJob = Q.next();
-  const ai = policy.ai?.enabled ? await readiness(policy.ai).catch((e) => ({ mode: 'rules-only', reason: e.message })) : { mode: 'rules-only', reason: 'disabled in config/factory.yaml' };
+  const aiOff = { mode: 'rules-only', reason: 'disabled in config/factory.yaml' };
+  const aiBusy = policy.ai?.enabled ? await readiness(policy.ai, { busy: true }).catch((e) => ({ mode: 'rules-only', reason: e.message })) : aiOff;
+  const aiIdle = policy.ai?.enabled ? await readiness(policy.ai, { busy: false }).catch((e) => ({ mode: 'rules-only', reason: e.message })) : aiOff;
   const linger = spawnSync('loginctl', ['show-user', process.env.USER ?? '', '-p', 'Linger', '--value'], { encoding: 'utf8' }).stdout.trim();
 
   let current = null;
@@ -98,7 +100,9 @@ async function dashboard() {
     thermals: { cpu_c: host.cpu_temp_c, nvme_c: host.nvme_temp_c, igpu_c: host.igpu?.temp_c ?? null,
       dgpu_c: host.dgpu?.temp_c ?? null, dgpu: host.dgpu?.runtime_pm ?? null,
       mem_used_mb: host.mem_used_mb, swap_used_mb: host.swap_used_mb, load1: host.load1 },
-    ai: { mode: ai.mode, model: policy.ai?.model, reason: ai.reason },
+    ai: { model: policy.ai?.model, busy: { mode: aiBusy.mode, reason: aiBusy.reason }, idle: { mode: aiIdle.mode, reason: aiIdle.reason },
+      // What the AI would use right now, given whether a job is running.
+      now: running ? aiBusy.mode : aiIdle.mode },
     last_failure: failures[0] ?? null,
     preserved_failures: mw.failures.length,
     promoted: Object.fromEntries(mw.regions.map((r) => [r.region, r.current])),
@@ -129,7 +133,7 @@ function render(d) {
   const t = d.thermals;
   L.push(`thermals CPU ${deg(t.cpu_c)}  NVMe ${deg(t.nvme_c)}  iGPU ${deg(t.igpu_c)}  dGPU ${t.dgpu_c === null ? (t.dgpu ?? '-') : deg(t.dgpu_c)}`
     + `  RAM ${(t.mem_used_mb / 1024).toFixed(1)} GB  swap ${(t.swap_used_mb / 1024).toFixed(1)} GB  load ${t.load1}`);
-  L.push(`ai       ${d.ai.mode} (${d.ai.model}): ${d.ai.reason}`);
+  L.push(`ai       ${d.ai.model}: during builds ${d.ai.busy.mode} (${d.ai.busy.reason}); when idle ${d.ai.idle.mode} (${d.ai.idle.reason})`);
   const f = d.last_failure;
   L.push(`last failure  ${f ? `${f.at?.replace('T', ' ').slice(0, 16)}Z ${f.class} -> ${f.remediation} [${f.level}] ${f.job}` : 'none'}`);
   if (f?.ai) L.push(`              AI: ${f.ai}`);

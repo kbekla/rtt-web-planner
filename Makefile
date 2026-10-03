@@ -2,7 +2,7 @@
 R ?= monaco
 export RTT_REGION := $(R)
 
-.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard
+.PHONY: setup tools region test test-unit test-render repro serve goldens status watch report dashboard test-ai
 
 setup:            ## install pinned npm deps, browser, git hooks and tools
 	npm ci
@@ -44,3 +44,6 @@ report:           ## mapwatch: write $$FACTORY_DIR/reports/latest.{json,md}
 
 dashboard:        ## unattended factory: worker, current job, queue, disk, thermals, last failure
 	node scripts/factory/factoryctl.mjs status
+
+test-ai:          ## live AI helper check (hybrid CPU/GPU placement); loads the model
+	node --test 'tests/ai/*.test.mjs'

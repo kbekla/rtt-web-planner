@@ -222,9 +222,49 @@ test('stale scratch: dead-pid dirs go at once, pid-less dirs after 15 min, live 
   assert.equal(Number(r.stdout.trim()), 2000);
 });
 
+test('a stale or reused worker lock never blocks startup; a live worker does', async () => {
+  reset();
+  const lock = path.join(factory, 'state', 'worker.pid');
+  const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  // This test process is alive but is not a worker: the reused-pid case after a reboot.
+  for (const content of [String(process.pid), JSON.stringify({ pid: process.pid, boot_id: bootId }),
+    JSON.stringify({ pid: process.pid, boot_id: 'some-previous-boot' })]) {
+    fs.writeFileSync(lock, content);
+    const id = enqueue('verify', 'monaco');
+    const r = runWorker({ verify: [['true']] });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /replacing stale worker lock/);
+    assert.equal(where(id).state, 'done');
+  }
+  // A genuinely running worker keeps the lock.
+  const w = spawn('node', [path.join(REPO, 'scripts/factory/worker.mjs')], { env: env({ verify: [['true']] }) });
+  for (let i = 0; i < 50 && !fs.readFileSync(lock, 'utf8').includes(`"pid": ${w.pid}`); i++) await new Promise((r) => setTimeout(r, 100));
+  const second = runWorker({ verify: [['true']] });
+  w.kill('SIGTERM');
+  await new Promise((r) => w.on('close', r));
+  assert.equal(second.status, 1);
+  assert.match(second.stdout, /another worker \(pid \d+\) is running/);
+});
+
+test('stale temp files from killed writers are removed at startup', () => {
+  reset();
+  const dead = spawnSync('true').pid;
+  const stale = path.join(factory, 'state', `worker.json.tmp-${dead}`);
+  const live = path.join(factory, 'state', `worker.json.tmp-${process.pid}`);
+  fs.writeFileSync(stale, '{}');
+  fs.writeFileSync(live, '{}');
+  runWorker({});
+  assert.ok(!fs.existsSync(stale), 'stale temp file kept');
+  assert.ok(fs.existsSync(live), 'temp file of a live process removed');
+  fs.rmSync(live);
+});
+
 test('dashboard shows region, queue, disk, thermals and last failure', () => {
+  reset();
+  enqueue('verify', 'monaco');
+  runWorker({ verify: [['sh', '-c', 'echo "curl: (6) Could not resolve host: x"; exit 6']] });
   const out = ctl('status').stdout;
-  for (const re of [/^worker /m, /^current /m, /^queue /m, /^disk .*free/m, /^thermals CPU/m, /^ai /m, /^last failure .*interrupted/m]) {
+  for (const re of [/^worker /m, /^current /m, /^queue /m, /^disk .*free/m, /^thermals CPU/m, /^ai .*during builds .*when idle/m, /^last failure .*network/m]) {
     assert.match(out, re);
   }
   const d = JSON.parse(ctl('status', '--json').stdout);
