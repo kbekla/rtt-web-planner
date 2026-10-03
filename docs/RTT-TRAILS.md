@@ -2,7 +2,7 @@
 
 This layer holds RT&T's proprietary trail and lane network. It is built into its own archive, `rtt-trails.pmtiles` (layer `rtt_trails`), and is never merged into the OpenStreetMap basemap.
 
-**Status (Phase 3a, 2026-10-03):** the contract and the deterministic pipeline are proven on a **synthetic fixture only**. No real RT&T data has been imported yet. Real data enters only through the contract below.
+**Status (Phases 3a and 3b, 2026-10-03):** the contract, the deterministic pipeline, the viewer integration and the factory job are proven on a **synthetic fixture only**. No real RT&T data has been imported yet. Real data enters only through the contract below.
 
 ## The contract
 
@@ -66,14 +66,28 @@ The output directory contains `rtt-trails.pmtiles`, `manifest.json`, `quarantine
 - **Stable diff:** moving one vertex of one feature and bumping its version changes only that `rtt_id` in the decoded tiles. Every other feature is identical in every tile from z0 to z16.
 - **Separation:** the promoted Monaco and UK OSM archives contain no `rtt_trails` layer and no `rtt_id` in any tile around the fixture area. The RT&T archive carries no OpenStreetMap or OpenMapTiles credit.
 
-## Not done yet (Phase 3b and later)
+## Viewer (Phase 3b)
 
-- **Viewer:**
-  - the separate style source, with `promoteId: "rtt_id"` and feature-state highlighting
-  - trail styling and minzoom
-  - render goldens
-- **Integer MVT feature IDs:** the custom YAML profile doesn't set them. Highlighting will use `promoteId` on the string `rtt_id`.
-- **Pipeline:**
-  - a factory job type and promotion (`output/rtt-trails/current`)
-  - adding the trail tests to the pipeline
+- **Style:** `styles/rtt/trails.json` is a separate style fragment: source `rtt-trails` (`pmtiles:///tiles/rtt-trails.pmtiles`) with RT&T-only attribution and `promoteId: { rtt_trails: "rtt_id" }`. `scripts/rtt/build-trail-style.mjs` validates it and installs it at `$FACTORY_DIR/assets/styles/rtt-trails.json`.
+  - **Layers:** `rtt-trails-selected` (feature-state halo), `-casing`, `-line` (colour by `kind`, opacity by `status`), `-line-proposed` (dashed), and `-label` (names from z14).
+  - **Visibility:** trails show from z11 and are overzoomed beyond z16.
+- **Viewer:** `/viewer/?region=monaco&trails=1` merges the fragment into the basemap style at load time. The basemap `style.json` never contains RT&T data, and without `trails=1` nothing changes.
+  - **Selection:** clicking a trail selects it with feature-state keyed by `rtt_id`.
+  - **Test hooks:** `window.__rtt.selectTrail(id)`, `trailState(id)` and `renderedTrails()`.
+- **Server:** `scripts/serve.mjs` serves `/tiles/rtt-trails.pmtiles` from `output/rtt-trails/<RTT_TRAILS_BUILD_ID|current>`.
+- **Render tests:** `tests/render/trails.spec.mjs` (opt-in with `RTT_TRAILS=1`; `make test-rtt-render`). It checks:
+  - exactly the build's accepted IDs render (read from its manifest), with `feature.id == rtt_id`
+  - quarantined IDs never render
+  - selection is set and cleared
+  - both attributions show
+  - no external requests
+  - reference screenshots (reviewed) for the overview, labelled detail and selected states, on desktop and mobile. These are defined for the synthetic fixture only.
+
+## Pipeline and factory (Phase 3b)
+
+`scripts/rtt/pipeline-trails [input]` runs validate → build → style → `tests/rtt` → trail render tests → `promote-region rtt-trails <id>`. It promotes only if every step passes, records its steps for mapwatch, and preserves failures like the region pipelines. The factory runs it as a `trails` job (see [FACTORY.md](FACTORY.md)), using `trails.input` from `config/factory.yaml`, which is the synthetic fixture for now.
+
+## Not done yet
+
+- **Integer MVT feature IDs:** the custom YAML profile doesn't set them. Highlighting uses `promoteId` on the string `rtt_id`.
 - **Real data:** importing real RT&T trail data, through this contract, once its sources are entered and approved in the registry.

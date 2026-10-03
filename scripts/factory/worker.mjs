@@ -113,6 +113,8 @@ function command(job) {
     case 'verify': return [['node', ...UNIT_TESTS], ['npx', 'playwright', 'test']];
     case 'repro': return [['node', 'scripts/check-repro.mjs', r]];
     case 'refresh': return [['node', 'scripts/fetch-region.mjs', r, '--refresh'], ['scripts/pipeline', r]];
+    // RT&T trail layer: validate -> build -> style -> tests -> render tests -> promote.
+    case 'trails': return [['scripts/rtt/pipeline-trails', policy.trails?.input ?? 'tests/fixtures/rtt/trails-synthetic.geojson']];
     default: throw new Error(`unknown job type ${job.type}`);
   }
 }
@@ -228,10 +230,13 @@ async function runOne(job) {
     job.attempts.push({ n: job.attempts.length + 1, started_at: new Date().toISOString(), ended_at: new Date().toISOString(), result: 'refused' });
     return handleFailure(job, 'pending', refused);
   }
-  const needsApproval = job.type === 'refresh' || !policy.regions?.[job.region]?.enabled;
+  const needsApproval = job.type === 'refresh'
+    || (job.type === 'trails' ? !policy.trails?.enabled : !policy.regions?.[job.region]?.enabled);
   if (needsApproval && !job.approved) {
     job.held = { at: new Date().toISOString(), level: 'AMBER', class: 'approval',
-      reason: job.type === 'refresh' ? 'New OSM snapshots need approval (AMBER).' : `Region '${job.region}' is not enabled in config/factory.yaml (AMBER).` };
+      reason: job.type === 'refresh' ? 'New OSM snapshots need approval (AMBER).'
+        : job.type === 'trails' ? 'RT&T trail builds are not enabled (trails.enabled in config/factory.yaml) (AMBER).'
+          : `Region '${job.region}' is not enabled in config/factory.yaml (AMBER).` };
     Q.event(job, 'held: needs approval');
     return Q.move(job, 'pending', 'held');
   }

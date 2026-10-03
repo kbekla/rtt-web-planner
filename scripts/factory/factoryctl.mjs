@@ -157,6 +157,9 @@ function schedule() {
       made.push(Q.enqueue({ type, region, by: 'schedule', priority: type === 'verify' ? 60 : 70 }).id);
     }
   }
+  if (policy.trails?.enabled && s.trails === 'weekly' && sunday && !Q.active('trails', Q.TRAILS).length) {
+    made.push(Q.enqueue({ type: 'trails', region: Q.TRAILS, by: 'schedule', priority: 65 }).id);
+  }
   console.log(made.length ? `scheduled: ${made.join(', ')}` : 'scheduled: nothing new');
 }
 

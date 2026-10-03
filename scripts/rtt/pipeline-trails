@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# One command for the RT&T trail layer:
+#   validate -> build (own PMTiles) -> trail style -> trail tests -> trail render tests -> promote
+#   scripts/rtt/pipeline-trails [features.geojson]   (default: the synthetic fixture)
+# Promotes output/rtt-trails/current only if every step passes. Progress is recorded for
+# mapwatch in $FACTORY_DIR/state/pipeline-rtt-trails.json; failures are preserved like the
+# region pipelines. Never touches the OSM basemap builds or styles.
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO"
+source "$REPO/config/pipeline.env"
+input="${1:-tests/fixtures/rtt/trails-synthetic.geojson}"
+name=rtt-trails
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$FACTORY_DIR/logs" "$FACTORY_DIR/state"
+export RTT_PIPELINE_LOG="$FACTORY_DIR/logs/pipeline-$name-$stamp.log"
+exec > >(tee -a "$RTT_PIPELINE_LOG") 2>&1
+
+state() { node scripts/lib/pipeline-state.mjs "$name" "$@"; }
+current=""
+step() { current="$1"; printf '\n=== %s\n' "$*"; state step "$1"; }
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then state fail "$current" "$rc"; fi' EXIT
+
+state start
+step "validate";      node scripts/rtt/validate.mjs "$input"
+step "build";         out="$(node scripts/rtt/build-trails.mjs "$input" | tee /dev/stderr | tail -1)"
+id="$(basename "$out")"
+state build-id "$id"
+step "style";         node scripts/rtt/build-trail-style.mjs
+step "tests-unit";    node --test 'tests/rtt/*.test.mjs'
+step "tests-render";  RTT_TRAILS=1 RTT_REGION=monaco RTT_TRAILS_BUILD_ID="$id" npx playwright test tests/render/trails.spec.mjs
+step "promote";       scripts/promote-region "$name" "$id"
+state done

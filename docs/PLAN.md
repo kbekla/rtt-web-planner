@@ -1,6 +1,6 @@
 # RT&T Self-Hosted Map Build: Plan
 
-Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below), followed by a factory-hardening pass and the unattended factory. **Phase 3a** (the RT&T trail contract and build, synthetic data only) is done; Phase 3b waits for a go-ahead.
+Status: **Approved 2026-10-02.** Phases 0–2 are implemented and validated (Phase 2 results below), followed by a factory-hardening pass and the unattended factory. **Phases 3a and 3b** (the RT&T trail contract, build, viewer integration and factory job, synthetic data only) are done. Real trail import and Phase 4 wait for a go-ahead.
 
 ## 0. Decisions recorded at approval (these override anything below)
 1. RT&T trail and lane data must be independently sourced and carry provenance. Nothing proprietary may be derived from OSM. Any OSM-derived feature is isolated and flagged for licensing review.
@@ -281,7 +281,12 @@ Details are in [RTT-TRAILS.md](RTT-TRAILS.md).
 - [x] Rebuilding after editing one feature changes only that feature (tile-decode diff, z0–16).
 - [x] Byte-identical across thread counts and input order.
 - [x] The RT&T source carries its own attribution. The OSM tilesets (Monaco, UK) contain zero RT&T features.
-- [ ] `queryRenderedFeatures` / `promoteId` feature-state in the viewer → Phase 3b.
+- [x] `queryRenderedFeatures` returns `rtt_id`, and feature-state highlighting works through `promoteId` (Phase 3b; `tests/render/trails.spec.mjs`).
+
+#### Phase 3b results (2026-10-03, synthetic fixture only)
+- A separate trail style fragment and source. The viewer merges them with `?trails=1`, the basemap style is untouched, and the region goldens are unchanged.
+- Selection uses feature-state keyed by `rtt_id`. Reviewed render goldens cover the overview, labelled detail and selected states.
+- `scripts/rtt/pipeline-trails` and the factory `trails` job (gated, scheduled weekly) promote `output/rtt-trails/current` only when all trail tests pass.
 - Deviations from the original plan:
   - z16 is the maximum zoom: it's Planetiler's limit, and viewers overzoom for z17.
   - No integer MVT feature IDs: the custom YAML profile can't set them, and `promoteId` uses the string `rtt_id`.

@@ -19,6 +19,14 @@ schedule:
   verify: daily       # re-test each region's promoted build (GREEN)
   repro: weekly       # Sundays: rebuild in scratch and require identical bytes (GREEN)
   refresh: never      # new OSM snapshots are AMBER: enqueue manually, approve to run
+  trails: weekly      # Sundays: rebuild/verify/promote the RT&T trail layer (if trails.enabled)
+
+# RT&T trail layer (scripts/rtt/pipeline-trails; docs/RTT-TRAILS.md). Its own artefact
+# (output/rtt-trails), never part of a region build. Only the synthetic fixture so far;
+# switching `input` to real data is a human decision once its sources are approved.
+trails:
+  enabled: true
+  input: tests/fixtures/rtt/trails-synthetic.geojson
 
 # Disk guard: a job starts only if free space covers
 #   snapshot (if not yet downloaded) + expected scratch + expected output + margin.

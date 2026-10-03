@@ -19,7 +19,9 @@ import { FACTORY, REPO } from '../lib/common.mjs';
 export const QUEUE = path.join(FACTORY, 'queue');
 export const STATES = ['pending', 'running', 'held', 'done', 'cancelled'];
 export const STATE_DIR = path.join(FACTORY, 'state');
-export const JOB_TYPES = ['build', 'verify', 'repro', 'refresh'];
+export const JOB_TYPES = ['build', 'verify', 'repro', 'refresh', 'trails'];
+// The RT&T trail layer is its own artefact, not a region: trails jobs always use this name.
+export const TRAILS = 'rtt-trails';
 
 export function ensureDirs() {
   for (const s of [...STATES, 'logs']) fs.mkdirSync(path.join(QUEUE, s), { recursive: true });
@@ -71,6 +73,7 @@ export function move(job, from, to) {
 
 export function enqueue({ type, region, by = 'user', priority = 50, options = {}, note = null }) {
   if (!JOB_TYPES.includes(type)) throw new Error(`unknown job type '${type}' (${JOB_TYPES.join(', ')})`);
+  if ((type === 'trails') !== (region === TRAILS)) throw new Error(`job type 'trails' goes with '${TRAILS}' and only with it (got ${type} ${region})`);
   if (!/^[a-z0-9-]+$/.test(region)) throw new Error(`invalid region '${region}'`);
   ensureDirs();
   const now = new Date();

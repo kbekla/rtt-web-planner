@@ -61,11 +61,13 @@ export function diskCheck(job, policy, repo = REPO) {
   let parts;
   switch (job.type) {
     case 'verify': parts = { tests: 1 * GB }; break;
+    // Trail builds are small (the synthetic layer is ~26 KB); allow generously for tests and scratch.
+    case 'trails': parts = { trails: 2 * GB }; break;
     case 'repro': parts = { scratch, output }; break;
     case 'refresh': parts = { snapshot: (snapshotBytes || 3 * GB) * headroom, scratch, output }; break;
     default: parts = { snapshot: snapshotOnDisk ? 0 : snapshotBytes, scratch, output };
   }
-  if (!lock && job.type !== 'verify') parts.unknown_region_allowance = 10 * GB;
+  if (!lock && job.type !== 'verify' && job.type !== 'trails') parts.unknown_region_allowance = 10 * GB;
   parts.margin = margin;
   const need = Object.values(parts).reduce((a, b) => a + b, 0);
   const fmt = (b) => `${(b / GB).toFixed(1)} GB`;

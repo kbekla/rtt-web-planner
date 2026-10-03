@@ -259,6 +259,24 @@ test('stale temp files from killed writers are removed at startup', () => {
   fs.rmSync(live);
 });
 
+test('trails jobs: gated by trails.enabled, tied to rtt-trails, run the trail pipeline', () => {
+  reset();
+  assert.notEqual(ctl('enqueue', 'trails', 'monaco').status, 0, 'trails must target rtt-trails');
+  assert.notEqual(ctl('enqueue', 'build', 'rtt-trails').status, 0, 'rtt-trails only takes trails jobs');
+  setPolicy({ trails: { enabled: false } });
+  const held = enqueue('trails', 'rtt-trails');
+  runWorker({ trails: [['true']] });
+  assert.equal(where(held).state, 'held');
+  assert.match(where(held).job.held.reason, /trail builds are not enabled/);
+  setPolicy({ trails: { enabled: true, input: 'tests/fixtures/rtt/trails-synthetic.geojson' } });
+  const ok = enqueue('trails', 'rtt-trails');
+  const r = runWorker({ trails: [['sh', '-c', 'echo trails-pipeline-ran']] });
+  setPolicy();
+  assert.equal(where(ok).state, 'done', r.stdout + r.stderr);
+  assert.match(fs.readFileSync(where(ok).job.attempts[0].log, 'utf8'), /trails-pipeline-ran/);
+  assert.match(where(ok).job.attempts[0].disk, /trails 2\.0 GB/);
+});
+
 test('dashboard shows region, queue, disk, thermals and last failure', () => {
   reset();
   enqueue('verify', 'monaco');

@@ -47,6 +47,7 @@ The dashboard shows:
 | `verify` | unit + render tests against `current` | Checks the promoted build in place. |
 | `repro` | `scripts/check-repro.mjs <r>` | Rebuilds in scratch with half the threads and requires byte-identical output. |
 | `refresh` | `fetch-region --refresh`, then `pipeline` | Always AMBER: held until approved. The new lock lands in the runner, to be committed by a human. |
+| `trails` (target `rtt-trails`) | `scripts/rtt/pipeline-trails <trails.input>` | The RT&T trail layer: validate, build its own PMTiles, install the trail style, trail tests, trail render tests over Monaco, promote `output/rtt-trails/current`. Gated by `trails.enabled`; scheduled weekly on Sundays. See [RTT-TRAILS.md](RTT-TRAILS.md). |
 
 ## Autonomy rules
 
