@@ -9,7 +9,7 @@ const store = new ScoutStore(factory);
 const lock = workerLock(path.join(store.state, 'worker.lock'));
 if (!lock.ok) { console.error(`another Scout worker owns pid ${lock.owner}`); process.exit(1); }
 store.ensure(); store.recover();
-const heartbeat = (status, job_id, current_step) => store.atomic(path.join(store.state, 'worker.json'), makeHeartbeat({ status, job_id, current_step }));
+const heartbeat = (status, job_id, current_step, source_key = null) => store.atomic(path.join(store.state, 'worker.json'), makeHeartbeat({ status, job_id, current_step, source_key }));
 heartbeat('GREEN', null, 'idle');
 const once = process.argv.includes('--once');
 let stopping = false;
@@ -18,7 +18,7 @@ process.on('SIGINT', () => { stopping = true; });
 async function cycle() {
   const job = store.claim();
   if (!job) { heartbeat('GREEN', null, 'idle'); return false; }
-  heartbeat('GREEN', job.job_id, 'normalise');
+  heartbeat('GREEN', job.job_id, 'normalise', job.source_key);
   try {
     const { observation } = normalizeObservation(job.payload, { sourceKey: job.source_key });
     const c = candidateFromObservation(observation);

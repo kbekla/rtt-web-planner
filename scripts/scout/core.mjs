@@ -195,7 +195,28 @@ export class ScoutStore {
       reasons: clone(c.review.reasons), recommended_action: c.review.recommended_action, created_at: c.created_at });
     else fs.rmSync(reviewFile, { force: true });
   }
-  status() { return { worker: this.read('worker.json'), candidates: this.candidateCount(), queue: Object.fromEntries(['pending','running','held','done','reviews'].map((s) => [s, this.list(s).length])), last_activity: this.read('activity.json') }; }
+  status() {
+    const worker = this.read('worker.json');
+    const files = path.join(this.state, 'candidates');
+    const candidates = fs.existsSync(files) ? fs.readdirSync(files).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(fs.readFileSync(path.join(files, f)))) : [];
+    const queue = Object.fromEntries(['pending','running','held','done','reviews'].map((s) => [s, this.list(s).length]));
+    const sourceDir = path.join(this.queue, 'sources');
+    const sources = fs.existsSync(sourceDir) ? fs.readdirSync(sourceDir).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(fs.readFileSync(path.join(sourceDir, f)))) : [];
+    return { status: worker?.status ?? (queue.held ? 'AMBER' : 'GREEN'), worker,
+      current: worker?.job_id ? { job_id: worker.job_id, source_key: worker.source_key, step: worker.current_step } : null,
+      queue, sources, candidates: { total: candidates.length,
+        exact_matches: candidates.filter((c) => c.master_match?.type === 'EXACT_EXISTING').length,
+        existing_matches: candidates.filter((c) => ['LIKELY_EXISTING','PARTIAL_OVERLAP','POSSIBLE_PARALLEL','AMBIGUOUS'].includes(c.master_match?.type)).length,
+        new_candidates: candidates.filter((c) => c.master_match?.type === 'NEW_CANDIDATE').length,
+        awaiting_existence: candidates.filter((c) => c.states?.exists === 'unknown' || c.states?.exists === 'contradictory').length,
+        awaiting_legal_review: candidates.filter((c) => c.states?.motorcycle_access === 'unknown' || c.states?.motorcycle_access === 'contradictory').length,
+        awaiting_routability: candidates.filter((c) => c.states?.routability === 'unknown').length,
+        review: queue.reviews },
+      ai: this.read('ai.json') ?? { enabled: false, available: false, consultations: 0 },
+      resource_governor: this.read('resource.json') ?? { state: 'UNKNOWN' },
+      notifications: this.read('notifications.json') ?? { pending_digest: 0, active_alerts: 0 },
+      next_scheduled_work: this.read('schedule.json'), last_activity: this.read('activity.json') };
+  }
   read(name) { try { return JSON.parse(fs.readFileSync(path.join(this.state, name), 'utf8')); } catch { return null; } }
   candidateCount() { const d = path.join(this.state, 'candidates'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.json')).length : 0; }
 }
