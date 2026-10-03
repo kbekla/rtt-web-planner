@@ -29,7 +29,9 @@ How it's enforced:
 
 **Import rules for the real app map** (when it's imported, not yet):
 - **"Verified lane":** it's a placeholder name on 10,483 features. Where there's no genuine lane name, the feature is published **unnamed** (`name` omitted), keeping its geometry, ID and legal state. The feature is not rejected.
-- **TET:** the 790 TET features are the existing TET dataset shown in the app under its own tab. They're kept **logically separate** from the RT&T master trail layer: not imported into it, and given no RT&T provenance.
+- **Migration baseline:** all **14,315** features of the canonical app map, `rtt_uk_current.geojson`. All geometries, IDs and existing classifications are preserved.
+  - A feature is left out of the master only if the upstream generation records **positively show** that it belongs to a separately managed dataset. A label such as `rtt_tet` alone doesn't count.
+  - The 790 features without an `rtt_source_feature_id` (currently `rtt_tet: true`) are reported as their own category and **kept**. Their provenance stays pending (quarantined if needed) until the upstream records establish what they are.
 
 ## The contract
 
