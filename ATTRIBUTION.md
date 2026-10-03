@@ -49,5 +49,5 @@ The RT&T trail and lane network is built into its **own archive**, `rtt-trails.p
 - **Credit:** its attribution is RT&T's own ("© RT&T trail data (proprietary)"), with no OpenStreetMap credit.
 - **Data:** RT&T trail data must be independently sourced and is not derived from OpenStreetMap.
 - **Gate:** every feature names a source in `config/rtt/sources.yaml`, which records the licence, the attribution, the allowed capture methods, whether the source is OSM-derived, and the approval.
-- **Quarantine:** features from an OSM-derived, unknown or unapproved source are quarantined by `scripts/rtt/validate.mjs` and listed in each build's `quarantine.json` for licensing review. They are never built.
+- **Quarantine:** features from an OSM-derived, unknown or unapproved source are quarantined by `scripts/rtt/validate.mjs` and listed in each build's private `quarantine.json` for licensing review. They are never built.
 - **Current content:** synthetic test fixtures only; no real RT&T data has been imported.

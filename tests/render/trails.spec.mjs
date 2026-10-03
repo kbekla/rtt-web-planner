@@ -7,12 +7,16 @@ import { test, expect } from '@playwright/test';
 import { FACTORY, REPO, sha256File } from '../../scripts/lib/common.mjs';
 
 // Expectations come from the trail build under test, not from a hard-coded list.
+// Public manifest (published ids) + private build record (quarantine, input), never served.
 const buildDir = path.join(FACTORY, 'output', 'rtt-trails', process.env.RTT_TRAILS_BUILD_ID || 'current');
-const manifest = fs.existsSync(path.join(buildDir, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(buildDir, 'manifest.json'), 'utf8')) : null;
-const ACCEPTED = manifest?.features.accepted_ids ?? [];
-const QUARANTINED = manifest ? JSON.parse(fs.readFileSync(path.join(buildDir, 'quarantine.json'), 'utf8')).map((q) => q.rtt_id) : [];
+const readJson = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null);
+const manifest = readJson(path.join(buildDir, 'manifest.json'));
+const privDir = manifest && path.join(FACTORY, 'private', 'rtt-trails', manifest.build_id);
+const record = manifest && readJson(path.join(privDir, 'build-record.json'));
+const ACCEPTED = manifest?.features.rtt_ids ?? [];
+const QUARANTINED = (privDir && readJson(path.join(privDir, 'quarantine.json')) || []).map((q) => q.rtt_id);
 // Views and goldens are drawn for the synthetic Monaco fixture only.
-const IS_FIXTURE = manifest?.input.sha256 === sha256File(path.join(REPO, 'tests/fixtures/rtt/trails-synthetic.geojson'));
+const IS_FIXTURE = record?.input.sha256 === sha256File(path.join(REPO, 'tests/fixtures/rtt/trails-synthetic.geojson'));
 
 test.skip(process.env.RTT_TRAILS !== '1', 'trail render tests run with RTT_TRAILS=1');
 test.skip((process.env.RTT_REGION || 'monaco') !== 'monaco', 'the synthetic trail fixture lies in Monaco');

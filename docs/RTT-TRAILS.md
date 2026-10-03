@@ -4,6 +4,43 @@ This layer holds RT&T's proprietary trail and lane network. It is built into its
 
 **Status (Phases 3a and 3b, 2026-10-03):** the contract, the deterministic pipeline, the viewer integration and the factory job are proven on a **synthetic fixture only**. No real RT&T data has been imported yet. Real data enters only through the contract below.
 
+## Privacy rule (Phase 3c)
+
+The **published** trail map carries rider-facing data only:
+
+| Published field | Meaning |
+|---|---|
+| `rtt_id` | stable RT&T identifier |
+| `name` | lane name |
+| `kind` | legal classification |
+| `status` | access status |
+| geometry | the line itself |
+
+Everything else stays in the **private master**, which is local to RT&T and is never published, served, uploaded or committed. That covers:
+- provenance
+- source names, URLs and registry IDs
+- council dataset references and GRM/TrailVidz references
+- verification method, research notes and evidence
+- confidence methodology
+- licence and reuse notes
+
+| | Published | Private master (local only) |
+|---|---|---|
+| Tiles | `rtt-trails.pmtiles` with the 4 fields above + geometry | — |
+| Build output | `output/rtt-trails/<id>/`: archive + public `manifest.json` (build ID, hash, `rtt_id` list) | `private/rtt-trails/<id>/`: `build-record.json` (inputs, sources, counts), `quarantine.json`, `build.log` |
+| Source registry | — | `$FACTORY_DIR/private/rtt/sources.yaml` (or `RTT_PRIVATE_SOURCES`). The repo's `config/rtt/sources.yaml` holds synthetic test sources only. |
+| Master data / staging | — | `$FACTORY_DIR/private/…`, `$FACTORY_DIR/staging/…` |
+
+How it's enforced:
+- **Every build runs the publish guard** (`scripts/rtt/publish-check.mjs`). It decodes every tile and scans the archive metadata and the public manifest. The build fails, and its public output is deleted, if any of these turns up:
+  - a tile field outside the four above
+  - any key or text that looks like provenance or research (source, licence, method, evidence, verification, confidence, council, PRoW, GRM, TrailVidz, TET, URLs, …)
+- **Tests** (`tests/rtt/privacy.test.mjs`) also check:
+  - the installed trail style
+  - that only synthetic sources are in the repo
+  - that nothing under `private/` or `staging/` is tracked by git
+  - that the server returns 404 for private and staging paths, including traversal attempts
+
 ## The contract
 
 | Piece | File | Role |
@@ -39,7 +76,7 @@ Geometry rules: every line has ≥ 2 finite points, lies within the WGS84 / Web 
 | Outcome | When | Effect |
 |---|---|---|
 | **Error**: the whole input is rejected and nothing is built | schema violation, duplicate `rtt_id`, invalid geometry, not a FeatureCollection | `build-trails` exits non-zero with no output |
-| **Quarantine**: held for licensing review, never built, never silently dropped | `osm_derived: true`; source missing from the registry; source not approved; source marked OSM-derived; method not allowed for the source | listed with reasons and provenance in the build's `quarantine.json` |
+| **Quarantine**: held for licensing review, never built, never silently dropped | `osm_derived: true`; source missing from the registry; source not approved; source marked OSM-derived; method not allowed for the source | listed with reasons and provenance in the build's **private** `quarantine.json` |
 | **Accepted** | everything else | built into `rtt_trails` |
 
 Approving a source is a human licensing decision. Set `approved: true` with `approved_by` (who and when) in `config/rtt/sources.yaml`. An OSM-derived source can never be approved; a test enforces this.
@@ -52,11 +89,11 @@ make rtt-build    RTT_INPUT=path/to/trails.geojson   # $FACTORY_DIR/output/rtt-t
 make test-rtt                                        # contract, build, reproducibility, diff, separation
 ```
 
-The output directory contains `rtt-trails.pmtiles`, `manifest.json`, `quarantine.json` and `build.log`.
+The public output directory contains only `rtt-trails.pmtiles` and a rider-facing `manifest.json`. The private directory `$FACTORY_DIR/private/rtt-trails/<build-id>/` holds `build-record.json`, `quarantine.json` and `build.log`.
 - **Build ID:** a hash of the canonical accepted features, the schema, the source registry, the Planetiler profile, the pinned `planetiler.jar`, the Java version and the output arguments.
 - **Canonical features:** sorted by `rtt_id` with sorted keys and provenance stripped. So input order and thread count don't change the bytes.
 - **Manifest:** records the accepted IDs, the quarantine count, the sources used (with licence and attribution) and `contains_synthetic`.
-- **Tiles:** z0–16, because z16 is Planetiler's maximum. Viewers overzoom for z17+. Lines are kept at every zoom (`min_size: 0`), so the archive's tile range always matches its header. When trails become visible is a style decision (Phase 3b). Tiles carry only `rtt_id`, `kind`, `status`, `surface`, `name` and `version`. Provenance stays in the source data and the manifest.
+- **Tiles:** z0–16, because z16 is Planetiler's maximum. Viewers overzoom for z17+. Lines are kept at every zoom (`min_size: 0`), so the archive's tile range always matches its header. When trails become visible is a style decision (Phase 3b). Tiles carry only `rtt_id`, `name`, `kind` and `status` (the privacy rule). `surface`, `version` and provenance stay in the private master.
 
 ## What the tests prove (`tests/rtt/`)
 

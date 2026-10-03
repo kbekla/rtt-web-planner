@@ -4,7 +4,7 @@
 # The output is a separate PMTiles archive and source; it is never merged into
 # the OpenStreetMap basemap, so the licences stay separable.
 schema_name: RT&T Trails
-schema_description: Proprietary RT&T trail and lane network (schema rtt-trails/1)
+schema_description: RT&T trail and lane network
 attribution: '&copy; RT&amp;T trail data (proprietary)'
 sources:
   rtt_trails:
@@ -19,12 +19,11 @@ layers:
         # tile range always matches its header. When trails become visible is
         # decided by the style layer's minzoom.
         min_size: 0
-        # Provenance stays in the source data and the build manifest; tiles carry
-        # identity and display attributes only.
+        # Published tiles carry rider-facing data only (scripts/rtt/publish-check.mjs):
+        # rtt_id, name, kind (legal classification), status (access status).
+        # Provenance, surface, version and all research data stay in the private master.
         attributes:
           - key: rtt_id
+          - key: name
           - key: kind
           - key: status
-          - key: surface
-          - key: name
-          - key: version

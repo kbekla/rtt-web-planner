@@ -28,7 +28,7 @@ step "build";         out="$(node scripts/rtt/build-trails.mjs "$input" | tee /d
 id="$(basename "$out")"
 state build-id "$id"
 step "style";         node scripts/rtt/build-trail-style.mjs
-step "tests-unit";    node --test 'tests/rtt/*.test.mjs'
+step "tests-unit";    RTT_TRAILS_BUILD_ID="$id" node --test 'tests/rtt/*.test.mjs'
 step "tests-render";  RTT_TRAILS=1 RTT_REGION=monaco RTT_TRAILS_BUILD_ID="$id" npx playwright test tests/render/trails.spec.mjs
 step "promote";       scripts/promote-region "$name" "$id"
 state done

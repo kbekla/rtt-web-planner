@@ -14,12 +14,30 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as yaml from 'js-yaml';
-import { REPO } from '../lib/common.mjs';
+import { FACTORY, REPO } from '../lib/common.mjs';
+
+/**
+ * The contract: schema + source registry. The repo registry
+ * (config/rtt/sources.yaml) holds synthetic test sources only. Real sources live
+ * in the private, local registry ($FACTORY_DIR/private/rtt/sources.yaml, or
+ * RTT_PRIVATE_SOURCES), which is never committed or published.
+ */
+export function privateSourcesFile() {
+  return process.env.RTT_PRIVATE_SOURCES || path.join(FACTORY, 'private', 'rtt', 'sources.yaml');
+}
 
 export function loadContract(repo = REPO) {
+  const sources = { ...(yaml.load(fs.readFileSync(path.join(repo, 'config', 'rtt', 'sources.yaml'), 'utf8')).sources ?? {}) };
+  const priv = privateSourcesFile();
+  if (fs.existsSync(priv)) {
+    for (const [id, s] of Object.entries(yaml.load(fs.readFileSync(priv, 'utf8'))?.sources ?? {})) {
+      if (sources[id]) throw new Error(`source '${id}' is defined in both the repo and the private registry`);
+      sources[id] = { ...s, private: true };
+    }
+  }
   return {
     schema: JSON.parse(fs.readFileSync(path.join(repo, 'schema', 'rtt-trails.schema.json'), 'utf8')),
-    sources: yaml.load(fs.readFileSync(path.join(repo, 'config', 'rtt', 'sources.yaml'), 'utf8')).sources ?? {},
+    sources,
   };
 }
 

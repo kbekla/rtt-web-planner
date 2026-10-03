@@ -20,8 +20,10 @@ function build(fc, name, ...args) {
   const input = path.join(tmp, `${name}.geojson`);
   fs.writeFileSync(input, JSON.stringify(fc));
   const out = path.join(tmp, name);
+  const priv = `${out}-private`;
   const r = spawnSync('node', [path.join(REPO, 'scripts/rtt/build-trails.mjs'), input, '--out', out, ...args], { encoding: 'utf8' });
-  return { ...r, out, manifest: fs.existsSync(path.join(out, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8')) : null };
+  const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null);
+  return { ...r, out, priv, manifest: read(path.join(out, 'manifest.json')), record: read(path.join(priv, 'build-record.json')) };
 }
 
 /** Decode every tile covering `bbox` at z0..16: { 'z/x/y': { rtt_id: canonical feature string } }. */
@@ -55,27 +57,29 @@ async function decodeAll(file, bbox = [7.40, 43.72, 7.44, 43.75]) {
 
 const base = build(fixture(), 'base');
 
-test('build: accepted features only, quarantine reported, one RT&T layer', async () => {
+test('build: accepted features only, quarantine reported privately, one RT&T layer', async () => {
   assert.equal(base.status, 0, base.stderr);
   const m = base.manifest;
-  assert.equal(m.features.accepted, 4);
-  assert.equal(m.features.quarantined, 2);
-  assert.equal(m.features.contains_synthetic, true);
-  assert.deepEqual(m.output.metadata.layers, ['rtt_trails']);
+  const r = base.record;
+  assert.equal(m.features.count, 4);
+  assert.equal(r.quarantined, 2);
+  assert.equal(r.contains_synthetic, true);
+  assert.deepEqual(r.publish_check.errors, []);
   assert.deepEqual([m.output.header.minzoom, m.output.header.maxzoom], [0, 16]);
-  const q = JSON.parse(fs.readFileSync(path.join(base.out, 'quarantine.json'), 'utf8'));
+  assert.deepEqual(fs.readdirSync(base.out), ['manifest.json', 'rtt-trails.pmtiles'], 'public output holds only the archive and its public manifest');
+  const q = JSON.parse(fs.readFileSync(path.join(base.priv, 'quarantine.json'), 'utf8'));
   assert.deepEqual(q.map((x) => x.rtt_id).sort(), ['rtt-trail-0000000000a1', 'rtt-trail-0000000000a2']);
   assert.ok(q.every((x) => x.reasons.length && x.provenance));
   const tiles = await decodeAll(path.join(base.out, 'rtt-trails.pmtiles'));
   const ids = new Set(Object.values(tiles).flatMap((t) => Object.keys(t)));
-  assert.deepEqual([...ids].sort(), m.features.accepted_ids);
+  assert.deepEqual([...ids].sort(), m.features.rtt_ids);
   assert.ok(!ids.has('rtt-trail-0000000000a1') && !ids.has('rtt-trail-0000000000a2'), 'quarantined feature reached the tiles');
   for (const t of Object.values(tiles)) {
     for (const s of Object.values(t)) {
       const f = JSON.parse(s);
       assert.equal(f.layer, 'rtt_trails');
-      assert.deepEqual(Object.keys(f.props).filter((k) => !['rtt_id', 'kind', 'status', 'surface', 'name', 'version'].includes(k)), [],
-        'tiles may carry identity and display attributes only (no provenance)');
+      assert.deepEqual(Object.keys(f.props).filter((k) => !['rtt_id', 'name', 'kind', 'status'].includes(k)), [],
+        'tiles may carry only rtt_id, name, kind and status');
     }
   }
 });
@@ -94,6 +98,7 @@ test('stable diff: editing one feature changes only that feature', async () => {
   const edited = fc.features.find((f) => f.properties.rtt_id === 'rtt-trail-000000000002');
   edited.geometry.coordinates[1] = [7.4324, 43.7393];
   edited.properties.version += 1;
+  edited.properties.name = 'Synthetic Cycle Lane';
   const b = build(fc, 'edited');
   assert.equal(b.status, 0, b.stderr);
   assert.notEqual(b.manifest.build_id, base.manifest.build_id);
