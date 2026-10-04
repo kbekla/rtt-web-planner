@@ -3,7 +3,7 @@ import { assignJurisdictions } from './jurisdictions.mjs';
 
 // Interval matcher v2 preserves uncertain boundary intervals rather than
 // labelling a whole sparse GPX chord UNKNOWN. It never changes source geometry.
-export const SEGMENTATION_VERSION = 'network-segmenter-2.1';
+export const SEGMENTATION_VERSION = 'network-segmenter-2.2';
 export const SEGMENT_CLASSES = Object.freeze(['ROAD','UNSEALED_ROAD','PROBABLE_OFFROAD','OFFROAD_CONFIRMED','UNKNOWN']);
 export class ScoutYieldRequested extends Error {
   constructor() { super('shared factory admission requested Scout yield'); this.name='ScoutYieldRequested'; this.code='SCOUT_YIELD_REQUESTED'; }
@@ -31,6 +31,7 @@ function edgeClass(edge) {
   if (ROAD.has(highway)) return UNSEALED.has(surface) ? 'UNSEALED_ROAD' : 'ROAD';
   if (highway==='track' || highway==='service') {
     if (PAVED.has(surface)) return 'ROAD';
+    if (highway==='track' && /^grade[3-5]$/.test(tracktype)) return 'PROBABLE_OFFROAD';
     if (UNSEALED.has(surface) || /^grade[1-2]$/.test(tracktype)) return 'UNSEALED_ROAD';
     if (/^grade[3-5]$/.test(tracktype)) return 'PROBABLE_OFFROAD';
     return 'UNKNOWN';

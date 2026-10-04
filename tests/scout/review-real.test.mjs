@@ -32,12 +32,12 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
       candidate_ids:['be-review-old-candidate','be-review-old-candidate-2'],connector_segment_ids:[],support_edge_ids:['osm:way:5#part:0'],connector_length_m:0,
       hypothesis:'SAME_OSM_WAY_WITH_AMBIGUOUS_CONNECTOR',geometry_gap_filled:false,evidence:{rule:'old-generation-fixture'}});
     const segment={segment_id:'be-review-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'PROBABLE_OFFROAD',confidence:0.8,
-      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2.1',jurisdiction_ids:['BE-country']};
+      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2.2',jurisdiction_ids:['BE-country']};
     store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',network_snapshot_id:'geofabrik-be-261003',
       physical_state:'unknown',motorcycle_access:'unknown',routability:'unknown',review_state:'AWAITING_EVIDENCE',jurisdiction_ids:['BE-country']});
     store.saveSegment({segment_id:'be-review-unknown',observation_id:'be-review-obs',ordinal:1,component_index:0,classification:'UNKNOWN',confidence:null,
       geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.311,50.811]]},evidence:[{rule:'no-network-match-within-threshold',threshold_m:8}],
-      pipeline_version:'network-segmenter-2.1',jurisdiction_ids:['BE-country']});
+      pipeline_version:'network-segmenter-2.2',jurisdiction_ids:['BE-country']});
     assert.ok(store.db.prepare("PRAGMA index_list('route_segments')").all().some(index=>index.name==='segments_observation_pipeline_idx'));
     store.close();
     server=createRealReviewServer({runId:'be-20000101',privateBase:base,port:0,onError:error=>{serverError=error;}});await new Promise(resolve=>server.once('listening',resolve));

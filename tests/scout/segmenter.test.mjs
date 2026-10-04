@@ -29,6 +29,13 @@ test('unsealed public road is distinct from probable off-road character',()=>{
   const result=segmentRouteObservation(obs(coords),[edge('public-track',coords,'track','gravel')]);
   assert.ok(result.segments.every((s)=>s.classification==='UNSEALED_ROAD')); assert.equal(result.candidates.length,0);
 });
+test('grade 3 to 5 tracktype supports probable off-road while an unsealed ordinary road stays a road class',()=>{
+  const coords=[[-1,51],[-0.999,51],[-0.998,51]];
+  const track=segmentRouteObservation(obs(coords,'rough-track'),[edge('rough-track',coords,'track','ground',{tags:{tracktype:'grade3'}})]);
+  const road=segmentRouteObservation(obs(coords,'unsealed-road'),[edge('unsealed-road',coords,'tertiary','ground',{tags:{tracktype:'grade3'}})]);
+  assert.ok(track.segments.every((s)=>s.classification==='PROBABLE_OFFROAD'));assert.equal(track.candidates.length,1);
+  assert.ok(road.segments.every((s)=>s.classification==='UNSEALED_ROAD'));assert.equal(road.candidates.length,0);
+});
 test('unknown surface never invents off-road status',()=>{
   const result=segmentRouteObservation(obs(mixed),[edge('road', [mixed[0],mixed.at(-1)],'residential',null)]);
   assert.ok(result.segments.every((s)=>s.classification==='ROAD')); assert.equal(result.candidates.length,0);
