@@ -44,6 +44,7 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
     const address=`http://127.0.0.1:${server.address().port}`;
     const page=await fetch(address);assert.equal(page.status,200);const html=await page.text();assert.match(html,/Canonical comparison was not performed/);
     assert.match(html,/UNKNOWN reason/);assert.match(html,/Candidate length/);assert.match(html,/Match-margin score/);
+    assert.match(html,/Ambiguous connector hypothesis \(not merged\)/);const client=await fetch(`${address}/review.js`);assert.equal(client.status,200);assert.match(await client.text(),/continuity-hypothesis-line/);
     const getJson=async(url)=>{serverError=null;const response=await fetch(url),text=await response.text();assert.equal(response.status,200,`${url}: ${text}\n${serverError?.stack??''}`);return JSON.parse(text);};
     const css=await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.css`);assert.equal(css.status,200);assert.match(css.headers.get('content-type'),/text\/css/);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs`)).status,200);
