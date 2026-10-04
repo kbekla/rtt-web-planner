@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const helper = fileURLToPath(new URL('./resource-admission-worker.mjs', import.meta.url));
 export const resourceAdmissionStateFile = (factoryDir) => path.join(factoryDir, 'state', 'resource-admission.json');
-function processStart(pid) { try { const s = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return s.slice(s.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null; } catch { return null; } }
-function bootId() { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return null; } }
+function processStart(pid) { try { const s = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return s.slice(s.lastIndexOf(')') + 2).trim().split(/\s+/)[19] ?? null; } catch (e) { return e.code === 'ENOENT' || e.code === 'ESRCH' ? null : undefined; } }
+function bootId() { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || null; } catch { return null; } }
+export function processIdentity(pid = process.pid) { return { pid, process_start: processStart(pid), boot_id: bootId() }; }
 
 export class SharedResourceAdmission {
   constructor(stateFile, { flock = 'flock', timeoutMs = 5000 } = {}) {
@@ -21,7 +22,8 @@ export class SharedResourceAdmission {
   }
   transition(op, fields = {}) {
     fs.mkdirSync(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
-    const identity = { pid: process.pid, process_start: processStart(process.pid), boot_id: bootId() };
+    const identity = processIdentity();
+    if (op !== 'status' && (!identity.process_start || !identity.boot_id)) return { ok: false, reason: 'host process/boot identity unavailable; fail-closed' };
     const res = spawnSync(this.flock, ['--exclusive', this.gateFile, process.execPath, helper], {
       input: JSON.stringify({ op, stateFile: this.stateFile, identity, ...fields }), encoding: 'utf8', timeout: this.timeoutMs,
       maxBuffer: 128 * 1024, windowsHide: true,
@@ -31,10 +33,13 @@ export class SharedResourceAdmission {
   }
   status() { return this.transition('status'); }
   acquireScout(owner) { return this.transition('scout-acquire', { owner }); }
-  requestFactory(owner) { return this.transition('factory-request', { owner }); }
-  pollFactory(owner, nonce) { return this.transition('factory-poll', { owner, nonce }); }
+  requestFactory(owner, detail = owner) { return this.transition('factory-request', { owner, detail }); }
+  pollFactory(owner, nonce, detail = owner) { return this.transition('factory-poll', { owner, nonce, detail }); }
   beginLaunch(owner, nonce) { return this.transition('begin-launch', { owner, nonce }); }
   bindWorkload(owner, nonce, workload) { return this.transition('bind-workload', { owner, nonce, workload }); }
+  workloadFinished(owner, nonce) { return this.transition('workload-finished', { owner, nonce }); }
+  abortLaunch(owner, nonce) { return this.transition('abort-launch', { owner, nonce }); }
+  cancelFactoryIntent(owner, nonce) { return this.transition('cancel-factory-intent', { owner, nonce }); }
   release(owner, nonce, reason) {
     const tracked = nonce === undefined;
     const token = tracked ? this.backgroundNonces.get(owner) : nonce;
@@ -46,8 +51,9 @@ export class SharedResourceAdmission {
   // Drop-in lease methods for ScoutHeavyWorkCoordinator.
   acquire(owner) {
     if (!owner || typeof owner !== 'string') return { ok: false, owner: 'invalid-owner' };
-    const result = this.acquireScout(owner);
+    const result = this.transition('scout-acquire', { owner, detail: owner });
     if (result.ok) this.backgroundNonces.set(owner, result.lease.nonce);
-    return result.ok ? { ok: true, owner, nonce: result.lease.nonce, recovered: false } : { ok: false, owner: result.owner ?? result.reason };
+    return result.ok ? { ok: true, owner, nonce: result.lease.nonce, recovered: false }
+      : { ok: false, owner: result.owner ?? 'unknown', reason: result.reason ?? 'coordination unavailable' };
   }
 }

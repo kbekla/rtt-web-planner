@@ -462,16 +462,15 @@ export class HeavyWorkLease {
 // the chunk callback must persist its own resumable checkpoint before yielding.
 export class ScoutHeavyWorkCoordinator {
   constructor({ lease, resources, owner, checkpoint, unloadAI = async () => {}, persistCheckpoint = async () => {},
-    factoryCoordinationVerified = SCOUT_CONFIG.resource_governor.factory_coordination_verified === true }) {
+  }) {
     this.lease = lease; this.resources = resources; this.owner = owner;
     this.checkpoint = checkpoint; this.unloadAI = unloadAI; this.persistCheckpoint = persistCheckpoint; this.active = false;
-    this.factoryCoordinationVerified = factoryCoordinationVerified;
   }
   async start(snapshot, resumeFrom = null) {
     if (this.active) throw new Error('Scout heavy-work session already active');
     const decision = this.resources.evaluate(snapshot);
     if (!decision.allow_heavy) return { started: false, state: decision.state, reason: decision.reasons.join('; ') || `host hold (${decision.thermal})` };
-    if (!this.factoryCoordinationVerified) return { started: false, state: 'AMBER', reason: 'BLOCKED_FACTORY_COORDINATION_UNAVAILABLE' };
+    if (snapshot.factory_coordination_verified !== true) return { started: false, state: 'AMBER', reason: 'BLOCKED_FACTORY_COORDINATION_UNAVAILABLE' };
     const acquired = this.lease.acquire(this.owner);
     if (!acquired.ok) return { started: false, state: 'AMBER', reason: `heavy-work lease held by ${acquired.owner}` };
     this.active = true;

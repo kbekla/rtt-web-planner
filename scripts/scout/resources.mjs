@@ -12,8 +12,20 @@ const run = (bin, args) => {
 };
 function processCommands() {
   const list = [];
+  const exclude = new Set([process.pid]);
+  let ancestor = process.ppid;
+  while (ancestor > 1 && !exclude.has(ancestor)) {
+    exclude.add(ancestor);
+    try {
+      const stat = fs.readFileSync(`/proc/${ancestor}/stat`, 'utf8');
+      ancestor = Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[1]);
+    }
+    catch { break; }
+  }
   for (const entry of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
-    try { list.push({ pid: Number(entry), cmdline: fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replaceAll('\0', ' ').trim() }); } catch { /* process ended */ }
+    const pid = Number(entry);
+    if (exclude.has(pid)) continue;
+    try { list.push({ pid, cmdline: fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replaceAll('\0', ' ').trim() }); } catch { /* process ended */ }
   }
   return list;
 }
@@ -32,9 +44,20 @@ export function readHostSnapshot(options = {}) {
   const runningJobs = path.join(factoryDir, 'queue', 'running');
   const factoryJob = fs.existsSync(runningJobs) && fs.readdirSync(runningJobs).some((f) => f.endsWith('.json'));
   const ollamaService = active('rtt-ollama.service') || commands.some((p) => /ollama\s+serve/.test(p.cmdline));
-  const ollama = ollamaService ? runCommand('ollama', ['ps']) : null;
+  const ollama = ollamaService ? (runCommand('ollama', ['ps'])
+    ?? runCommand('curl', ['--fail', '--silent', '--show-error', '--max-time', '2', 'http://127.0.0.1:11434/api/ps'])) : null;
+  let ollamaHasLoadedModel = null;
+  if (ollama !== null) {
+    try {
+      const parsed = JSON.parse(ollama);
+      if (Array.isArray(parsed.models)) ollamaHasLoadedModel = parsed.models.length > 0;
+    } catch {
+      const lines = ollama.split('\n').filter((line) => line.trim());
+      if (lines.length) ollamaHasLoadedModel = lines.length > 1;
+    }
+  }
   const localAIProcess = commands.some((p) => /ollama\s+runner|llama[-_]server|vllm|llm-worker/i.test(p.cmdline));
-  const localAI = localAIProcess || (ollamaService && (ollama === null || ollama.split('\n').filter((line) => line.trim()).length > 1));
+  const localAI = localAIProcess || (ollamaService && (ollamaHasLoadedModel === null || ollamaHasLoadedModel));
   const otherHeavy = commands.filter((p) => /java.*planetiler|check-repro|geometry-match/i.test(p.cmdline))
     .map(({ pid, cmdline }) => ({ pid, kind: /planetiler/i.test(cmdline) ? 'planetiler' : /check-repro/i.test(cmdline) ? 'repro-check' : 'geometry-match' }));
   const otherHeavyActive = otherHeavy.length > 0;
@@ -58,12 +81,28 @@ export function readHostSnapshot(options = {}) {
   try { const s = fs.statfsSync(factoryDir); disk = { free_bytes: s.bavail * s.bsize, total_bytes: s.blocks * s.bsize }; } catch { /* not mounted */ }
   const detectedOtherWorkloads = [...otherHeavy, ...commands.filter((p) => /ollama|llama[-_]server|vllm|llm-worker/i.test(p.cmdline))
     .map(({ pid, cmdline }) => ({ pid, kind: /ollama/i.test(cmdline) ? 'local-ai' : 'local-ai-worker' }))];
-  const factoryCoordination = { verified: false, status: admissionUnreadable || admissionMalformed ? 'RED' : 'UNVERIFIED',
-    reason: admissionUnreadable || admissionMalformed ? 'shared admission state invalid; fail closed' : 'factory and Scout workers do not yet jointly use the protocol',
-    factory_intent: admissionState?.factory_intent?.owner ?? null,
-    lease_owner: admissionCurrentBoot ? admissionLease.owner ?? null : admissionExists ? 'unknown-or-stale' : null,
-    lease_priority: admissionCurrentBoot ? admissionLease.priority ?? null : null,
-    lease_phase: admissionCurrentBoot ? admissionLease.phase ?? null : null };
+  const heartbeatAge = factoryWorker?.heartbeat_at ? (Date.now() - Date.parse(factoryWorker.heartbeat_at)) / 1000 : Infinity;
+  const factoryProtocolLive = factoryService && factoryWorker?.coordination_protocol === 'rtt-heavy-admission-v1'
+    && heartbeatAge >= 0 && heartbeatAge <= 60;
+  const coordinationVerified = factoryProtocolLive && !admissionUnreadable && !admissionMalformed;
+  const activeAdmissionLease = admissionCurrentBoot ? admissionLease : null;
+  const factoryIntent = admissionState?.factory_intent ?? null;
+  const factoryCoordination = { verified: coordinationVerified,
+    status: admissionUnreadable || admissionMalformed ? 'RED' : coordinationVerified ? 'VERIFIED' : 'UNVERIFIED',
+    reason: admissionUnreadable || admissionMalformed ? 'shared admission state invalid; fail closed'
+      : coordinationVerified ? null : 'factory worker has not reported a fresh shared-admission heartbeat',
+    factory_intent: factoryIntent?.owner ?? null,
+    factory_pending: Boolean(factoryIntent && !(activeAdmissionLease?.priority === 'factory'
+      && activeAdmissionLease.owner === factoryIntent.owner && activeAdmissionLease.nonce === factoryIntent.nonce)),
+    yield_requested: Boolean(factoryIntent && activeAdmissionLease?.priority === 'background'),
+    pending_since: factoryIntent?.acquired_at ?? null,
+    lease_owner: activeAdmissionLease?.owner ?? null,
+    lease_workload: activeAdmissionLease?.detail ?? activeAdmissionLease?.workload?.name ?? null,
+    lease_acquired_at: activeAdmissionLease?.acquired_at ?? null,
+    lease_priority: activeAdmissionLease?.priority ?? null,
+    lease_phase: activeAdmissionLease?.phase ?? null,
+    blocked_reason: admissionUnreadable || admissionMalformed ? 'shared admission state invalid; fail closed'
+      : coordinationVerified ? null : 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED' };
   const heavyWorkBlockedReason = factoryCoordination.status === 'RED' ? factoryCoordination.reason
     : factoryCoordination.verified ? null : 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED';
   return { ...telemetry,
@@ -78,7 +117,7 @@ export function readHostSnapshot(options = {}) {
     factory_worker: factoryWorker ? { pid: factoryWorker.pid ?? null, phase: factoryWorker.phase ?? null, job: factoryWorker.job ?? null,
       heartbeat_at: factoryWorker.heartbeat_at ?? null } : null,
     planetiler_active: planetiler, local_ai_active: localAI, other_heavy_workload_active: otherHeavyActive, ollama_service_active: ollamaService,
-    factory_coordination: factoryCoordination, factory_coordination_verified: false,
+    factory_coordination: factoryCoordination, factory_coordination_verified: coordinationVerified,
     heavy_work_blocked_reason: heavyWorkBlockedReason,
     resource_lease_owner: factoryCoordination.lease_owner,
     other_heavy_lease: validCurrentBootLease ? { owner: lease.owner, pid: lease.pid }
