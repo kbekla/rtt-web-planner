@@ -25,7 +25,12 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
     store.saveNetworkEdge('geofabrik-be-261003',{edge_id:'osm:way:5',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',surface:'ground'}});
     const prior={segment_id:'be-review-old-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'ROAD',confidence:0.8,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[],pipeline_version:'network-segmenter-1',jurisdiction_ids:['BE-country']};
-    store.saveSegment(prior);
+    store.saveSegment(prior);store.saveCandidate(prior,{candidate_id:'be-review-old-candidate',network_snapshot_id:'geofabrik-be-261003'});
+    const prior2={...prior,segment_id:'be-review-old-seg-2',ordinal:1,geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.32,50.82]]}};
+    store.saveSegment(prior2);store.saveCandidate(prior2,{candidate_id:'be-review-old-candidate-2',network_snapshot_id:'geofabrik-be-261003'});
+    store.saveCorridorHypothesis({hypothesis_id:'be-review-old-hypothesis',observation_id:'be-review-obs',component_index:0,network_snapshot_id:'geofabrik-be-261003',
+      candidate_ids:['be-review-old-candidate','be-review-old-candidate-2'],connector_segment_ids:[],support_edge_ids:['osm:way:5#part:0'],connector_length_m:0,
+      hypothesis:'SAME_OSM_WAY_WITH_AMBIGUOUS_CONNECTOR',geometry_gap_filled:false,evidence:{rule:'old-generation-fixture'}});
     const segment={segment_id:'be-review-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'PROBABLE_OFFROAD',confidence:0.8,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2.1',jurisdiction_ids:['BE-country']};
     store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',network_snapshot_id:'geofabrik-be-261003',
@@ -43,7 +48,7 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
     const css=await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.css`);assert.equal(css.status,200);assert.match(css.headers.get('content-type'),/text\/css/);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs`)).status,200);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs.map`)).status,404);
-    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.candidates,1);assert.equal(status.segments,2);assert.equal(status.matched_network_edge_ids,1);
+    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.candidates,1);assert.equal(status.segments,2);assert.equal(status.corridor_hypotheses,0);assert.equal(status.matched_network_edge_ids,1);
     const routes=await getJson(`${address}/api/source-routes`);assert.equal(routes.features.length,1);assert.equal(routes.features[0].properties.source_id,'tet-belgium-private-discovery');
     assert.equal(JSON.stringify(status).includes('/private/never-served'),false);assert.equal(JSON.stringify(routes).includes('/private/never-served'),false);
     const segments=await getJson(`${address}/api/segments?bbox=4.2,50.7,4.4,50.9`);assert.equal(segments.features.length,2);

@@ -45,7 +45,11 @@ export function createRealReviewServer({runId='be-20261004',port=0,privateBase=D
   const tagByEdge=new Map(),networkIds=[...matchedNetworkIds];
   for(let i=0;i<networkIds.length;i+=500){const chunk=networkIds.slice(i,i+500),rows=db.prepare(`SELECT edge_id,tags_json FROM network_edges WHERE snapshot_id=? AND edge_id IN (${chunk.map(()=>'?').join(',')})`).all(snapshot.snapshot_id,...chunk);for(const row of rows)tagByEdge.set(row.edge_id,selectedTags(row.tags_json));}
   const continuityBySubject=new Map();
-  for(const row of db.prepare(`SELECT h.hypothesis_id,h.candidate_ids_json,h.connector_segment_ids_json FROM corridor_hypotheses h JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?`).all(source.source_id)){
+  for(const row of db.prepare(`WITH latest AS (SELECT observation_id,MAX(pipeline_version) pipeline_version FROM route_segments GROUP BY observation_id)
+    SELECT h.hypothesis_id,h.candidate_ids_json,h.connector_segment_ids_json FROM corridor_hypotheses h
+    JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=? AND EXISTS(
+      SELECT 1 FROM json_each(h.candidate_ids_json) ids JOIN candidates c ON c.candidate_id=ids.value
+      JOIN route_segments s USING(segment_id) JOIN latest l USING(observation_id,pipeline_version))`).all(source.source_id)){
     for(const id of JSON.parse(row.candidate_ids_json))continuityBySubject.set(id,row.hypothesis_id);
     for(const id of JSON.parse(row.connector_segment_ids_json))continuityBySubject.set(id,row.hypothesis_id);
   }
@@ -71,7 +75,9 @@ export function createRealReviewServer({runId='be-20261004',port=0,privateBase=D
             JOIN source_files f USING(file_id) WHERE f.source_id=?) segments,
           (SELECT count(*) FROM candidates c JOIN route_segments s USING(segment_id) JOIN latest l USING(observation_id,pipeline_version)
             JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?) candidates,
-          (SELECT count(DISTINCT h.hypothesis_id) FROM corridor_hypotheses h JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?) corridor_hypotheses,
+          (SELECT count(DISTINCT h.hypothesis_id) FROM corridor_hypotheses h JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id)
+            WHERE f.source_id=? AND EXISTS(SELECT 1 FROM json_each(h.candidate_ids_json) ids JOIN candidates c ON c.candidate_id=ids.value
+              JOIN route_segments s USING(segment_id) JOIN latest l USING(observation_id,pipeline_version))) corridor_hypotheses,
           (SELECT count(*) FROM network_edges WHERE snapshot_id=?) network_edges`)
           .get(source.source_id,source.source_id,source.source_id,source.source_id,snapshot.snapshot_id);
         return reply(res,200,JSON.stringify({mode:'PRIVATE_REAL_BELGIUM_REVIEW',bind:'127.0.0.1',public:false,read_only:true,private_data_loaded:true,
