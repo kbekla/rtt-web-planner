@@ -121,6 +121,7 @@ export class ScoutGeoStore {
       CREATE INDEX IF NOT EXISTS source_files_source_idx ON source_files(source_id, imported_at);
       CREATE INDEX IF NOT EXISTS observations_file_idx ON route_observations(file_id);
       CREATE INDEX IF NOT EXISTS segments_observation_idx ON route_segments(observation_id, ordinal);
+      CREATE INDEX IF NOT EXISTS segments_observation_pipeline_idx ON route_segments(observation_id, pipeline_version, ordinal);
       CREATE INDEX IF NOT EXISTS candidates_review_idx ON candidates(review_state, updated_at);
       CREATE INDEX IF NOT EXISTS corridor_hypothesis_observation_idx ON corridor_hypotheses(observation_id,component_index);
       CREATE INDEX IF NOT EXISTS evidence_question_idx ON evidence(question, jurisdiction_id, evidence_time);

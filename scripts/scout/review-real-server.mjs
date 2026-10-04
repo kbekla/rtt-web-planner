@@ -37,8 +37,9 @@ export function createRealReviewServer({runId='be-20261004',port=0,privateBase=D
   if(!networkSource){db.close();throw new Error('registered regional network source is missing');}
   const source=JSON.parse(sourceRow.current_json),network=JSON.parse(networkSource.current_json),licence=JSON.parse(snapshot.licence_json);
   const matchedNetworkIds=new Set();
-  for(const row of db.prepare(`SELECT s.evidence_json FROM route_segments s JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id)
-    WHERE f.source_id=? AND s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)`).iterate(source.source_id)){
+  for(const row of db.prepare(`WITH latest AS (SELECT observation_id,MAX(pipeline_version) pipeline_version FROM route_segments GROUP BY observation_id)
+    SELECT s.evidence_json FROM route_segments s JOIN latest l USING(observation_id,pipeline_version)
+    JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?`).iterate(source.source_id)){
     for(const item of JSON.parse(row.evidence_json)){if(item.edge_id)matchedNetworkIds.add(item.edge_id);for(const id of item.edge_ids??[])matchedNetworkIds.add(id);}
   }
   const tagByEdge=new Map(),networkIds=[...matchedNetworkIds];
@@ -64,11 +65,12 @@ export function createRealReviewServer({runId='be-20261004',port=0,privateBase=D
         return reply(res,200,fs.readFileSync(real),MIME[path.extname(real)]);
       }
       if(url.pathname==='/api/status'){
-        const counts=db.prepare(`SELECT (SELECT count(*) FROM route_observations o JOIN source_files f USING(file_id) WHERE f.source_id=?) observations,
-          (SELECT count(*) FROM route_segments s JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?
-            AND s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)) segments,
-          (SELECT count(*) FROM candidates c JOIN route_segments s USING(segment_id) JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?
-            AND s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)) candidates,
+        const counts=db.prepare(`WITH latest AS (SELECT observation_id,MAX(pipeline_version) pipeline_version FROM route_segments GROUP BY observation_id)
+          SELECT (SELECT count(*) FROM route_observations o JOIN source_files f USING(file_id) WHERE f.source_id=?) observations,
+          (SELECT count(*) FROM route_segments s JOIN latest l USING(observation_id,pipeline_version) JOIN route_observations o USING(observation_id)
+            JOIN source_files f USING(file_id) WHERE f.source_id=?) segments,
+          (SELECT count(*) FROM candidates c JOIN route_segments s USING(segment_id) JOIN latest l USING(observation_id,pipeline_version)
+            JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?) candidates,
           (SELECT count(DISTINCT h.hypothesis_id) FROM corridor_hypotheses h JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id) WHERE f.source_id=?) corridor_hypotheses,
           (SELECT count(*) FROM network_edges WHERE snapshot_id=?) network_edges`)
           .get(source.source_id,source.source_id,source.source_id,source.source_id,snapshot.snapshot_id);
@@ -86,11 +88,13 @@ export function createRealReviewServer({runId='be-20261004',port=0,privateBase=D
       if(url.pathname==='/api/segments'){
         const bounds=bbox(url.searchParams.get('bbox'));if(!bounds)return reply(res,400,'invalid bbox');
         const [w,s,e,n]=bounds,limit=Number(url.searchParams.get('limit')??10000);if(!Number.isInteger(limit)||limit<1||limit>20000)return reply(res,400,'limit must be 1-20000');
-        const query=db.prepare(`SELECT s.segment_id,s.observation_id,s.ordinal,s.component_index,s.classification,s.confidence,s.geometry_json,s.evidence_json,
+        const query=db.prepare(`WITH latest AS (SELECT observation_id,MAX(pipeline_version) pipeline_version FROM route_segments GROUP BY observation_id)
+          SELECT s.segment_id,s.observation_id,s.ordinal,s.component_index,s.classification,s.confidence,s.geometry_json,s.evidence_json,
           s.jurisdiction_ids_json,s.pipeline_version,o.source_part,o.source_name,c.candidate_id,c.master_match,c.physical_state,c.motorcycle_access,c.routability,c.review_state,c.issues_json,c.matched_rtt_ids_json,c.match_details_json
           FROM route_segments s JOIN route_observations o USING(observation_id) JOIN source_files f USING(file_id)
           LEFT JOIN candidates c USING(segment_id) JOIN route_segments_rtree r USING(segment_rowid)
-          WHERE f.source_id=? AND s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)
+          JOIN latest l USING(observation_id,pipeline_version)
+          WHERE f.source_id=?
             AND r.max_lon>=? AND r.min_lon<=? AND r.max_lat>=? AND r.min_lat<=? ORDER BY s.segment_id LIMIT ?`);
         const rows=w<=e?query.all(source.source_id,w,e,s,n,limit+1):query.all(source.source_id,w,180,s,n,limit+1).concat(query.all(source.source_id,-180,e,s,n,limit+1));
         const unique=[...new Map(rows.map(r=>[r.segment_id,r])).values()].slice(0,limit);
