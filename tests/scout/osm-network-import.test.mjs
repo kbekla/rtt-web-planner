@@ -51,3 +51,16 @@ test('OSM network importer fails closed for missing identity, bad geometry and u
     assert.equal(store.db.prepare('SELECT count(*) AS n FROM network_edges').get().n,0,'failed batches roll back atomically');
   } finally {store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('OSM GeoJSON-sequence resume skips only complete records and reports yield at EOF',async()=>{
+  const {root,store}=setup();
+  try{
+    const input=feature(201,'track','ground',[[4.3,50.8],[4.301,50.801]])+
+      feature(202,'path','dirt',[[4.31,50.81],[4.311,50.811]]);
+    const first=await importOsmGeoJsonSeq(store,{stream:Readable.from([input]),snapshotId:'belgium-test-v1',batchSize:1,onBatch:({seen})=>seen===1});
+    assert.deepEqual(first,{seen:1,written:1,yielded:true});
+    const resumed=await importOsmGeoJsonSeq(store,{stream:Readable.from([input]),snapshotId:'belgium-test-v1',batchSize:10,skipRecords:1,onBatch:({seen})=>seen===2});
+    assert.deepEqual(resumed,{seen:2,written:1,yielded:true});
+    assert.equal(store.networkEdgeCount('belgium-test-v1'),2);
+  }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
+});

@@ -11,55 +11,62 @@ const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:'sy
   reuse:{private_processing:true,redistribution:false,derived_public_use:false},roles:{discovery_only:!network,physical_existence:false,legal_access:false,routing_network:network,public_reuse:false,jurisdiction_boundaries:network},
   update:{mechanism:'fixed fixture'},attribution:'synthetic; no external data',rate_limits:{requests_per_minute:0}});
 
-test('real Scout reviewer is loopback-only, read-only, private-root constrained, and serves bounded BE records',async()=>{
+test('run-configurable Scout reviewer is loopback-only, read-only, and serves an arbitrary private region run',async()=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'scout-real-review-')),root=path.join(base,'be-20000101'),store=new ScoutGeoStore(path.join(root,'state'));
   let server,serverError;
   try{
-    store.registerSource(source('tet-belgium-private-discovery'));
-    store.registerSource(source('geofabrik-osm-belgium',{network:true}));
-    store.recordNetworkSnapshot({snapshot_id:'geofabrik-be-261003',source_id:'geofabrik-osm-belgium',version:'fixture',checksum:'a'.repeat(64),
+    store.registerSource(source('synthetic-private-route'));
+    store.registerSource(source('synthetic-regional-network',{network:true}));
+    store.recordNetworkSnapshot({snapshot_id:'synthetic-region-v1',source_id:'synthetic-regional-network',version:'fixture',checksum:'a'.repeat(64),
       licence:{name:'ODbL 1.0',attribution:'© OpenStreetMap contributors'},coverage:{countries:['BE']}});
-    const file=store.recordFile({source_id:'tet-belgium-private-discovery',relative_name:'B.gpx',sha256:'b'.repeat(64),parser_version:'fixture',format:'gpx',raw_path:'/private/never-served/B.gpx',byte_size:12});
+    const file=store.recordFile({source_id:'synthetic-private-route',relative_name:'selected.gpx',sha256:'b'.repeat(64),parser_version:'fixture',format:'gpx',raw_path:'/private/never-served/selected.gpx',byte_size:12});
     store.completeFileImport(file.file_id,[{observation_id:'be-review-obs',source_part:'track-1-segment-1',source_name:'private track name',
-      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},geometry_sha256:'c'.repeat(64),metadata:{raw_source_ref:'/private/never-served/B.gpx'}}]);
-    store.saveNetworkEdge('geofabrik-be-261003',{edge_id:'osm:way:5',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',surface:'ground'}});
+      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},geometry_sha256:'c'.repeat(64),metadata:{raw_source_ref:'/private/never-served/selected.gpx'}}]);
+    store.saveNetworkEdge('synthetic-region-v1',{edge_id:'osm:way:5',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',surface:'ground'}});
     const prior={segment_id:'be-review-old-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'ROAD',confidence:0.8,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[],pipeline_version:'network-segmenter-1',jurisdiction_ids:['BE-country']};
-    store.saveSegment(prior);store.saveCandidate(prior,{candidate_id:'be-review-old-candidate',network_snapshot_id:'geofabrik-be-261003'});
+    store.saveSegment(prior);store.saveCandidate(prior,{candidate_id:'be-review-old-candidate',network_snapshot_id:'synthetic-region-v1'});
     const prior2={...prior,segment_id:'be-review-old-seg-2',ordinal:1,geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.32,50.82]]}};
-    store.saveSegment(prior2);store.saveCandidate(prior2,{candidate_id:'be-review-old-candidate-2',network_snapshot_id:'geofabrik-be-261003'});
-    store.saveCorridorHypothesis({hypothesis_id:'be-review-old-hypothesis',observation_id:'be-review-obs',component_index:0,network_snapshot_id:'geofabrik-be-261003',
+    store.saveSegment(prior2);store.saveCandidate(prior2,{candidate_id:'be-review-old-candidate-2',network_snapshot_id:'synthetic-region-v1'});
+    store.saveCorridorHypothesis({hypothesis_id:'be-review-old-hypothesis',observation_id:'be-review-obs',component_index:0,network_snapshot_id:'synthetic-region-v1',
       candidate_ids:['be-review-old-candidate','be-review-old-candidate-2'],connector_segment_ids:[],support_edge_ids:['osm:way:5#part:0'],connector_length_m:0,
       hypothesis:'SAME_OSM_WAY_WITH_AMBIGUOUS_CONNECTOR',geometry_gap_filled:false,evidence:{rule:'old-generation-fixture'}});
     const segment={segment_id:'be-review-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'PROBABLE_OFFROAD',confidence:0.8,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2.2',jurisdiction_ids:['BE-country']};
-    store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',network_snapshot_id:'geofabrik-be-261003',
+    store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',match_details:{reason:'canonical master not supplied'},network_snapshot_id:'synthetic-region-v1',
       physical_state:'unknown',motorcycle_access:'unknown',routability:'unknown',review_state:'AWAITING_EVIDENCE',jurisdiction_ids:['BE-country']});
     store.saveSegment({segment_id:'be-review-unknown',observation_id:'be-review-obs',ordinal:1,component_index:0,classification:'UNKNOWN',confidence:null,
       geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.311,50.811]]},evidence:[{rule:'no-network-match-within-threshold',threshold_m:8}],
       pipeline_version:'network-segmenter-2.2',jurisdiction_ids:['BE-country']});
+    store.approveSource({source_id:'synthetic-private-route',approved_by:'Fixture reviewer',scope:'Private synthetic review'});
+    const runId='synthetic-anywhere-20000101';
+    store.createRun({run_id:runId,source_id:'synthetic-private-route',snapshot_id:'synthetic-region-v1',country_code:'BE',region_id:'BE-test',title:'Synthetic arbitrary-region run',viewport:[4.2,50.7,4.4,50.9],approved_by:'Fixture reviewer',approval_scope:'Private synthetic review'});
+    store.setRunObservation(runId,'be-review-obs','COMPLETE',{pipeline_version:'network-segmenter-2.2',checkpoint:{stage:'complete'}});
+    store.setRunStatus(runId,'REVIEW_REQUIRED');
+    store.recordReviewDecision({candidate_id:'be-review-candidate',decision:'ACCEPT_FOR_RESEARCH',reviewer:'Fixture reviewer',reason:'Retain for private synthetic research'});
+    assert.equal(store.listRunReviewCandidates({runId,decision:'ACCEPT_FOR_RESEARCH'})[0].candidate_id,'be-review-candidate');
     assert.ok(store.db.prepare("PRAGMA index_list('route_segments')").all().some(index=>index.name==='segments_observation_pipeline_idx'));
     store.close();
-    server=createRealReviewServer({runId:'be-20000101',privateBase:base,port:0,onError:error=>{serverError=error;}});await new Promise(resolve=>server.once('listening',resolve));
+    server=createRealReviewServer({runId,privateBase:base,databaseFile:path.join(root,'state','scout.sqlite'),port:0,onError:error=>{serverError=error;}});await new Promise(resolve=>server.once('listening',resolve));
     const address=`http://127.0.0.1:${server.address().port}`;
-    const page=await fetch(address);assert.equal(page.status,200);const html=await page.text();assert.match(html,/Canonical comparison was not performed/);
+    const page=await fetch(address);assert.equal(page.status,200);const html=await page.text();assert.match(html,/No BE canonical master was supplied/);assert.doesNotMatch(html,/TET/);
     assert.match(html,/UNKNOWN reason/);assert.match(html,/Candidate length/);assert.match(html,/Match-margin score/);
     assert.match(html,/Ambiguous connector hypothesis \(not merged\)/);const client=await fetch(`${address}/review.js`);assert.equal(client.status,200);assert.match(await client.text(),/continuity-hypothesis-line/);
     const getJson=async(url)=>{serverError=null;const response=await fetch(url),text=await response.text();assert.equal(response.status,200,`${url}: ${text}\n${serverError?.stack??''}`);return JSON.parse(text);};
     const css=await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.css`);assert.equal(css.status,200);assert.match(css.headers.get('content-type'),/text\/css/);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs`)).status,200);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs.map`)).status,404);
-    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.candidates,1);assert.equal(status.segments,2);assert.equal(status.corridor_hypotheses,0);assert.equal(status.matched_network_edge_ids,1);
-    const routes=await getJson(`${address}/api/source-routes`);assert.equal(routes.features.length,1);assert.equal(routes.features[0].properties.source_id,'tet-belgium-private-discovery');
+    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.run_id,runId);assert.equal(status.region_id,'BE-test');assert.equal(status.candidates,1);assert.equal(status.segments,2);assert.equal(status.corridor_hypotheses,0);assert.equal(status.matched_network_edge_ids,1);
+    const routes=await getJson(`${address}/api/source-routes`);assert.equal(routes.features.length,1);assert.equal(routes.features[0].properties.source_id,'synthetic-private-route');
     assert.equal(JSON.stringify(status).includes('/private/never-served'),false);assert.equal(JSON.stringify(routes).includes('/private/never-served'),false);
     const segments=await getJson(`${address}/api/segments?bbox=4.2,50.7,4.4,50.9`);assert.equal(segments.features.length,2);
     assert.equal(segments.features[0].properties.motorcycle_access,'unknown');assert.equal(segments.features[0].properties.routability,'unknown');
     const trail=segments.features.find(f=>f.properties.candidate_id),unknown=segments.features.find(f=>f.properties.classification==='UNKNOWN');
-    assert.equal(trail.properties.length_m>0,true);assert.equal(trail.properties.network_matches[0].tags.surface,'ground');assert.equal(unknown.properties.unknown_reason,'no_network_match');
+    assert.equal(trail.properties.length_m>0,true);assert.equal(trail.properties.network_matches[0].tags.surface,'ground');assert.equal(trail.properties.review_decision,'ACCEPT_FOR_RESEARCH');assert.equal(unknown.properties.unknown_reason,'no_network_match');
     const network=await getJson(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&zoom=10`);assert.equal(network.features[0].properties.highway,'track');
     assert.equal((await fetch(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&limit=5001&zoom=10`)).status,400);
     assert.equal((await fetch(address,{method:'POST'})).status,405);assert.equal((await fetch(`${address}/api/unknown`)).status,404);
-    assert.deepEqual(await getJson(`${address}/api/canonical`),{type:'FeatureCollection',features:[],coverage:'no Belgian RT&T canonical master supplied'});
+    assert.deepEqual(await getJson(`${address}/api/canonical`),{type:'FeatureCollection',features:[],coverage:'canonical reference not supplied; NOT_COMPARED'});
   }finally{
     if(server)await new Promise(resolve=>server.close(resolve));
     try{store.close();}catch{}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Explicit private route operations. This CLI never scans directories, fetches
-// sources, accesses a canonical master, or writes public trail output.
+// Explicit, private Scout operator. No directory scanning, arbitrary crawling,
+// canonical writes or public publication are available through this interface.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,88 +10,131 @@ import { ingestRouteFile } from './route-import.mjs';
 import { processRouteObservation } from './process-route.mjs';
 import { readHostSnapshot } from './resources.mjs';
 import { SharedResourceAdmission, resourceAdmissionStateFile } from '../lib/resource-admission.mjs';
-import { SCOUT_CONFIG } from './core.mjs';
+import { SCOUT_CONFIG, NotificationCenter } from './core.mjs';
+import { createZohoSmtpProvider } from './zoho-smtp.mjs';
+import { acquireNetworkSnapshot, importNetworkArtifact, resolveNetworkExtract } from './network-provider.mjs';
+import { SEGMENTATION_VERSION, lengthMeters } from './route-segmenter.mjs';
+import { createRealReviewServer } from './review-real-server.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
+scout-geoctl source approve --source-id ID --by NAME --scope TEXT
 scout-geoctl import --source-id ID --file FILE [--name RELATIVE_NAME] [--language BCP47]
-scout-geoctl process --observation-id ID --snapshot-id ID
-scout-geoctl status
-scout-geoctl review [--state OPEN|IN_PROGRESS|DEFERRED|RESOLVED|ALL]
-
-Set SCOUT_GEO_ROOT to the private Scout database directory and SCOUT_RAW_ROOT
-to its private content-addressed raw-source directory. Processing requires a
-fresh verified factory admission heartbeat and shared heavy-work lease.`;
+scout-geoctl network acquire --source-id ID --snapshot-id ID
+scout-geoctl network import --snapshot-id ID
+scout-geoctl network status [--snapshot-id ID]
+scout-geoctl run create --run-id ID --source-id ID --snapshot-id ID --country-code CC --region-id ID --viewport W,S,E,N --approved-by NAME --approval-scope TEXT [--title TEXT]
+scout-geoctl run list|status --run-id ID
+scout-geoctl process --run-id ID
+scout-geoctl review list [--run-id ID] [--decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD|ALL]
+scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD --reviewer NAME --reason TEXT
+scout-geoctl review serve --run-id ID [--port PORT]
+scout-geoctl notify retry
+scout-geoctl status`;
 export function parseGeoCtlArgs(args){const out={};for(let i=0;i<args.length;i++){if(!args[i].startsWith('--'))throw new Error(`unexpected argument '${args[i]}'`);const token=args[i].slice(2),equals=token.indexOf('='),key=(equals<0?token:token.slice(0,equals)).replaceAll('-','_');if(!key||out[key]!==undefined)throw new Error(`duplicate or invalid option '${args[i]}'`);if(equals>=0){out[key]=token.slice(equals+1);continue;}if(args[i+1]?.startsWith('--'))out[key]=true;else if(args[i+1]===undefined)out[key]=true;else out[key]=args[++i];}return out;}
 function required(opts,key){if(typeof opts[key]!=='string'||!opts[key])throw new Error(`--${key.replaceAll('_','-')} is required`);return opts[key];}
 function configuredPath(variable){const value=process.env[variable];if(!value)throw new Error(`${variable} must point to the private Scout data area`);const resolved=path.resolve(value);if(fs.existsSync(resolved)&&fs.lstatSync(resolved).isSymbolicLink())throw new Error(`${variable} cannot be a symlink`);return resolved;}
-function storeFor(){const root=configuredPath('SCOUT_GEO_ROOT');return {root,store:new ScoutGeoStore(root)};}
-export function sharedFactoryYieldRequested(file,owner,nonce){
-  try{const state=JSON.parse(fs.readFileSync(file,'utf8')),lease=state.lease,intent=state.factory_intent;
-    if(state.schema!==1||!('lease'in state)||!('factory_intent'in state))return true;
-    return Boolean(intent&&!(lease?.owner===owner&&lease?.nonce===nonce&&lease?.priority==='factory'));
-  }catch{return true;}
-}
-export function releaseGeoAdmission(admission,owner,grant,reason){
-  const nonce=grant?.lease?.nonce;
-  if(!nonce)return {ok:false,reason:'shared admission grant nonce is missing'};
-  return admission.release(owner,nonce,reason);
+function storeFor(env=process.env){if(env.SCOUT_GEO_ROOT)process.env.SCOUT_GEO_ROOT=env.SCOUT_GEO_ROOT;if(env.SCOUT_RAW_ROOT)process.env.SCOUT_RAW_ROOT=env.SCOUT_RAW_ROOT;const root=configuredPath('SCOUT_GEO_ROOT');return {root,store:new ScoutGeoStore(root)};}
+export function sharedFactoryYieldRequested(file,owner,nonce){try{const state=JSON.parse(fs.readFileSync(file,'utf8')),lease=state.lease,intent=state.factory_intent;if(state.schema!==1||!('lease'in state)||!('factory_intent'in state))return true;return Boolean(intent&&!(lease?.owner===owner&&lease?.nonce===nonce&&lease?.priority==='factory'));}catch{return true;}}
+export function releaseGeoAdmission(admission,owner,grant,reason){const nonce=grant?.lease?.nonce;if(!nonce)return {ok:false,reason:'shared admission grant nonce is missing'};return admission.release(owner,nonce,reason);}
+export function createGeoYieldCheck({factoryDir,owner,nonce,readHost=readHostSnapshot,now=Date.now,pollMs=5000}={}){
+  const admissionFile=resourceAdmissionStateFile(factoryDir);let lastPoll=-Infinity,lastReason=null;
+  const shouldYield=()=>{if(sharedFactoryYieldRequested(admissionFile,owner,nonce)){lastReason='factory priority requested a shared-admission yield';return true;}const time=now();if(time-lastPoll<pollMs)return false;lastPoll=time;try{assertGeoHostAdmission(readHost({factoryDir}));lastReason=null;return false;}catch(error){lastReason=error.message??'host resource/thermal state unavailable';return true;}};
+  shouldYield.reason=()=>lastReason;return shouldYield;
 }
 export function assertGeoHostAdmission(host){
   if(!host.factory_coordination?.verified)throw new Error('BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
   if(host.factory_job_active||host.planetiler_active||host.factory_coordination.factory_pending)throw new Error('BLOCKED_FACTORY_OR_PLANETILER_ACTIVE');
   if(host.local_ai_active||host.other_heavy_workload_active)throw new Error('BLOCKED_OTHER_HEAVY_WORKLOAD_ACTIVE');
-  const policy=SCOUT_CONFIG.resource_governor;
-  if(host.mem_available_mb==null||host.mem_available_mb<policy.minimum_available_ram_mb)throw new Error('BLOCKED_AVAILABLE_MEMORY');
-  if(!host.disk?.free_bytes||host.disk.free_bytes<policy.minimum_free_disk_gb*1e9)throw new Error('BLOCKED_FREE_DISK');
-  if(host.load1!=null&&host.load1>policy.maximum_load1)throw new Error('BLOCKED_HOST_LOAD');
-  const thermal=policy.thermal,temps=[[host.cpu_temp_c,thermal.warm_cpu_c],[host.nvme_temp_c,thermal.warm_nvme_c],
-    [host.igpu?.temp_c,thermal.gpu_hot_c],[host.dgpu?.temp_c,thermal.gpu_hot_c]];
-  if(temps.some(([value,limit])=>Number.isFinite(value)&&value>=limit))throw new Error('BLOCKED_THERMAL_HOLD');
+  const p=SCOUT_CONFIG.resource_governor;if(host.mem_available_mb==null||host.mem_available_mb<p.minimum_available_ram_mb)throw new Error('BLOCKED_AVAILABLE_MEMORY');
+  if(!host.disk?.free_bytes||host.disk.free_bytes<p.minimum_free_disk_gb*1e9)throw new Error('BLOCKED_FREE_DISK');if(host.load1!=null&&host.load1>p.maximum_load1)throw new Error('BLOCKED_HOST_LOAD');
+  const t=p.thermal,temps=[[host.cpu_temp_c,t.warm_cpu_c],[host.nvme_temp_c,t.warm_nvme_c],[host.igpu?.temp_c,t.gpu_hot_c],[host.dgpu?.temp_c,t.gpu_hot_c]];
+  if(temps.some(([v,limit])=>Number.isFinite(v)&&v>=limit))throw new Error('BLOCKED_THERMAL_HOLD');
 }
-function latestStats(db){return db.prepare(`SELECT
-  (SELECT count(*) FROM source_registry) sources,
-  (SELECT count(*) FROM source_files) files,
-  (SELECT count(*) FROM route_observations) observations,
-  (SELECT count(*) FROM route_segments s WHERE s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)) latest_segments,
-  (SELECT count(*) FROM candidates c JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=(SELECT max(s2.pipeline_version) FROM route_segments s2 WHERE s2.observation_id=s.observation_id)) latest_candidates,
-  (SELECT count(*) FROM review_items WHERE state IN ('OPEN','IN_PROGRESS')) open_reviews,
-  (SELECT count(DISTINCT hypothesis_id) FROM corridor_hypotheses) continuity_hypotheses`).get();}
+function hostFactoryDir(env){return env.FACTORY_DIR??path.join(os.homedir(),'rtt-map-factory');}
+function assertRunSources(store,run){const source=store.getSource(run.source_id),snapshot=store.getNetworkSnapshot(run.snapshot_id),approval=store.sourceApproval(run.source_id);if(!source||!snapshot)throw new Error('run source or pinned network snapshot is missing');if(source.reuse.private_processing!==true||source.roles.discovery_only!==true)throw new Error('run source is not approved for private discovery use');if(!approval||approval.approved_by!==run.approved_by||approval.scope!==run.approval_scope)throw new Error('run source approval is missing, revoked or differs from this run scope');if(!snapshot.checksum||store.networkEdgeCount(run.snapshot_id)<1)throw new Error('BLOCKED_NETWORK_NOT_IMPORTED: pinned snapshot has no imported network edges');return {source,snapshot};}
+function reviewFile(root){return path.join(root,'notifications','scout-notifications.json');}
+async function queueReviewNotice(root,runId,count,env){
+  if(count<1)return {queued:false,reason:'no candidates'};
+  const recipient=env.SCOUT_NOTIFICATION_EMAIL;let provider=null;
+  if(recipient){try{provider=createZohoSmtpProvider({recipient,subject:'RT&T Scout candidates need review'});}catch{/* persist event with provider unavailable; never block deterministic work */}}
+  const center=new NotificationCenter(reviewFile(root),{providers:provider?{EMAIL:provider}:{}});
+  const result=await center.emit({key:`scout-review:${runId}`,severity:'AMBER',channels:['EMAIL'],message:`RT&T Scout needs review. Run ${runId} contains ${count} candidate sections. Source and evidence remain private. Open the private Scout reviewer for this run.`});
+  return {queued:true,delivery:result.event?.delivery??{},dedupe_reason:result.reason??null};
+}
+async function processRun(store,root,run,env){
+  assertRunSources(store,run);const factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));
+  const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),owner=`scout-run:${run.run_id}`,grant=admission.acquireScout(owner);
+  if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
+  let interrupted=false;const signal=()=>{interrupted=true;};process.once('SIGTERM',signal);process.once('SIGINT',signal);
+  const resourceYield=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce}),yieldNow=()=>interrupted||resourceYield();
+  try{
+    store.setRunStatus(run.run_id,'RUNNING');
+    let observationRows=store.runObservations(run.run_id);
+    for(const row of observationRows){
+      if(row.status==='COMPLETE'&&row.pipeline_version===SEGMENTATION_VERSION)continue;
+      store.setRunObservation(run.run_id,row.observation_id,'RUNNING',{checkpoint:{stage:'segment-and-match',network_snapshot_id:run.snapshot_id},pipeline_version:SEGMENTATION_VERSION});
+      try{
+        const result=processRouteObservation(store,row.observation_id,{networkSnapshotId:run.snapshot_id,shouldYield:yieldNow});
+        store.setRunObservation(run.run_id,row.observation_id,'COMPLETE',{checkpoint:{stage:'complete',segment_count:result.segment_count,candidate_count:result.candidate_count},pipeline_version:SEGMENTATION_VERSION});
+      }catch(error){
+        if(error.code==='SCOUT_YIELD_REQUESTED'||yieldNow()){
+          const yieldReason=interrupted?'Scout received a graceful shutdown signal':resourceYield.reason()??'host requested a safe yield';
+          store.setRunObservation(run.run_id,row.observation_id,'PENDING',{checkpoint:{stage:'segment-and-match',reason:yieldReason,resume_observation_id:row.observation_id},error:yieldReason,pipeline_version:SEGMENTATION_VERSION});
+          store.setRunStatus(run.run_id,'BLOCKED',{last_error:`${yieldReason}; completed observations are preserved`});
+          return {status:'BLOCKED',reason:yieldReason,resumable:true,completed:store.getRun(run.run_id).observation_counts.COMPLETE??0};
+        }
+        store.setRunObservation(run.run_id,row.observation_id,'FAILED',{checkpoint:{stage:'segment-and-match'},error:error.message,pipeline_version:SEGMENTATION_VERSION});
+        store.setRunStatus(run.run_id,'FAILED',{last_error:error.message});throw error;
+      }
+    }
+    observationRows=store.runObservations(run.run_id);
+    const incomplete=observationRows.filter(r=>r.status!=='COMPLETE'||r.pipeline_version!==SEGMENTATION_VERSION);
+    if(incomplete.length){store.setRunStatus(run.run_id,'BLOCKED',{last_error:'run has observations not completed by current classifier'});return {status:'BLOCKED',reason:'OBSERVATIONS_INCOMPLETE'};}
+    const candidateCount=Number(store.db.prepare(`SELECT count(*) n FROM candidates c JOIN route_segments s USING(segment_id)
+      JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? AND ro.status='COMPLETE' AND s.pipeline_version=ro.pipeline_version`).get(run.run_id).n);
+    const status=candidateCount?'REVIEW_REQUIRED':'COMPLETE';store.setRunStatus(run.run_id,status);
+    const notice=await queueReviewNotice(root,run.run_id,candidateCount,env);
+    return {status,run_id:run.run_id,observation_count:observationRows.length,candidate_count:candidateCount,notification:notice};
+  }finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'Scout run stage completed, failed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
+}
+function lineLength(geometry){const lines=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;return lines.reduce((sum,line)=>sum+line.slice(1).reduce((n,point,i)=>n+lengthMeters(line[i],point),0),0);}
+function unknownReason(evidence){const rs=[...new Set(evidence.flatMap(e=>e.rule==='interval-network-ambiguity'&&e.reason?[e.reason]:e.rule==='no-network-match-within-threshold'?['no_network_match']:[]))];return rs.length===1?rs[0]:rs.length?'multiple_unknown_reasons':'NONE';}
+function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new Error(`unknown Scout run '${runId}'`);const rows=store.runObservations(runId);let classes={},unknown={},matchStates={},distanceKm={},unknownReasonKm={},lengthBins={lt25:0,lt50:0,lt100:0,lt250:0,lt500:0,lt1000:0};
+  const segments=store.db.prepare(`SELECT s.classification,s.confidence,s.geometry_json,s.evidence_json FROM route_segments s JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version WHERE ro.run_id=? AND ro.status='COMPLETE'`).all(runId);
+  for(const s of segments){const km=lineLength(JSON.parse(s.geometry_json))/1000;classes[s.classification]=(classes[s.classification]??0)+1;distanceKm[s.classification]=(distanceKm[s.classification]??0)+km;if(s.classification==='UNKNOWN'){const key=unknownReason(JSON.parse(s.evidence_json));unknown[key]=(unknown[key]??0)+1;unknownReasonKm[key]=(unknownReasonKm[key]??0)+km;}}
+  const matches=store.db.prepare(`SELECT c.master_match,c.match_details_json,count(*) count FROM candidates c JOIN route_segments s USING(segment_id) JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version WHERE ro.run_id=? AND ro.status='COMPLETE' GROUP BY c.master_match,c.match_details_json`).all(runId);for(const x of matches){const details=JSON.parse(x.match_details_json??'{}'),key=x.master_match==='UNMATCHED'&&details.reason==='canonical master not supplied'?'NOT_COMPARED':x.master_match;matchStates[key]=(matchStates[key]??0)+x.count;}
+  const candidates=store.db.prepare(`SELECT s.geometry_json FROM candidates c JOIN route_segments s USING(segment_id) JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version WHERE ro.run_id=? AND ro.status='COMPLETE'`).all(runId);for(const x of candidates){const m=lineLength(JSON.parse(x.geometry_json));for(const [k,n]of [['lt25',25],['lt50',50],['lt100',100],['lt250',250],['lt500',500],['lt1000',1000]])if(m<n)lengthBins[k]++;}
+  const totalKm=Object.values(distanceKm).reduce((a,b)=>a+b,0);return {run,...run.observation_counts,observations:rows,candidate_count:candidates.length,canonical_status:run.config.canonical_status??'NOT_COMPARED',canonical_match_states:matchStates,total_km:Number(totalKm.toFixed(3)),distance_km_by_class:Object.fromEntries(Object.entries(distanceKm).map(([k,v])=>[k,Number(v.toFixed(3))])),classes,unknown_reasons:unknown,unknown_reason_km:Object.fromEntries(Object.entries(unknownReasonKm).map(([k,v])=>[k,Number(v.toFixed(3))])),candidate_length_below:lengthBins};
+}
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
-  const [command,...rest]=argv;
-  if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
-  if(env.SCOUT_GEO_ROOT)process.env.SCOUT_GEO_ROOT=env.SCOUT_GEO_ROOT;
-  if(env.SCOUT_RAW_ROOT)process.env.SCOUT_RAW_ROOT=env.SCOUT_RAW_ROOT;
-  if(command==='source'&&rest[0]==='register'){
-    const manifest=required(parseGeoCtlArgs(rest.slice(1)),'manifest'),definition=JSON.parse(fs.readFileSync(manifest,'utf8'));
-    const {store}=storeFor();try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;
-  }
-  const opts=parseGeoCtlArgs(rest);
-  if(command==='import'){
-    const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor();
-    try{const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});
-      console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}
-    finally{store.close();}return 0;
-  }
-  if(command==='status'||command==='review'){
-    const {store}=storeFor();try{if(command==='status')console.log(JSON.stringify({private:true,...latestStats(store.db),sources:store.listSources().map(({source_id,name,type,coverage,health,last_successful_processing,next_due})=>({source_id,name,type,coverage,health,last_successful_processing,next_due}))},null,2));
-      else console.log(JSON.stringify(store.listReviewItems({state:opts.state??'OPEN',limit:500}),null,2));}finally{store.close();}return 0;
-  }
-  if(command==='process'){
-    const observationId=required(opts,'observation_id'),snapshotId=required(opts,'snapshot_id'),factoryDir=env.FACTORY_DIR??path.join(os.homedir(),'rtt-map-factory');
-    const first=readHostSnapshot({factoryDir});assertGeoHostAdmission(first);
-    const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),owner=`scout-geo:${observationId}`;
-    const grant=admission.acquireScout(owner);if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
-    let store;
-    try{
-      ({store}=storeFor());
-      const after=readHostSnapshot({factoryDir});assertGeoHostAdmission(after);
-      const shouldYield=()=>sharedFactoryYieldRequested(resourceAdmissionStateFile(factoryDir),owner,grant.nonce);
-      const result=processRouteObservation(store,observationId,{networkSnapshotId:snapshotId,shouldYield});
-      console.log(JSON.stringify({observation_id:result.observation_id,network_snapshot:result.network_snapshot,segment_count:result.segment_count,
-        candidate_count:result.candidate_count,continuity_hypotheses:result.continuity_hypotheses.length,source_geometry_preserved:true,
-        motorcycle_access:'unknown',routability:'unknown'},null,2));return 0;
-    }finally{try{store?.close();}finally{const released=releaseGeoAdmission(admission,owner,grant,'observation processing complete or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}}
-  }
-  throw new Error(`unknown command '${command}'\n${HELP}`);
+  const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
+  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify'].includes(command)?1:0));
+  if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
+  if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
+  if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}
+  if(command==='network'&&sub==='status'){const {store}=storeFor(env);try{const describe=snapshot=>{const edge_count=store.networkEdgeCount(snapshot.snapshot_id),artifact=store.getNetworkArtifact(snapshot.snapshot_id),import_checkpoint=store.networkImportCheckpoint(snapshot.snapshot_id);return {...snapshot,edge_count,artifact,import_checkpoint,operator_state:import_checkpoint?.status??(edge_count?'EDGES_PRESENT_LEGACY_CHECKPOINT':'PINNED_NOT_IMPORTED')};};const rows=opts.snapshot_id?[store.getNetworkSnapshot(opts.snapshot_id)].filter(Boolean).map(describe):store.listSources().filter(s=>s.roles.routing_network).flatMap(source=>{
+    const registered=store.db.prepare('SELECT snapshot_id FROM network_snapshots WHERE source_id=? ORDER BY imported_at DESC').all(source.source_id).map(r=>store.getNetworkSnapshot(r.snapshot_id));
+    return registered.length?registered.map(snapshot=>({source_id:source.source_id,network_extract:source.network_extract,...describe(snapshot)})):[{source_id:source.source_id,network_extract:source.network_extract,operator_state:'NOT_ACQUIRED'}];});
+    console.log(JSON.stringify(rows,null,2));}finally{store.close();}return 0;}
+  if(command==='network'&&(sub==='acquire'||sub==='import')){const {root,store}=storeFor(env);const snapshotId=required(opts,'snapshot_id'),sourceId=opts.source_id;let owner=`scout-network:${snapshotId}`,grant,admission;try{
+    if(sub==='acquire'){if(!sourceId)throw new Error('--source-id is required for network acquire');const source=store.getSource(sourceId);if(!source)throw new Error(`unknown network source '${sourceId}'`);resolveNetworkExtract(source);}
+    else{const snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot||!store.sourceApproval(snapshot.source_id))throw new Error('network import requires a registered snapshot with explicit active source approval');}
+    const factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir));grant=admission.acquireScout(owner);if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
+    const shouldYield=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce});
+    const result=sub==='acquire'?await acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield}):await importNetworkArtifact(store,{snapshotId,shouldYield});
+    if(result.status==='YIELDED')result.yield_reason=shouldYield.reason()??'safe resource yield';
+    console.log(JSON.stringify(result,null,2));return result.status==='YIELDED'?75:0;
+  }finally{try{if(grant){const released=releaseGeoAdmission(admission,owner,grant,'regional network acquire/import completed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}}finally{store.close();}}}
+  if(command==='run'&&sub==='create'){const {store}=storeFor(env);try{const viewport=required(opts,'viewport').split(',').map(Number);if(viewport.length!==4)throw new Error('--viewport needs west,south,east,north');const run=store.createRun({run_id:required(opts,'run_id'),source_id:required(opts,'source_id'),snapshot_id:required(opts,'snapshot_id'),country_code:required(opts,'country_code').toUpperCase(),region_id:required(opts,'region_id'),title:opts.title,viewport,approved_by:required(opts,'approved_by'),approval_scope:required(opts,'approval_scope')});console.log(JSON.stringify(run,null,2));}finally{store.close();}return 0;}
+  if(command==='run'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRuns(),null,2));}finally{store.close();}return 0;}
+  if(command==='run'&&sub==='status'){const {store}=storeFor(env);try{console.log(JSON.stringify(runStats(store,required(opts,'run_id')),null,2));}finally{store.close();}return 0;}
+  if(command==='process'&&opts.run_id){const {root,store}=storeFor(env);try{const run=store.getRun(opts.run_id);if(!run)throw new Error(`unknown Scout run '${opts.run_id}'`);const result=await processRun(store,root,run,env);console.log(JSON.stringify(result,null,2));return result.status==='BLOCKED'?75:0;}finally{store.close();}}
+  if(command==='process'){const observationId=required(opts,'observation_id'),snapshotId=required(opts,'snapshot_id'),factoryDir=hostFactoryDir(env),{store}=storeFor(env);const host=readHostSnapshot({factoryDir});assertGeoHostAdmission(host);const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),owner=`scout-geo:${observationId}`,grant=admission.acquireScout(owner);if(!grant.ok){store.close();throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);}try{const shouldYield=()=>sharedFactoryYieldRequested(resourceAdmissionStateFile(factoryDir),owner,grant.nonce),result=processRouteObservation(store,observationId,{networkSnapshotId:snapshotId,shouldYield});console.log(JSON.stringify({observation_id:result.observation_id,network_snapshot:result.network_snapshot,segment_count:result.segment_count,candidate_count:result.candidate_count,continuity_hypotheses:result.continuity_hypotheses.length,source_geometry_preserved:true,motorcycle_access:'unknown',routability:'unknown',canonical_status:'NOT_COMPARED'},null,2));return 0;}finally{try{store.close();}finally{const released=releaseGeoAdmission(admission,owner,grant,'one-off observation processing complete or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}}}
+  if(command==='review'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRunReviewCandidates({runId:opts.run_id??null,decision:opts.decision??'UNREVIEWED'}),null,2));}finally{store.close();}return 0;}
+  if(command==='review'&&sub==='decide'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.recordReviewDecision({candidate_id:required(opts,'candidate_id'),decision:required(opts,'decision'),reviewer:required(opts,'reviewer'),reason:required(opts,'reason')}),null,2));}finally{store.close();}return 0;}
+  if(command==='review'&&sub==='serve'){const port=opts.port===undefined?8766:Number(opts.port);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('--port must be an unprivileged port');const root=configuredPath('SCOUT_GEO_ROOT');const server=createRealReviewServer({runId:required(opts,'run_id'),databaseFile:path.join(root,'scout.sqlite'),privateBase:root,port});server.on('listening',()=>console.log(`private Scout review at http://127.0.0.1:${server.address().port}/`));return 0;}
+  if(command==='notify'&&sub==='retry'){const root=configuredPath('SCOUT_GEO_ROOT'),recipient=env.SCOUT_NOTIFICATION_EMAIL;let providers={};if(recipient){try{providers={EMAIL:createZohoSmtpProvider({recipient,subject:'RT&T Scout pending notification'})};}catch{/* provider is reported unavailable; pending state is preserved */}}const center=new NotificationCenter(reviewFile(root),{providers});console.log(JSON.stringify(await center.retryPending(),null,2));return 0;}
+  if(command==='status'){const {root,store}=storeFor(env);try{const notifications=new NotificationCenter(reviewFile(root)).state(),allCandidates=store.listRunReviewCandidates({decision:'ALL'}),pendingCandidates=new Set(allCandidates.filter(c=>c.decision==='UNREVIEWED').map(c=>c.candidate_id));console.log(JSON.stringify({private:true,source_count:store.listSources().length,network_snapshots:store.db.prepare('SELECT count(*) count FROM network_snapshots').get().count,runs:store.listRuns().map(({run_id,status,country_code,region_id,observation_counts})=>({run_id,status,country_code,region_id,observation_counts})),review_queue:{unreviewed_candidates:pendingCandidates.size,legacy_open_review_items:store.db.prepare("SELECT count(*) count FROM review_items WHERE state IN ('OPEN','IN_PROGRESS')").get().count},notification_pending:notifications.pending.length,notification_active:Object.values(notifications.active).filter(x=>!x.resolved).length},null,2));}finally{store.close();}return 0;}
+  throw new Error(`unknown command '${command}${sub?` ${sub}`:''}'\n${HELP}`);
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){runGeoCtl().then((code)=>{process.exitCode=code;}).catch((error)=>{console.error(error.code==='SCOUT_YIELD_REQUESTED'?'YIELD_REQUESTED: observation left unmodified; retry after factory work.':error.message);process.exitCode=error.code==='SCOUT_YIELD_REQUESTED'?75:2;});}
+if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){runGeoCtl().then(code=>{process.exitCode=code;}).catch(error=>{console.error(error.code==='SCOUT_YIELD_REQUESTED'?'YIELD_REQUESTED: job checkpointed; retry after factory work.':error.message);process.exitCode=error.code==='SCOUT_YIELD_REQUESTED'?75:2;});}

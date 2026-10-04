@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 5;
+export const SCOUT_GEOSCHEMA_VERSION = 6;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -118,6 +118,38 @@ export class ScoutGeoStore {
         state TEXT NOT NULL DEFAULT 'OPEN', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(subject_type,subject_id,reason_code)
       );
+      CREATE TABLE IF NOT EXISTS source_approvals (
+        approval_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, approved_by TEXT NOT NULL, scope TEXT NOT NULL,
+        approved_at TEXT NOT NULL, revoked_at TEXT, FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE TABLE IF NOT EXISTS scout_runs (
+        run_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, country_code TEXT NOT NULL,
+        region_id TEXT NOT NULL, config_json TEXT NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL,
+        approval_scope TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_error TEXT,
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id), FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE TABLE IF NOT EXISTS scout_run_observations (
+        run_id TEXT NOT NULL, observation_id TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        checkpoint_json TEXT NOT NULL DEFAULT '{}', pipeline_version TEXT, started_at TEXT, completed_at TEXT, last_error TEXT,
+        PRIMARY KEY(run_id,observation_id), FOREIGN KEY(run_id) REFERENCES scout_runs(run_id),
+        FOREIGN KEY(observation_id) REFERENCES route_observations(observation_id)
+      );
+      CREATE TABLE IF NOT EXISTS network_artifacts (
+        snapshot_id TEXT PRIMARY KEY, provider TEXT NOT NULL, source_url TEXT NOT NULL, local_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT, last_modified TEXT, status TEXT NOT NULL,
+        updated_at TEXT NOT NULL, FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE TABLE IF NOT EXISTS network_import_checkpoints (
+        snapshot_id TEXT PRIMARY KEY, source_url TEXT NOT NULL, records_seen INTEGER NOT NULL DEFAULT 0,
+        edges_written INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE TABLE IF NOT EXISTS review_decisions (
+        decision_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL, decision TEXT NOT NULL, reviewer TEXT NOT NULL,
+        reason TEXT NOT NULL, decided_at TEXT NOT NULL, FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+      );
+      CREATE INDEX IF NOT EXISTS scout_run_observations_status_idx ON scout_run_observations(run_id,status,observation_id);
+      CREATE INDEX IF NOT EXISTS review_decisions_candidate_idx ON review_decisions(candidate_id,decided_at);
       CREATE INDEX IF NOT EXISTS source_files_source_idx ON source_files(source_id, imported_at);
       CREATE INDEX IF NOT EXISTS observations_file_idx ON route_observations(file_id);
       CREATE INDEX IF NOT EXISTS segments_observation_idx ON route_segments(observation_id, ordinal);
@@ -133,7 +165,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4||version===5)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -160,6 +192,99 @@ export class ScoutGeoStore {
   listSources() { return this.db.prepare('SELECT source_id,current_revision,current_json,health,last_retrieval,last_successful_processing,next_due FROM source_registry ORDER BY source_id').all()
     .map((r) => ({ ...JSON.parse(r.current_json), revision: r.current_revision, health: r.health,
       last_retrieval: r.last_retrieval, last_successful_processing: r.last_successful_processing, next_due: r.next_due })); }
+  approveSource({source_id,approved_by,scope,approved_at=new Date().toISOString()}) {
+    if(!this.getSource(source_id)||!approved_by?.trim()||!scope?.trim())throw new Error('source approval requires a registered source, reviewer identity and explicit scope');
+    const approval_id=`approval-${crypto.createHash('sha256').update(`${source_id}\0${approved_by}\0${scope}\0${approved_at}`).digest('hex').slice(0,24)}`;
+    this.db.prepare('INSERT OR IGNORE INTO source_approvals(approval_id,source_id,approved_by,scope,approved_at) VALUES(?,?,?,?,?)').run(approval_id,source_id,approved_by.trim(),scope.trim(),approved_at);
+    return this.db.prepare('SELECT * FROM source_approvals WHERE approval_id=?').get(approval_id);
+  }
+  sourceApproval(sourceId) { return this.db.prepare('SELECT * FROM source_approvals WHERE source_id=? AND revoked_at IS NULL ORDER BY approved_at DESC LIMIT 1').get(sourceId)??null; }
+  createRun({run_id,source_id,snapshot_id,country_code,region_id,title,viewport,approved_by,approval_scope}) {
+    if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(run_id??''))throw new Error('run ID must be a stable safe identifier');
+    const source=this.getSource(source_id),snapshot=this.getNetworkSnapshot(snapshot_id);
+    if(!source?.reuse?.private_processing||source.roles?.discovery_only!==true)throw new Error('run source must be registered for private discovery processing');
+    if(!snapshot||!this.getSource(snapshot.source_id)?.roles?.routing_network)throw new Error('run requires a registered routing-network snapshot');
+    if(!/^[A-Z]{2}$/.test(country_code??'')||!source.coverage.countries.includes(country_code)||!snapshot.coverage.countries?.includes(country_code))throw new Error('run country is not covered by both registered sources');
+    if(typeof region_id!=='string'||!region_id.trim()||!Array.isArray(viewport)||viewport.length!==4||viewport.some(v=>!Number.isFinite(v)))throw new Error('run requires region ID and four numeric viewport bounds');
+    if(viewport[0]<-180||viewport[2]>180||viewport[1]<-90||viewport[3]>90||viewport[1]>viewport[3])throw new Error('run viewport is invalid');
+    if(!approved_by?.trim()||!approval_scope?.trim())throw new Error('run requires explicit operator approval identity and scope');
+    const sourceApproval=this.sourceApproval(source_id);
+    if(!sourceApproval||sourceApproval.approved_by!==approved_by.trim()||sourceApproval.scope!==approval_scope.trim())throw new Error('source must have a matching explicit active operator approval before a run can be created');
+    const config={title:title?.trim()||`${country_code} Scout private review`,viewport,canonical_status:'NOT_COMPARED'};
+    const prior=this.db.prepare('SELECT * FROM scout_runs WHERE run_id=?').get(run_id);
+    const at=new Date().toISOString();
+    if(prior){if(prior.source_id!==source_id||prior.snapshot_id!==snapshot_id||prior.country_code!==country_code||prior.region_id!==region_id||prior.config_json!==json(config)||prior.approved_by!==approved_by||prior.approval_scope!==approval_scope)throw new Error('run ID already exists with different immutable inputs');return this.getRun(run_id);}
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('INSERT INTO scout_runs(run_id,source_id,snapshot_id,country_code,region_id,config_json,status,approved_by,approval_scope,created_at,updated_at) VALUES(?,?,?,?,?,?,\'PENDING\',?,?,?,?)')
+        .run(run_id,source_id,snapshot_id,country_code,region_id,json(config),approved_by.trim(),approval_scope.trim(),at,at);
+      const observations=this.db.prepare('SELECT o.observation_id FROM route_observations o JOIN source_files f USING(file_id) WHERE f.source_id=? ORDER BY o.observation_id').all(source_id);
+      const add=this.db.prepare("INSERT INTO scout_run_observations(run_id,observation_id,status) VALUES(?,?,'PENDING')");
+      for(const o of observations)add.run(run_id,o.observation_id);
+      this.db.exec('COMMIT');
+    } catch(error){this.db.exec('ROLLBACK');throw error;}
+    return this.getRun(run_id);
+  }
+  getRun(runId) {
+    const r=this.db.prepare('SELECT * FROM scout_runs WHERE run_id=?').get(runId);if(!r)return null;
+    const counts=this.db.prepare("SELECT status,count(*) count FROM scout_run_observations WHERE run_id=? GROUP BY status").all(runId);
+    return {...r,config:JSON.parse(r.config_json),observation_counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))};
+  }
+  listRuns(){return this.db.prepare('SELECT run_id FROM scout_runs ORDER BY created_at,run_id').all().map(r=>this.getRun(r.run_id));}
+  runObservations(runId){return this.db.prepare(`SELECT ro.*,o.source_part,o.source_name FROM scout_run_observations ro JOIN route_observations o USING(observation_id)
+    WHERE ro.run_id=? ORDER BY ro.observation_id`).all(runId).map(r=>({...r,checkpoint:JSON.parse(r.checkpoint_json)}));}
+  setRunStatus(runId,status,{last_error=null}={}){
+    if(!['PENDING','RUNNING','COMPLETE','BLOCKED','REVIEW_REQUIRED','FAILED','SUPERSEDED'].includes(status))throw new Error('invalid Scout run status');
+    const result=this.db.prepare('UPDATE scout_runs SET status=?,last_error=?,updated_at=? WHERE run_id=?').run(status,last_error,new Date().toISOString(),runId);
+    if(result.changes!==1)throw new Error(`unknown Scout run '${runId}'`);
+  }
+  setRunObservation(runId,observationId,status,{checkpoint={},error=null,pipeline_version=null}={}){
+    if(!['PENDING','RUNNING','COMPLETE','BLOCKED','REVIEW_REQUIRED','FAILED','SUPERSEDED'].includes(status))throw new Error('invalid run observation status');
+    const at=new Date().toISOString(),result=this.db.prepare(`UPDATE scout_run_observations SET status=?,attempts=attempts+?,checkpoint_json=?,pipeline_version=COALESCE(?,pipeline_version),
+      started_at=CASE WHEN ?='RUNNING' THEN COALESCE(started_at,?) ELSE started_at END,completed_at=CASE WHEN ?='COMPLETE' THEN ? ELSE completed_at END,last_error=?
+      WHERE run_id=? AND observation_id=?`).run(status,status==='RUNNING'?1:0,json(checkpoint),pipeline_version,status,at,status,at,error,runId,observationId);
+    if(result.changes!==1)throw new Error('observation is not part of this run');
+  }
+  recordNetworkArtifact(artifact){
+    const snap=this.getNetworkSnapshot(artifact.snapshot_id);if(!snap||!artifact.provider||!artifact.source_url||!artifact.local_path||!Number.isSafeInteger(artifact.byte_size)||artifact.byte_size<1||!/^[a-f0-9]{64}$/i.test(artifact.sha256??''))throw new Error('network artifact requires registered snapshot and verified private file metadata');
+    const resolved=path.resolve(artifact.local_path),root=fs.realpathSync(this.root);
+    if(resolved!==root&&!resolved.startsWith(root+path.sep))throw new Error('network artifact must remain inside the private Scout data root');
+    const real=fs.realpathSync(resolved);if(real===root||!real.startsWith(root+path.sep)||fs.lstatSync(resolved).isSymbolicLink()||!fs.statSync(resolved).isFile())throw new Error('network artifact must be a regular non-symlink file inside the private Scout root');
+    const at=new Date().toISOString();this.db.prepare(`INSERT INTO network_artifacts(snapshot_id,provider,source_url,local_path,byte_size,sha256,etag,last_modified,status,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,'VERIFIED',?) ON CONFLICT(snapshot_id) DO UPDATE SET provider=excluded.provider,source_url=excluded.source_url,local_path=excluded.local_path,
+      byte_size=excluded.byte_size,sha256=excluded.sha256,etag=excluded.etag,last_modified=excluded.last_modified,status='VERIFIED',updated_at=excluded.updated_at`)
+      .run(artifact.snapshot_id,artifact.provider,artifact.source_url,artifact.local_path,artifact.byte_size,artifact.sha256.toLowerCase(),artifact.etag??null,artifact.last_modified??null,at);
+  }
+  getNetworkArtifact(snapshotId){return this.db.prepare('SELECT * FROM network_artifacts WHERE snapshot_id=?').get(snapshotId)??null;}
+  networkImportCheckpoint(snapshotId){return this.db.prepare('SELECT * FROM network_import_checkpoints WHERE snapshot_id=?').get(snapshotId)??null;}
+  networkEdgeCount(snapshotId){return this.db.prepare('SELECT count(*) count FROM network_edges WHERE snapshot_id=?').get(snapshotId).count;}
+  setNetworkImportCheckpoint(snapshotId,{source_url,records_seen,edges_written,status}){
+    if(!this.getNetworkSnapshot(snapshotId)||!source_url||!Number.isSafeInteger(records_seen)||records_seen<0||!Number.isSafeInteger(edges_written)||edges_written<0||!['RUNNING','YIELDED','COMPLETE','FAILED'].includes(status))throw new Error('invalid network import checkpoint');
+    this.db.prepare(`INSERT INTO network_import_checkpoints(snapshot_id,source_url,records_seen,edges_written,status,updated_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(snapshot_id) DO UPDATE SET source_url=excluded.source_url,records_seen=excluded.records_seen,edges_written=excluded.edges_written,status=excluded.status,updated_at=excluded.updated_at`)
+      .run(snapshotId,source_url,records_seen,edges_written,status,new Date().toISOString());
+  }
+  recordReviewDecision({candidate_id,decision,reviewer,reason,decided_at=new Date().toISOString()}){
+    const states=['UNREVIEWED','ACCEPT_FOR_RESEARCH','NEEDS_MORE_EVIDENCE','REJECT_FALSE_POSITIVE','AMBIGUOUS','HOLD'];
+    if(!this.db.prepare('SELECT 1 FROM candidates WHERE candidate_id=?').get(candidate_id)||!states.includes(decision)||decision==='UNREVIEWED'||!reviewer?.trim()||!reason?.trim())throw new Error('review decision requires an existing candidate, valid decision, reviewer and reason');
+    const decision_id=`decision-${crypto.randomUUID()}`;this.db.prepare('INSERT INTO review_decisions VALUES(?,?,?,?,?,?)').run(decision_id,candidate_id,decision,reviewer.trim(),reason.trim(),decided_at);
+    return this.db.prepare('SELECT * FROM review_decisions WHERE decision_id=?').get(decision_id);
+  }
+  latestReviewDecision(candidateId){return this.db.prepare('SELECT * FROM review_decisions WHERE candidate_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1').get(candidateId)??null;}
+  listRunReviewCandidates({runId=null,decision='UNREVIEWED'}={}){
+    const allowed=['UNREVIEWED','ACCEPT_FOR_RESEARCH','NEEDS_MORE_EVIDENCE','REJECT_FALSE_POSITIVE','AMBIGUOUS','HOLD','ALL'];
+    if(!allowed.includes(decision))throw new Error('invalid candidate review decision filter');
+    const whereRun=runId?'AND ro.run_id=?':'',params=runId?[runId]:[];
+    const rows=this.db.prepare(`SELECT DISTINCT ro.run_id,r.country_code,r.region_id,o.observation_id,c.candidate_id,c.segment_id,c.master_match,c.physical_state,c.motorcycle_access,c.routability,c.issues_json,s.classification,s.confidence
+      FROM scout_run_observations ro JOIN scout_runs r USING(run_id) JOIN route_observations o USING(observation_id)
+      JOIN route_segments s ON s.observation_id=o.observation_id AND s.pipeline_version=ro.pipeline_version
+      JOIN candidates c USING(segment_id) WHERE ro.status='COMPLETE' ${whereRun}
+      ORDER BY ro.run_id,c.candidate_id`).all(...params);
+    return rows.map((row)=>{
+      const latest=this.latestReviewDecision(row.candidate_id),reviewDecision=latest?.decision??'UNREVIEWED';
+      return {...row,issues:JSON.parse(row.issues_json),decision:reviewDecision,reviewer:latest?.reviewer??null,reason:latest?.reason??null,decided_at:latest?.decided_at??null};
+    }).filter(row=>decision==='ALL'||row.decision===decision);
+  }
   recordSourceActivity(sourceId, { health, retrievedAt, processedAt, nextDue } = {}) {
     const validHealth=['UNKNOWN','GREEN','AMBER','RED','DISABLED'];
     if(!validHealth.includes(health))throw new Error('invalid source health state');

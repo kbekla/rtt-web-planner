@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertGeoHostAdmission, parseGeoCtlArgs, releaseGeoAdmission, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
+import { assertGeoHostAdmission, createGeoYieldCheck, parseGeoCtlArgs, releaseGeoAdmission, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
 
 test('geoctl parses explicit kebab-case identifiers and rejects positional ambiguity',()=>{
   assert.deepEqual(parseGeoCtlArgs(['--observation-id','obs-1','--snapshot-id','osm-v1','--state=OPEN']),{'observation_id':'obs-1','snapshot_id':'osm-v1','state':'OPEN'});
@@ -33,6 +33,18 @@ test('geoctl yields on factory intent or unreadable admission state, but not an 
     fs.writeFileSync(file,JSON.stringify({schema:1,lease:{owner:'scout',nonce:'n',priority:'background'},factory_intent:{owner:'factory',nonce:'f'}}));
     assert.equal(sharedFactoryYieldRequested(file,'scout','n'),true);
     fs.writeFileSync(file,'not-json');assert.equal(sharedFactoryYieldRequested(file,'scout','n'),true);
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('geoctl periodically yields for changing host resource or thermal holds during a long stage',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-geoyield-host-')),file=path.join(root,'state','resource-admission.json');fs.mkdirSync(path.dirname(file),{recursive:true});
+  fs.writeFileSync(file,JSON.stringify({schema:1,lease:{owner:'scout-job',nonce:'lease-n',priority:'background'},factory_intent:null}));
+  let clock=0,calls=0,host={factory_coordination:{verified:true,factory_pending:false},factory_job_active:false,planetiler_active:false,local_ai_active:false,other_heavy_workload_active:false,mem_available_mb:8000,disk:{free_bytes:100e9},load1:1,cpu_temp_c:55,nvme_temp_c:35,igpu:null,dgpu:null};
+  try{const shouldYield=createGeoYieldCheck({factoryDir:root,owner:'scout-job',nonce:'lease-n',now:()=>clock,readHost:()=>{calls++;return host;}});
+    assert.equal(shouldYield(),false);assert.equal(calls,1);host={...host,mem_available_mb:100};clock+=1000;assert.equal(shouldYield(),false,'host reads are rate limited between samples');
+    clock+=5000;assert.equal(shouldYield(),true,'new memory pressure safely yields the active stage');assert.equal(shouldYield.reason(),'BLOCKED_AVAILABLE_MEMORY');assert.equal(calls,2);
+    fs.writeFileSync(file,JSON.stringify({schema:1,lease:{owner:'scout-job',nonce:'lease-n',priority:'background'},factory_intent:{owner:'factory',nonce:'factory-n'}}));
+    assert.equal(shouldYield(),true,'factory intent remains immediate regardless of resource poll interval');assert.match(shouldYield.reason(),/factory priority/);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 

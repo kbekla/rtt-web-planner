@@ -509,6 +509,29 @@ test('notification severity cannot downgrade an active RED and can remind after 
   const restarted = new NotificationCenter(path.join(tmp, 'notify-escalation', 'state.json'), { now_ms: () => clock });
   assert.equal(restarted.state().events.length, 2);
 });
+test('unconfigured or failed delivery stays persistently pending and retries without exposing provider errors',async()=>{
+  let clock=1000;const file=path.join(tmp,'notify-pending','state.json'),queued=new NotificationCenter(file,{now_ms:()=>clock});
+  const first=await queued.emit({key:'review-batch',severity:'AMBER',message:'Private run needs review',channels:['EMAIL']});
+  assert.equal(first.event.delivery.EMAIL,'unconfigured');assert.equal(queued.state().pending.length,1);assert.equal(queued.state().active['review-batch'].last_sent_ms,null);
+  clock+=100;const email=new TestDeliveryProvider(),restarted=new NotificationCenter(file,{providers:{EMAIL:email},now_ms:()=>clock});
+  const sent=await restarted.retryPending();assert.equal(email.deliveries.length,1);assert.equal(sent[0].delivery.EMAIL,'sent');assert.equal(restarted.state().pending.length,0);
+  const failed=new NotificationCenter(path.join(tmp,'notify-pending','failed.json'),{providers:{EMAIL:{send:async()=>{throw new Error('secret=not-for-status');}}}});
+  await failed.emit({key:'smtp-failure',severity:'RED',message:'Delivery retry required',channels:['EMAIL']});
+  const state=JSON.stringify(failed.state());assert.match(state,/failed/);assert.doesNotMatch(state,/secret=not-for-status/);assert.equal(failed.state().pending.length,1);
+});
+test('a recovery notification remains a recovery event when delivery is retried after restart',async()=>{
+  const file=path.join(tmp,'notify-recovery-pending','state.json'),queued=new NotificationCenter(file);
+  await queued.emit({key:'thermal-hold',severity:'RED',message:'Thermal hold active',channels:['EMAIL']});
+  const recovery=await queued.emit({key:'thermal-hold',severity:'INFO',message:'Thermal hold cleared',channels:['EMAIL'],recovery:true});
+  assert.equal(recovery.event.delivery.EMAIL,'unconfigured');
+  assert.equal(queued.state().pending[0].recovery,true);
+  const email=new TestDeliveryProvider(),restarted=new NotificationCenter(file,{providers:{EMAIL:email}});
+  await restarted.retryPending();
+  assert.equal(email.deliveries.length,1);
+  assert.equal(email.deliveries[0].recovery,true);
+  assert.equal(restarted.state().pending.length,0);
+  assert.equal(restarted.state().active['thermal-hold'].resolved,true);
+});
 test('corrupt persistent queue enters durable RED and refuses another worker pass', () => {
   const root = path.join(tmp, 'worker-corrupt'), store = new ScoutStore(root); store.ensure();
   fs.writeFileSync(path.join(store.queue, 'pending', 'bad.json'), '{broken');

@@ -11,8 +11,7 @@
     "test:scout": "node --test tests/scout/*.test.mjs",
     "test:render": "playwright test",
     "scout:geo": "node scripts/scout/geoctl.mjs",
-    "scout:review:synthetic": "node scripts/scout/review-server.mjs",
-    "scout:review:belgium": "SCOUT_REAL_RUN_ID=be-20261004 node scripts/scout/review-real-server.mjs"
+    "scout:review:synthetic": "node scripts/scout/review-server.mjs"
   },
   "dependencies": {
     "maplibre-gl": "6.11.2",

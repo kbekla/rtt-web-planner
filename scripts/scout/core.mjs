@@ -501,7 +501,16 @@ export class ScoutHeavyWorkCoordinator {
 export class NotificationCenter {
   constructor(file, { providers = {}, cooldown_ms = SCOUT_CONFIG.notifications.cooldown_seconds * 1000,
     repeat_reminder_ms = SCOUT_CONFIG.notifications.repeat_reminder_seconds * 1000, now_ms = () => Date.now(), max_events = 1000, max_digest = 5000 } = {}) { this.file = file; this.providers = providers; this.cooldown = cooldown_ms; this.repeatReminder = repeat_reminder_ms; this.clock = now_ms; this.maxEvents = max_events; this.maxDigest = max_digest; }
-  state() { try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { return { events: [], active: {} }; } }
+  state() { try {
+    const state=JSON.parse(fs.readFileSync(this.file, 'utf8')),{events=[],active={},pending=[],...other}=state;
+    const current={events,active,pending,...other},queued=new Set(pending.map(item=>item.key));
+    for(const [key,alert]of Object.entries(active)){if(alert.resolved||queued.has(key)||alert.pending_channels?.length)continue;
+      const last=[...events].reverse().find(item=>item.key===key);if(!last||Number.isNaN(Date.parse(last.at))||Math.abs(Date.parse(last.at)-alert.last_sent_ms)>1)continue;
+      const channels=Object.entries(last.delivery??{}).filter(([,result])=>result==='unconfigured'||String(result).startsWith('failed')).map(([channel])=>channel);
+      if(channels.length){pending.push({key,severity:alert.severity,message:last.message,channels,queued_at:last.at});alert.pending_channels=channels;alert.last_attempt_ms=Date.parse(last.at);alert.last_sent_ms=null;}
+    }
+    current.pending=pending;return current;
+  } catch { return { events: [], active: {}, pending: [] }; } }
   save(s) { fs.mkdirSync(path.dirname(this.file), { recursive: true }); const t = `${this.file}.tmp-${process.pid}`; const fd = fs.openSync(t, 'w'); fs.writeFileSync(fd, JSON.stringify(s, null, 2) + '\n'); fs.fsyncSync(fd); fs.closeSync(fd); fs.renameSync(t, this.file); }
   async emit({ key, severity, message, channels = ['EMAIL','SMS'], recovery = false }) { const s = this.state(), old = s.active[key], nowMs = this.clock();
     if (!key || !['INFO','AMBER','RED'].includes(severity) || typeof message !== 'string') throw new Error('notification requires a dedupe key, valid severity, and short message');
@@ -509,13 +518,25 @@ export class NotificationCenter {
     else if (old && !old.resolved) {
       const rank = { INFO: 0, AMBER: 1, RED: 2 };
       if (rank[severity] < rank[old.severity]) return { sent: false, reason: 'lower-severity' };
-      if (rank[severity] === rank[old.severity] && nowMs - old.last_sent_ms < Math.max(this.cooldown, this.repeatReminder)) return { sent: false, reason: 'cooldown' };
+      const lastAttempt=old.last_attempt_ms??old.last_sent_ms;
+      if (rank[severity] === rank[old.severity] && lastAttempt!=null && nowMs - lastAttempt < Math.max(this.cooldown, this.repeatReminder)) return { sent: false, reason: 'cooldown' };
     }
+    const sendChannels=old?.pending_channels?.length&&old.severity===severity?old.pending_channels:channels;
     const event = { key, severity: recovery ? 'INFO' : severity, message, recovery, at: new Date(nowMs).toISOString(), delivery: {} };
-    for (const channel of channels) { try { await this.providers[channel]?.send(event); event.delivery[channel] = this.providers[channel] ? 'sent' : 'unconfigured'; } catch (e) { event.delivery[channel] = `failed: ${e.message ?? e}`; } }
+    const pending=[];
+    for (const channel of sendChannels) { try { if(this.providers[channel]){await this.providers[channel].send(event);event.delivery[channel]='sent';}else{event.delivery[channel]='unconfigured';pending.push(channel);} } catch (e) { const code=typeof e?.code==='string'&&/^[A-Z0-9_]{1,24}$/.test(e.code)?` (${e.code})`:'';event.delivery[channel]=`failed${code}`;pending.push(channel); } }
     s.events.push(event); if (s.events.length > this.maxEvents) s.events.splice(0, s.events.length - this.maxEvents);
-    if (recovery) s.active[key] = { ...old, resolved: true, recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: nowMs, resolved: false };
+    s.pending=s.pending.filter(item=>item.key!==key);if(pending.length)s.pending.push({key,severity:recovery?'INFO':severity,message,channels:pending,recovery,queued_at:old?.queued_at??event.at});
+    if (recovery) s.active[key] = { ...old, resolved: true, pending_channels:[], recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: pending.length===sendChannels.length?(old?.last_sent_ms??null):nowMs,last_attempt_ms:nowMs, resolved: false,pending_channels:pending };
     this.save(s); return { sent: true, event };
+  }
+  async retryPending(){
+    const s=this.state(),results=[];for(const item of s.pending){const event={key:item.key,severity:item.severity,message:item.message,recovery:Boolean(item.recovery),at:new Date(this.clock()).toISOString(),delivery:{}},remaining=[];
+      for(const channel of item.channels){try{if(this.providers[channel]){await this.providers[channel].send(event);event.delivery[channel]='sent';}else{event.delivery[channel]='unconfigured';remaining.push(channel);}}catch(e){const code=typeof e?.code==='string'&&/^[A-Z0-9_]{1,24}$/.test(e.code)?` (${e.code})`:'';event.delivery[channel]=`failed${code}`;remaining.push(channel);}}
+      s.events.push(event);const active=s.active[item.key]??{severity:item.severity,resolved:false};active.pending_channels=remaining;active.last_attempt_ms=this.clock();if(Object.values(event.delivery).includes('sent'))active.last_sent_ms=this.clock();s.active[item.key]=active;results.push({key:item.key,delivery:event.delivery,pending:remaining});
+      if(remaining.length)item.channels=remaining;else item._delivered=true;
+    }
+    s.pending=s.pending.filter(item=>!item._delivered);if(s.events.length>this.maxEvents)s.events.splice(0,s.events.length-this.maxEvents);this.save(s);return results;
   }
   digest(items) { const s = this.state(); s.digest = [...(s.digest ?? []), ...clone(items)].slice(-this.maxDigest); this.save(s); return s.digest.length; }
 }
