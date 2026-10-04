@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="RT&amp;T synthetic test"><trk><name>Synthetic mixed route</name>
+  <trkseg>
+    <trkpt lat="51.0000" lon="-1.0000"><ele>100</ele><time>2026-01-01T10:00:00Z</time></trkpt>
+    <trkpt lat="51.0010" lon="-1.0000"><ele>101</ele></trkpt>
+    <trkpt lat="51.0020" lon="-1.0000"><ele>102</ele></trkpt>
+    <trkpt lat="51.0030" lon="-1.0000"><ele>103</ele></trkpt>
+  </trkseg>
+  <trkseg>
+    <trkpt lat="51.0100" lon="-1.0100"/><trkpt lat="51.0110" lon="-1.0100"/>
+  </trkseg>
+</trk></gpx>

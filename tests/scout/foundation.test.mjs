@@ -40,6 +40,12 @@ test('exact master geometry produces EXACT_EXISTING and leaves input untouched',
   const c = cand([[0, 0], [0.01, 0.01]]), original = JSON.stringify(master([[0, 0], [0.01, 0.01]]));
   assert.equal(matchMaster(c, [JSON.parse(original)]).type, 'EXACT_EXISTING'); assert.equal(JSON.stringify(master([[0, 0], [0.01, 0.01]])), original);
 });
+test('antimeridian canonical matching unwraps a computational copy without changing source geometry',()=>{
+  const geometry={type:'LineString',coordinates:[[179.9,10],[-179.9,10]]},candidate=candidateFromObservation(obs(null,'dateline',{geometry}));
+  const masterFeature=master([[-179.9,10],[179.9,10]],'rtt-trail-dateline');
+  const before=JSON.stringify(candidate.geometry),result=matchMaster(candidate,[masterFeature]);
+  assert.equal(result.type,'EXACT_EXISTING');assert.deepEqual(result.rtt_ids,['rtt-trail-dateline']);assert.equal(JSON.stringify(candidate.geometry),before);
+});
 test('exact matching ignores line direction and MultiLineString component order without rewriting observations', () => {
   const g = { type: 'MultiLineString', coordinates: [[[0, 0], [0.01, 0]], [[0, 1], [0.01, 1]]] };
   const reversed = { type: 'MultiLineString', coordinates: [[[0.01, 1], [0, 1]], [[0.01, 0], [0, 0]]] };

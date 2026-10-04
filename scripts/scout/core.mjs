@@ -69,6 +69,15 @@ function canonicalGeometry(g) {
   }).sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
   return g?.type === 'LineString' ? { type: 'LineString', coordinates: lines[0] ?? [] } : { type: 'MultiLineString', coordinates: lines };
 }
+function longitudeReference(geometryPoints) {
+  const sum=geometryPoints.reduce((acc,[lon])=>[acc[0]+Math.cos(lon*Math.PI/180),acc[1]+Math.sin(lon*Math.PI/180)],[0,0]);
+  return Math.atan2(sum[1],sum[0])*180/Math.PI;
+}
+function unwrapGeometry(g, reference) {
+  const unwrap=(lon)=>{let value=lon;while(value-reference>180)value-=360;while(value-reference< -180)value+=360;return value;};
+  const map=(line)=>line.map((point)=>[unwrap(point[0]),...point.slice(1)]);
+  return g?.type==='LineString'?{...g,coordinates:map(g.coordinates)}:g?.type==='MultiLineString'?{...g,coordinates:g.coordinates.map(map)}:g;
+}
 function project(pointsList, lat0) {
   const scale = Math.cos(lat0 * Math.PI / 180) * 111320;
   return pointsList.map(([lon, lat]) => [lon * scale, lat * 110540]);
@@ -125,8 +134,9 @@ export function matchMaster(candidate, masterFeatures, thresholds = {}, trustedI
     tight_coverage: configured.tight_coverage, loose_coverage: 0.05, ...thresholds };
   if (!candidate.geometry) return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'geometry unavailable' };
   const exact = [], scored = [];
-  const candidatePoints = points(candidate.geometry);
-  const bounds = (pts) => ({ minLon: Math.min(...pts.map((p) => p[0])), maxLon: Math.max(...pts.map((p) => p[0])), minLat: Math.min(...pts.map((p) => p[1])), maxLat: Math.max(...pts.map((p) => p[1])) });
+  const candidateRawPoints = points(candidate.geometry);
+  const bounds = (pts) => pts.reduce((b,p)=>({minLon:Math.min(b.minLon,p[0]),maxLon:Math.max(b.maxLon,p[0]),minLat:Math.min(b.minLat,p[1]),maxLat:Math.max(b.maxLat,p[1])}),{minLon:Infinity,maxLon:-Infinity,minLat:Infinity,maxLat:-Infinity});
+  const referenceLon=longitudeReference(candidateRawPoints),candidateGeometry=unwrapGeometry(candidate.geometry,referenceLon),candidatePoints=points(candidateGeometry);
   if (!candidatePoints.length || candidatePoints.some((p) => !Number.isFinite(p[0]) || !Number.isFinite(p[1])))
     return { type: 'AMBIGUOUS', rtt_ids: [], scores: [], thresholds: policy, reason: 'invalid geometry' };
   const cb = bounds(candidatePoints), midLat = (cb.minLat + cb.maxLat) / 2;
@@ -136,12 +146,12 @@ export function matchMaster(candidate, masterFeatures, thresholds = {}, trustedI
   for (const f of masterFeatures) {
     const id = f?.properties?.rtt_id;
     if (!id || !f.geometry) continue;
-    const fp = points(f.geometry);
+    const normalizedMaster=unwrapGeometry(f.geometry,referenceLon),fp = points(normalizedMaster);
     if (fp.length < 2) continue;
     const fb = bounds(fp);
     if (fb.maxLon < cb.minLon - padLon || fb.minLon > cb.maxLon + padLon || fb.maxLat < cb.minLat - padLat || fb.minLat > cb.maxLat + padLat) continue;
-    if (eq(canonicalGeometry(candidate.geometry), canonicalGeometry(f.geometry))) { exact.push(id); continue; }
-    const m = metrics(candidate.geometry, f.geometry);
+    if (eq(canonicalGeometry(candidateGeometry), canonicalGeometry(normalizedMaster))) { exact.push(id); continue; }
+    const m = metrics(candidateGeometry, normalizedMaster);
     if (m) scored.push({ id, ...m, identity_corroborated: Boolean(trustedIdentity(candidate, f)) });
   }
   if (exact.length) return { type: 'EXACT_EXISTING', rtt_ids: exact.sort(), scores: [], thresholds: policy };
