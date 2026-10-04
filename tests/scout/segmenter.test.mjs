@@ -33,6 +33,14 @@ test('unknown surface never invents off-road status',()=>{
   const result=segmentRouteObservation(obs(mixed),[edge('road', [mixed[0],mixed.at(-1)],'residential',null)]);
   assert.ok(result.segments.every((s)=>s.classification==='ROAD')); assert.equal(result.candidates.length,0);
 });
+test('OSM access restrictions never alter physical road character',()=>{
+  const coords=mixed,restricted=edge('restricted-road',coords,'residential','asphalt');
+  restricted.tags.access='no';restricted.tags.motor_vehicle='no';restricted.tags.motorcycle='no';restricted.tags.vehicle='private';
+  const result=segmentRouteObservation(obs(coords),[restricted]);
+  assert.ok(result.segments.every((s)=>s.classification==='ROAD'));
+  assert.ok(result.segments.every((s)=>s.confidence>=0&&s.confidence<=1));
+  assert.equal(result.candidates.length,0);
+});
 test('road network overrides an unverified source name calling a paved road a trail',()=>{
   const route=obs(mixed,'source-name-is-not-evidence',{source_name:'trail'});
   const result=segmentRouteObservation(route,[edge('road',[mixed[0],mixed.at(-1)],'secondary','asphalt')]);
@@ -42,13 +50,22 @@ test('nearby parallel road and trail are matched by distance and ambiguous compe
   const coords=[[-1,51.00005],[-0.999,51.00005]], parallel=[edge('road', [[-1,51],[-0.999,51]],'residential','asphalt'),edge('path', [[-1,51.0001],[-0.999,51.0001]],'path','dirt')];
   const result=segmentRouteObservation(obs(coords),parallel); assert.ok(result.segments.every((s)=>s.classification==='UNKNOWN'));
 });
-test('brief mapped road crossing through a longer path keeps one candidate identity',()=>{
+test('a short but directly supported probable path remains a distinct candidate',()=>{
+  const short=[[-1,51],[-0.9998,51]],result=segmentRouteObservation(obs(short,'genuine-short'),[edge('short-path',short,'path','ground')]);
+  assert.equal(result.candidates.length,1);assert.equal(result.candidates[0].classification,'PROBABLE_OFFROAD');
+  assert.ok(result.candidates[0].length_m<25);assert.equal(result.continuity_hypotheses.length,0);
+});
+test('brief crossing ambiguity preserves two source-supported candidates and a non-destructive continuity hypothesis',()=>{
   const x=Array.from({length:7},(_,i)=>[-1+i*0.0005,51]);
   const before=[x[0],x[1],x[2]], after=[x[4],x[5],x[6]], center=x[3];
   const crossingStart=[(x[2][0]+center[0])/2,51],crossingEnd=[(x[4][0]+center[0])/2,51];
-  const network=[edge('t1',[before[0],before[2]],'path','dirt'),edge('cross',[crossingStart,crossingEnd],'residential','asphalt'),edge('t2',[after[0],after[2]],'path','dirt')];
-  const result=segmentRouteObservation(obs(x),network,{shortRoadCrossingMeters:100});
-  assert.equal(result.candidates.length,1); assert.ok(result.candidates[0].evidence.some((e)=>e.rule==='short-road-crossing-preserved'));
+  const network=[edge('path-whole',[before[0],after.at(-1)],'path','dirt'),edge('cross',[crossingStart,crossingEnd],'residential','asphalt')];
+  const result=segmentRouteObservation(obs(x),network);
+  assert.equal(result.candidates.length,2);
+  assert.ok(result.segments.some((s)=>s.classification==='UNKNOWN'&&s.unknown_reason==='competing_network_classes'));
+  assert.equal(result.continuity_hypotheses.length,1);
+  assert.equal(result.continuity_hypotheses[0].hypothesis,'SAME_OSM_WAY_WITH_AMBIGUOUS_CONNECTOR');
+  assert.equal(result.continuity_hypotheses[0].geometry_gap_filled,false);
 });
 test('same trail approached by independent roads yields matching derived trail geometry only',()=>{
   const trail=[[-0.998,51],[-0.9975,51],[-0.997,51]], a=[[-1,51],[-0.999,51],...trail], b=[[-0.99,51],[-0.989,51],...trail].reverse();
@@ -106,11 +123,39 @@ test('unknown unmatched geometry is reviewable but is not treated as a trail can
   const result=segmentRouteObservation(obs(mixed),[]);
   assert.ok(result.segments.every((s)=>s.classification==='UNKNOWN')); assert.equal(result.candidates.length,0);
 });
-test('sparse route vertices around a road-to-trail transition create an UNKNOWN gap instead of an invented boundary',()=>{
+test('factory yield interrupts long pure interval matching before a result can be persisted',()=>{
+  const route=obs([[-1,51],[-0.7,51]],'yieldable');let checks=0;
+  assert.throws(()=>segmentRouteObservation(route,[],{initialSampleSpacingMeters:10,shouldYield:()=>++checks>1}),
+    (error)=>error.code==='SCOUT_YIELD_REQUESTED');
+  assert.ok(checks>1);
+});
+test('sparse long GPX legs localize supported ends but leave unsupported chord interior UNKNOWN',()=>{
   const coords=[[-1,51],[-0.99,51]],network=[edge('road',[coords[0],coords[0]],'residential','asphalt'),edge('trail',[coords[1],coords[1]],'path','dirt')];
-  const result=segmentRouteObservation(obs(coords),network,{maxSnapMeters:1});
-  assert.ok(result.segments.some((s)=>s.classification==='UNKNOWN'&&s.evidence.some((e)=>e.rule==='transition-gap-too-long-to-place-boundary')));
-  assert.equal(result.candidates.length,0);
+  const source=obs(coords),result=segmentRouteObservation(source,network,{maxSnapMeters:8});
+  assert.ok(result.segments.some((s)=>s.classification==='UNKNOWN'&&s.unknown_reason==='no_network_match'));
+  assert.ok(result.segments.some((s)=>s.classification==='ROAD'));
+  assert.ok(result.segments.some((s)=>s.classification==='PROBABLE_OFFROAD'));
+  assert.ok(Math.abs(result.total_distance_m-700.57)<0.1);
+  assert.equal(JSON.stringify(result.source_geometry),JSON.stringify(source.geometry));
+  assert.equal(result.segments.reduce((n,s)=>n+s.length_m,0),result.total_distance_m);
+});
+test('reversed lines and extra collinear GPX vertices keep route-level class and distance stable',()=>{
+  const ends=[[-1,51],[-0.997,51]],dense=Array.from({length:13},(_,i)=>[-1+i*.00025,51]);
+  const network=[edge('same-road',ends,'primary','asphalt')];
+  const sparse=segmentRouteObservation(obs(ends,'sparse'),network),sampled=segmentRouteObservation(obs(dense,'dense'),network),reversed=segmentRouteObservation(obs([...dense].reverse(),'reverse'),network);
+  assert.ok(sparse.segments.every((s)=>s.classification==='ROAD'));
+  assert.ok(sampled.segments.every((s)=>s.classification==='ROAD'));
+  assert.ok(reversed.segments.every((s)=>s.classification==='ROAD'));
+  assert.ok(Math.abs(sparse.total_distance_m-sampled.total_distance_m)<0.01);
+  assert.ok(Math.abs(sampled.total_distance_m-reversed.total_distance_m)<0.01);
+});
+test('disconnected parts of a multipart OSM way do not create a corridor handoff',()=>{
+  const left=[[-1,51],[-0.9998,51]],right=[[-0.998,51],[-0.9978,51]],route=[left[0],left[1],[-0.9989,51],right[0],right[1]];
+  const network=[{edge_id:'multipart-path',geometry:{type:'MultiLineString',coordinates:[left,right]},tags:{highway:'path',surface:'ground'}}];
+  const result=segmentRouteObservation(obs(route),network);
+  assert.equal(result.candidates.length,2);
+  assert.equal(result.continuity_hypotheses.length,0);
+  assert.ok(result.segments.some((s)=>s.classification==='UNKNOWN'&&s.unknown_reason==='no_network_match'));
 });
 test('qualified physical evidence can mark a path confirmed without asserting legal access or routability',()=>{
   const result=segmentRouteObservation(obs(mixed),[edge('confirmed-path',mixed,'path','ground',{evidence:[{question:'physical_existence',outcome:'confirmed',qualified:true,reference:'synthetic-evidence'}]})]);

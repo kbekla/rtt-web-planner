@@ -20,6 +20,9 @@ test('pinned regional processing saves road/trail segments and matching hypothes
     store.saveNetworkEdge('network-snapshot-v1',edge('path-a',[coords[1],coords[3]],'path','ground'));
     store.saveNetworkEdge('network-snapshot-v1',edge('road-b',[coords[3],coords[4]],'tertiary','asphalt'));
     const master={feature_count:14315,sha256:'synthetic-canonical-checksum',match(candidate){assert.ok(candidate.geometry.coordinates.length>=2);return {type:'PARTIAL_OVERLAP',rtt_ids:['rtt-synthetic-0001'],scores:[{mean_m:1}],reason:null};}};
+    assert.throws(()=>processRouteObservation(store,'synthetic-observation-01',{networkSnapshotId:'network-snapshot-v1',shouldYield:()=>true}),
+      (error)=>error.code==='SCOUT_YIELD_REQUESTED');
+    assert.equal(store.querySegments([-1.01,50.99,-0.99,51.01]).length,0,'yield before persistence leaves no derived records');
     const first=processRouteObservation(store,'synthetic-observation-01',{networkSnapshotId:'network-snapshot-v1',canonicalMaster:master});
     const second=processRouteObservation(store,'synthetic-observation-01',{networkSnapshotId:'network-snapshot-v1',canonicalMaster:master});
     assert.deepEqual(first.source_geometry,{type:'LineString',coordinates:coords});
@@ -31,5 +34,27 @@ test('pinned regional processing saves road/trail segments and matching hypothes
     assert.equal(store.getObservation('synthetic-observation-01').geometry.coordinates.length,coords.length);
     assert.ok(store.listReviewItems({state:'ALL'}).length>=2);
     assert.throws(()=>processRouteObservation(store,'synthetic-observation-01'),/explicit pinned/);
+  } finally {store.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('ambiguous same-way continuity hypotheses persist without filling the uncertain connector',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-continuity-')),store=new ScoutGeoStore(root);
+  try {
+    store.registerSource(source('synthetic-gpx','discovery'));store.registerSource(source('synthetic-network','network'));
+    const file=store.recordFile({source_id:'synthetic-gpx',relative_name:'crossing.gpx',sha256:'e'.repeat(64),parser_version:'parser-v1',format:'gpx',raw_path:'private/raw',byte_size:1});
+    const coords=Array.from({length:7},(_,i)=>[-1+i*0.0005,51]);
+    store.completeFileImport(file.file_id,[{observation_id:'synthetic-crossing-01',source_part:'track-1',geometry:{type:'LineString',coordinates:coords},geometry_sha256:'g',metadata:{}}]);
+    store.recordNetworkSnapshot({snapshot_id:'network-snapshot-v1',source_id:'synthetic-network',version:'fixture-v1',checksum:'d'.repeat(64),licence:{name:'synthetic'},coverage:{countries:['ZZ']}});
+    store.saveNetworkEdge('network-snapshot-v1',edge('same-trail-way',[coords[0],coords.at(-1)],'path','ground'));
+    store.saveNetworkEdge('network-snapshot-v1',edge('cross-road',[coords[2],coords[4]],'residential','asphalt'));
+    const first=processRouteObservation(store,'synthetic-crossing-01',{networkSnapshotId:'network-snapshot-v1'});
+    assert.equal(first.candidates.length,2);assert.equal(first.continuity_hypotheses.length,1);
+    assert.equal(first.continuity_hypotheses[0].geometry_gap_filled,false);
+    const saved=store.listCorridorHypotheses('synthetic-crossing-01');assert.equal(saved.length,1);
+    assert.equal(saved[0].hypothesis,'SAME_OSM_WAY_WITH_AMBIGUOUS_CONNECTOR');assert.deepEqual(saved[0].support_edge_ids,['same-trail-way#part:0']);
+    const second=processRouteObservation(store,'synthetic-crossing-01',{networkSnapshotId:'network-snapshot-v1'});
+    assert.equal(second.continuity_hypotheses[0].hypothesis_id,first.continuity_hypotheses[0].hypothesis_id);
+    assert.equal(store.listCorridorHypotheses('synthetic-crossing-01').length,1);
+    assert.ok(second.candidates.every((candidate)=>candidate.motorcycle_access==='unknown'&&candidate.routability==='unknown'));
   } finally {store.close();fs.rmSync(root,{recursive:true,force:true});}
 });

@@ -1,6 +1,7 @@
 // One resumable-friendly observation processing boundary. The caller supplies
 // a pinned road-network snapshot and, optionally, the read-only canonical
 // master handle. No master path is inferred and no mutation API is used.
+import crypto from 'node:crypto';
 import { segmentRouteObservation } from './route-segmenter.mjs';
 
 const lines=(geometry)=>geometry?.type==='LineString'?[geometry.coordinates]:geometry?.type==='MultiLineString'?geometry.coordinates:[];
@@ -23,7 +24,7 @@ function spatialCells(geometry,{cellDegrees=0.001,maxCells=10000,maxVertices=500
 }
 
 export function processRouteObservation(store, observationId, { networkSnapshotId, canonicalMaster=null, jurisdictions=[], maxNetworkEdges=100000,
-  networkEdgesPerCell=1000, segmenterOptions={} }={}) {
+  networkEdgesPerCell=1000, segmenterOptions={}, shouldYield=()=>false }={}) {
   if(!networkSnapshotId)throw new Error('an explicit pinned networkSnapshotId is required');
   const observationRow=store.getObservation(observationId);if(!observationRow)throw new Error(`unknown route observation '${observationId}'`);
   const snapshot=store.getNetworkSnapshot(networkSnapshotId);if(!snapshot)throw new Error(`unknown network snapshot '${networkSnapshotId}'`);
@@ -39,8 +40,10 @@ export function processRouteObservation(store, observationId, { networkSnapshotI
   }
   const networkEvidence=[...unique.values()].map((edge)=>({...edge,evidence:(edge.evidence??[]).map((e)=>
     e.question==='physical_existence'&&e.qualified===true&&networkSource.roles.physical_existence!==true?{...e,qualified:false,qualification_blocked_by_source_role:true}:e)}));
+  if(shouldYield()) { const error=new Error('shared factory admission requested Scout yield before segmentation');error.code='SCOUT_YIELD_REQUESTED';throw error; }
   const result=segmentRouteObservation({observation_id:observationRow.observation_id,geometry:observationRow.geometry,
-    source_language:observationRow.source_language,source_name:observationRow.source_name},networkEvidence,{...segmenterOptions,jurisdictions});
+    source_language:observationRow.source_language,source_name:observationRow.source_name},networkEvidence,{...segmenterOptions,jurisdictions,shouldYield});
+  if(shouldYield()) { const error=new Error('shared factory admission requested Scout yield before persistence');error.code='SCOUT_YIELD_REQUESTED';throw error; }
   for(const segment of result.segments) {
     segment.network_snapshot_id=networkSnapshotId;
     store.saveSegment(segment);
@@ -74,6 +77,15 @@ export function processRouteObservation(store, observationId, { networkSnapshotI
       recommended_action:match.type==='AMBIGUOUS'?'Compare with the appropriate regional canonical master and corroborate identity before grouping.':'Collect current access evidence for each listed jurisdiction without splitting the physical corridor identity.'});
     candidates.push(candidate);
   }
+  for(const hypothesis of result.continuity_hypotheses) {
+    const candidate_ids=hypothesis.candidate_segment_ids.map((id)=>`candidate-${id}`).sort();
+    const identity=[networkSnapshotId,observationId,hypothesis.component_index,candidate_ids,hypothesis.connector_segment_ids,hypothesis.shared_network_edge_ids];
+    const hypothesis_id=`corridor-${crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0,24)}`;
+    store.saveCorridorHypothesis({hypothesis_id,observation_id:observationId,component_index:hypothesis.component_index,network_snapshot_id:networkSnapshotId,
+      candidate_ids,connector_segment_ids:hypothesis.connector_segment_ids,support_edge_ids:hypothesis.shared_network_edge_ids,
+      connector_length_m:hypothesis.connector_length_m,hypothesis:hypothesis.hypothesis,geometry_gap_filled:hypothesis.geometry_gap_filled,evidence:hypothesis.evidence});
+    hypothesis.hypothesis_id=hypothesis_id;hypothesis.candidate_ids=candidate_ids;hypothesis.network_snapshot_id=networkSnapshotId;
+  }
   return {observation_id:observationId,source_geometry:observationRow.geometry,network_snapshot:{snapshot_id:snapshot.snapshot_id,version:snapshot.version,checksum:snapshot.checksum},
-    segment_count:result.segments.length,candidate_count:candidates.length,segments:result.segments,candidates};
+    segment_count:result.segments.length,candidate_count:candidates.length,segments:result.segments,candidates,continuity_hypotheses:result.continuity_hypotheses};
 }

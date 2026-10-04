@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 4;
+export const SCOUT_GEOSCHEMA_VERSION = 5;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -95,6 +95,14 @@ export class ScoutGeoStore {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         FOREIGN KEY(segment_id) REFERENCES route_segments(segment_id)
       );
+      CREATE TABLE IF NOT EXISTS corridor_hypotheses (
+        hypothesis_id TEXT PRIMARY KEY, observation_id TEXT NOT NULL, component_index INTEGER NOT NULL,
+        network_snapshot_id TEXT NOT NULL, candidate_ids_json TEXT NOT NULL, connector_segment_ids_json TEXT NOT NULL,
+        support_edge_ids_json TEXT NOT NULL, connector_length_m REAL NOT NULL, hypothesis TEXT NOT NULL,
+        geometry_gap_filled INTEGER NOT NULL CHECK(geometry_gap_filled IN (0,1)), evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY(observation_id) REFERENCES route_observations(observation_id),
+        FOREIGN KEY(network_snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
       CREATE TABLE IF NOT EXISTS evidence (
         evidence_id TEXT PRIMARY KEY, candidate_id TEXT, observation_id TEXT, question TEXT NOT NULL,
         outcome TEXT NOT NULL, jurisdiction_id TEXT, source_id TEXT NOT NULL, source_version TEXT,
@@ -114,6 +122,7 @@ export class ScoutGeoStore {
       CREATE INDEX IF NOT EXISTS observations_file_idx ON route_observations(file_id);
       CREATE INDEX IF NOT EXISTS segments_observation_idx ON route_segments(observation_id, ordinal);
       CREATE INDEX IF NOT EXISTS candidates_review_idx ON candidates(review_state, updated_at);
+      CREATE INDEX IF NOT EXISTS corridor_hypothesis_observation_idx ON corridor_hypotheses(observation_id,component_index);
       CREATE INDEX IF NOT EXISTS evidence_question_idx ON evidence(question, jurisdiction_id, evidence_time);
     `);
     const version = this.db.prepare('SELECT version FROM schema_version LIMIT 1').get()?.version;
@@ -123,7 +132,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -260,6 +269,31 @@ export class ScoutGeoStore {
       OR candidates.matched_rtt_ids_json IS NOT excluded.matched_rtt_ids_json OR candidates.match_details_json IS NOT excluded.match_details_json OR candidates.network_snapshot_id IS NOT excluded.network_snapshot_id OR candidates.jurisdiction_ids_json IS NOT excluded.jurisdiction_ids_json`)
       .run(candidate_id,segment.segment_id,master_match,physical_state,motorcycle_access,routability,review_state,json(issues),json(matched_rtt_ids),json(match_details),network_snapshot_id,json(jurisdiction_ids),at,at);
     return this.db.prepare('SELECT * FROM candidates WHERE candidate_id=?').get(candidate_id);
+  }
+  saveCorridorHypothesis(hypothesis) {
+    const required=['hypothesis_id','observation_id','component_index','network_snapshot_id','candidate_ids','connector_segment_ids','support_edge_ids','connector_length_m','hypothesis','evidence'];
+    if(required.some((key)=>hypothesis?.[key]==null)||!Array.isArray(hypothesis.candidate_ids)||hypothesis.candidate_ids.length<2||
+      !Array.isArray(hypothesis.connector_segment_ids)||!Array.isArray(hypothesis.support_edge_ids)||!hypothesis.support_edge_ids.length||
+      !Number.isFinite(hypothesis.connector_length_m)||hypothesis.connector_length_m<0||hypothesis.geometry_gap_filled!==false)
+      throw new Error('corridor continuity hypothesis must be a non-destructive, evidence-backed connector record');
+    if(!this.getObservation(hypothesis.observation_id)||!this.getNetworkSnapshot(hypothesis.network_snapshot_id))throw new Error('corridor hypothesis references unknown observation or network snapshot');
+    const candidateIds=[...hypothesis.candidate_ids].sort(),connectorIds=[...hypothesis.connector_segment_ids],edgeIds=[...hypothesis.support_edge_ids].sort();
+    for(const id of candidateIds)if(!this.db.prepare('SELECT 1 FROM candidates WHERE candidate_id=?').get(id))throw new Error(`corridor hypothesis references unknown candidate '${id}'`);
+    for(const id of connectorIds)if(!this.db.prepare('SELECT 1 FROM route_segments WHERE segment_id=?').get(id))throw new Error(`corridor hypothesis references unknown connector segment '${id}'`);
+    const prior=this.db.prepare('SELECT candidate_ids_json,connector_segment_ids_json,support_edge_ids_json,evidence_json FROM corridor_hypotheses WHERE hypothesis_id=?').get(hypothesis.hypothesis_id);
+    if(prior&&(prior.candidate_ids_json!==json(candidateIds)||prior.connector_segment_ids_json!==json(connectorIds)||prior.support_edge_ids_json!==json(edgeIds)||prior.evidence_json!==json(hypothesis.evidence)))
+      throw new Error('corridor hypothesis identity collision with different evidence');
+    this.db.prepare(`INSERT OR IGNORE INTO corridor_hypotheses(hypothesis_id,observation_id,component_index,network_snapshot_id,candidate_ids_json,connector_segment_ids_json,
+      support_edge_ids_json,connector_length_m,hypothesis,geometry_gap_filled,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(hypothesis.hypothesis_id,hypothesis.observation_id,hypothesis.component_index,hypothesis.network_snapshot_id,json(candidateIds),json(connectorIds),json(edgeIds),
+        hypothesis.connector_length_m,hypothesis.hypothesis,0,json(hypothesis.evidence),new Date().toISOString());
+    return this.db.prepare('SELECT * FROM corridor_hypotheses WHERE hypothesis_id=?').get(hypothesis.hypothesis_id);
+  }
+  listCorridorHypotheses(observationId=null) {
+    const rows=observationId?this.db.prepare('SELECT * FROM corridor_hypotheses WHERE observation_id=? ORDER BY component_index,hypothesis_id').all(observationId):
+      this.db.prepare('SELECT * FROM corridor_hypotheses ORDER BY observation_id,component_index,hypothesis_id').all();
+    return rows.map((r)=>({...r,candidate_ids:JSON.parse(r.candidate_ids_json),connector_segment_ids:JSON.parse(r.connector_segment_ids_json),
+      support_edge_ids:JSON.parse(r.support_edge_ids_json),evidence:JSON.parse(r.evidence_json),geometry_gap_filled:Boolean(r.geometry_gap_filled)}));
   }
   saveEvidence(record) {
     const source=this.getSource(record.source_id);

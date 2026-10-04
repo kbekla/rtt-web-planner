@@ -27,19 +27,25 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'test',jurisdiction_ids:['BE-country']};
     store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',network_snapshot_id:'geofabrik-be-261003',
       physical_state:'unknown',motorcycle_access:'unknown',routability:'unknown',review_state:'AWAITING_EVIDENCE',jurisdiction_ids:['BE-country']});
+    store.saveSegment({segment_id:'be-review-unknown',observation_id:'be-review-obs',ordinal:1,component_index:0,classification:'UNKNOWN',confidence:null,
+      geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.311,50.811]]},evidence:[{rule:'no-network-match-within-threshold',threshold_m:8}],
+      pipeline_version:'test',jurisdiction_ids:['BE-country']});
     store.close();
     server=createRealReviewServer({runId:'be-20000101',privateBase:base,port:0,onError:error=>{serverError=error;}});await new Promise(resolve=>server.once('listening',resolve));
     const address=`http://127.0.0.1:${server.address().port}`;
-    const page=await fetch(address);assert.equal(page.status,200);assert.match(await page.text(),/Canonical comparison was not performed/);
+    const page=await fetch(address);assert.equal(page.status,200);const html=await page.text();assert.match(html,/Canonical comparison was not performed/);
+    assert.match(html,/UNKNOWN reason/);assert.match(html,/Candidate length/);assert.match(html,/Match-margin score/);
     const getJson=async(url)=>{serverError=null;const response=await fetch(url),text=await response.text();assert.equal(response.status,200,`${url}: ${text}\n${serverError?.stack??''}`);return JSON.parse(text);};
     const css=await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.css`);assert.equal(css.status,200);assert.match(css.headers.get('content-type'),/text\/css/);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs`)).status,200);
     assert.equal((await fetch(`${address}/vendor/maplibre-gl/maplibre-gl.mjs.map`)).status,404);
-    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.candidates,1);assert.equal(status.matched_network_edge_ids,1);
+    const status=await getJson(`${address}/api/status`);assert.equal(status.private_data_loaded,true);assert.equal(status.read_only,true);assert.equal(status.candidates,1);assert.equal(status.segments,2);assert.equal(status.matched_network_edge_ids,1);
     const routes=await getJson(`${address}/api/source-routes`);assert.equal(routes.features.length,1);assert.equal(routes.features[0].properties.source_id,'tet-belgium-private-discovery');
     assert.equal(JSON.stringify(status).includes('/private/never-served'),false);assert.equal(JSON.stringify(routes).includes('/private/never-served'),false);
-    const segments=await getJson(`${address}/api/segments?bbox=4.2,50.7,4.4,50.9`);assert.equal(segments.features.length,1);
+    const segments=await getJson(`${address}/api/segments?bbox=4.2,50.7,4.4,50.9`);assert.equal(segments.features.length,2);
     assert.equal(segments.features[0].properties.motorcycle_access,'unknown');assert.equal(segments.features[0].properties.routability,'unknown');
+    const trail=segments.features.find(f=>f.properties.candidate_id),unknown=segments.features.find(f=>f.properties.classification==='UNKNOWN');
+    assert.equal(trail.properties.length_m>0,true);assert.equal(trail.properties.network_matches[0].tags.surface,'ground');assert.equal(unknown.properties.unknown_reason,'no_network_match');
     const network=await getJson(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&zoom=10`);assert.equal(network.features[0].properties.highway,'track');
     assert.equal((await fetch(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&limit=5001&zoom=10`)).status,400);
     assert.equal((await fetch(address,{method:'POST'})).status,405);assert.equal((await fetch(`${address}/api/unknown`)).status,404);
