@@ -49,6 +49,7 @@ export function parseNvidiaTelemetry(csv) {
 }
 
 export function nvidiaQueryAllowed(runtimeStatus) { return runtimeStatus === 'active'; }
+export function parseSysfsTemperatureC(value) { const raw = num(String(value ?? '').trim()); return raw === null ? null : raw / 1000; }
 
 /** Locate sensors once; returns a sample() function. */
 export function createSampler() {
@@ -97,10 +98,10 @@ export function createSampler() {
     const cpuT = milliC(cpu);
     const nvmeT = milliC(nvme);
     return {
-      cpu_temp_c: cpuT === null ? null : cpuT / 1000,
-      nvme_temp_c: nvmeT === null ? null : nvmeT / 1000,
+      cpu_temp_c: cpuT === null ? null : parseSysfsTemperatureC(cpuT),
+      nvme_temp_c: nvmeT === null ? null : parseSysfsTemperatureC(nvmeT),
       igpu: amd ? {
-        temp_c: t === null ? null : t / 1000,
+        temp_c: t === null ? null : parseSysfsTemperatureC(t),
         busy_pct: num(read(`${amd}/gpu_busy_percent`)),
         vram_used_mb: vramUsed === null ? null : Math.round(vramUsed / 2 ** 20),
       } : null,

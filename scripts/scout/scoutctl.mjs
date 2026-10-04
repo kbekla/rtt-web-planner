@@ -11,7 +11,22 @@ const factory = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-fact
 const store = new ScoutStore(factory);
 const [cmd, ...args] = process.argv.slice(2);
 const usage = 'scoutctl status|host|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>';
-if (cmd === 'status') console.log(JSON.stringify(store.status(), null, 2));
+if (cmd === 'status') {
+  const scout = store.status();
+  const host = readHostSnapshot({ factoryDir: factory });
+  const thermal = { state: store.read('thermal-state.json')?.state ?? 'UNKNOWN', cpu_temp_c: host.cpu_temp_c ?? null,
+    nvme_temp_c: host.nvme_temp_c ?? null, dgpu_temp_c: host.dgpu?.temp_c ?? null, igpu_temp_c: host.igpu?.temp_c ?? null };
+  console.log(JSON.stringify({ ...scout, host,
+    factory_coordination: host.factory_coordination,
+    heavy_work_blocked_reason: host.heavy_work_blocked_reason,
+    resource_lease_owner: host.resource_lease_owner,
+    thermal,
+    ai: { ...scout.ai, local_ai_active: host.local_ai_active },
+    notification_status: scout.notifications,
+    regression_health: store.read('test-health.json') ?? { status: 'UNKNOWN' },
+    last_successful_activity: scout.last_activity,
+  }, null, 2));
+}
 else if (cmd === 'host') console.log(JSON.stringify(readHostSnapshot(), null, 2));
 else if (cmd === 'list') {
   try { console.log(JSON.stringify(store.list(args[0] || 'reviews'), null, 2)); }

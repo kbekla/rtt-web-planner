@@ -4,10 +4,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
 import { openCanonicalMasterReadOnly } from '../../scripts/scout/canonical-readonly.mjs';
-import { parseNvidiaTelemetry, nvidiaQueryAllowed } from '../../scripts/lib/telemetry.mjs';
+import { parseNvidiaTelemetry, nvidiaQueryAllowed, parseSysfsTemperatureC } from '../../scripts/lib/telemetry.mjs';
+import { SharedResourceAdmission } from '../../scripts/lib/resource-admission.mjs';
 import { zohoSmtpDefaults } from '../../scripts/scout/zoho-smtp.mjs';
 import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, ScoutHeavyWorkCoordinator, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
@@ -241,7 +242,29 @@ test('host snapshot fails closed for unknown Ollama state and corrupt shared lea
   const snapshot = readHostSnapshot({ factoryDir: root, sample: () => ({ cpu_temp_c: 50, nvme_temp_c: 40 }),
     commands: [{ pid: 1, cmdline: 'ollama serve' }], runCommand: () => null });
   assert.equal(snapshot.local_ai_active, true); assert.deepEqual(snapshot.other_heavy_lease, { owner: 'unknown', status: 'unreadable' });
+  assert.equal(snapshot.factory_coordination_verified, false); assert.equal(snapshot.heavy_work_blocked_reason, 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
+  assert.ok(snapshot.other_heavy_processes.every((p) => !Object.hasOwn(p, 'cmdline')));
   assert.equal(classifyHost({ ...snapshot, mem_available_mb: 8000, swap_used_mb: 0 }).allow_heavy, false);
+});
+test('host snapshot exposes shared lease owner and unverified coordination without process arguments', () => {
+  const root = path.join(tmp, 'admission-host-status'), file = path.join(root, 'state', 'resource-admission.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, lease: { owner: 'factory-build', priority: 'factory', phase: 'running', boot_id: boot }, factory_intent: null }));
+  const snapshot = readHostSnapshot({ factoryDir: root, sample: () => ({ cpu_temp_c: 60, nvme_temp_c: 40 }), commands: [], runCommand: () => null });
+  assert.equal(snapshot.factory_coordination.status, 'UNVERIFIED'); assert.equal(snapshot.resource_lease_owner, 'factory-build');
+  assert.equal(snapshot.factory_coordination.lease_phase, 'running'); assert.equal(snapshot.heavy_work_blocked_reason, 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
+});
+test('scoutctl status combines read-only host, thermal, lease, AI, notification, test and activity state', () => {
+  const root = path.join(tmp, 'scoutctl-status'); fs.mkdirSync(root, { recursive: true });
+  const result = spawnSync(process.execPath, ['scripts/scout/scoutctl.mjs', 'status'], { cwd: process.cwd(),
+    env: { ...process.env, FACTORY_DIR: root }, encoding: 'utf8', timeout: 8000 });
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.factory_coordination.verified, false); assert.equal(status.heavy_work_blocked_reason, 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
+  assert.ok(Object.hasOwn(status.thermal, 'cpu_temp_c')); assert.equal(status.ai.local_ai_active, Boolean(status.host.local_ai_active));
+  assert.ok(status.notification_status); assert.equal(status.regression_health.status, 'UNKNOWN');
+  assert.equal(status.last_successful_activity, null);
 });
 test('thermal warm, hot, critical states pause in increasing severity; bogus NVIDIA power is ignored', () => {
   assert.equal(classifyHost({ cpu_temp_c: 86 }).thermal, 'WARM');
@@ -274,6 +297,11 @@ test('NVIDIA telemetry parses temperature/clocks/utilization and never imports b
   assert.equal(Object.hasOwn(parsed, 'power_w'), false);
   assert.equal(nvidiaQueryAllowed('active'), true); assert.equal(nvidiaQueryAllowed('suspended'), false);
   assert.equal(parseNvidiaTelemetry('N/A, N/A, 0, N/A, N/A, Not Active').temp_c, null);
+});
+test('A17 hwmon millidegree readings parse to Celsius and preserve unknown values', () => {
+  assert.equal(parseSysfsTemperatureC('54250\n'), 54.25);
+  assert.equal(parseSysfsTemperatureC('32850'), 32.85);
+  assert.equal(parseSysfsTemperatureC('N/A'), null);
 });
 test('HOT needs sustained samples while CRITICAL immediately holds', () => {
   const g = new ThermalGovernor({ hot_entry_samples: 3 });
@@ -338,6 +366,69 @@ test('Scout heavy work waits for another local AI lease owner', async () => {
   const result = await worker.start({ factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0 });
   assert.equal(result.started, false); assert.match(result.reason, /ollama/);
   assert.equal(lease.release('ollama'), true);
+});
+test('shared admission serializes factory priority, Scout yield and resume admission', () => {
+  const admission = new SharedResourceAdmission(path.join(tmp, 'shared-admission', 'state.json'));
+  const scout = admission.acquire('scout-bulk'); assert.equal(scout.ok, true);
+  const intent = admission.requestFactory('scout-bulk');
+  assert.equal(intent.granted, false); assert.match(intent.reason, /waiting-for-background-yield/);
+  assert.equal(admission.pollFactory('scout-bulk', intent.nonce).granted, false, 'matching labels cannot bypass a different-priority lease');
+  assert.equal(admission.acquire('scout-ai').ok, false, 'factory intent blocks new low-priority admission');
+  assert.equal(admission.release('scout-bulk'), true, 'checkpointed Scout work releases its lease');
+  const factory = admission.pollFactory('scout-bulk', intent.nonce);
+  assert.equal(factory.granted, true);
+  assert.equal(admission.acquire('scout-ai').ok, false, 'factory lease excludes Scout/local AI');
+  assert.equal(admission.bindWorkload('scout-bulk', factory.lease.nonce, { pgid: process.pid }).ok, false,
+    'work must not be bound before the launch handshake');
+  assert.equal(admission.beginLaunch('scout-bulk', factory.lease.nonce).ok, true);
+  assert.equal(admission.bindWorkload('scout-bulk', factory.lease.nonce, { pgid: process.pid, leader_pid: process.pid }).ok, true);
+  assert.equal(admission.release('scout-bulk', factory.lease.nonce).ok, true);
+  assert.equal(admission.acquire('scout-ai').ok, true, 'Scout can resume after factory completion');
+});
+test('active Scout work checkpoints and unloads optional AI when factory intent arrives', async () => {
+  const root = path.join(tmp, 'shared-admission-yield'), admission = new SharedResourceAdmission(path.join(root, 'state', 'resource-admission.json'));
+  const resources = new ScoutResourceGovernor(new ScoutStore(root)); let checkpoints = 0, unloads = 0, persisted = null;
+  const scout = new ScoutHeavyWorkCoordinator({ lease: admission, resources, owner: 'scout-bulk', factoryCoordinationVerified: true,
+    checkpoint: async () => { checkpoints++; return { offset: 12 }; }, persistCheckpoint: async (c) => { persisted = c; }, unloadAI: async () => { unloads++; } });
+  const snapshot = { factory_state: 'idle', mem_available_mb: 8000, swap_used_mb: 0 };
+  assert.equal((await scout.start(snapshot)).started, true);
+  const intent = admission.requestFactory('factory-worker'); assert.equal(intent.granted, false);
+  const yielded = await scout.observe(snapshot);
+  assert.equal(yielded.yielded, true); assert.equal(yielded.lease_released, true);
+  assert.deepEqual(persisted, { offset: 12 }); assert.equal(checkpoints, 1); assert.equal(unloads, 1);
+  assert.equal(admission.pollFactory('factory-worker', intent.nonce).granted, true);
+});
+test('shared admission rejects uncertain workload ownership and recovers only proven stale boots', () => {
+  const file = path.join(tmp, 'shared-admission-stale', 'state.json'); fs.mkdirSync(path.dirname(file), { recursive: true });
+  const admission = new SharedResourceAdmission(file);
+  const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  const selfStat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+  const currentPgid = Number(selfStat.slice(selfStat.lastIndexOf(')') + 2).trim().split(/\s+/)[2]);
+  fs.writeFileSync(file, JSON.stringify({ schema: 1, boot_id: boot, factory_intent: null, history: [], lease: {
+    owner: 'crashed-factory', priority: 'factory', phase: 'running', pid: 2, process_start: '1', boot_id: boot,
+    nonce: 'test-nonce', workload: { pgid: currentPgid },
+  } }));
+  assert.equal(admission.acquire('scout-after-crash').ok, false, 'a surviving workload group keeps admission closed after worker death');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8')); state.lease.phase = 'launching'; state.lease.workload = null; fs.writeFileSync(file, JSON.stringify(state));
+  assert.equal(admission.acquire('scout-launch-window').ok, false, 'an unresolved spawn window is fail-closed');
+  state.lease.boot_id = 'previous-boot'; fs.writeFileSync(file, JSON.stringify(state));
+  assert.equal(admission.acquire('scout-after-reboot').ok, true, 'a proven prior boot has no surviving workload');
+});
+test('concurrent shared admission grants at most one background worker', async () => {
+  const state = path.join(tmp, 'shared-admission-race', 'state.json');
+  const code = `import { SharedResourceAdmission } from ${JSON.stringify(new URL('../../scripts/lib/resource-admission.mjs', import.meta.url).href)}; const hold = setInterval(() => {}, 1000); const r = new SharedResourceAdmission(process.argv[1]).acquire(process.argv[2]); console.log(JSON.stringify(r));`;
+  const run = (owner) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code, state, owner], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', error = '', settled = false; child.stderr.on('data', (b) => error += b);
+    child.stdout.on('data', (b) => { output += b; const line = output.split('\n')[0]; if (!settled && line) { settled = true; resolve({ child, result: JSON.parse(line) }); } });
+    child.on('error', reject); child.on('close', (status) => { if (!settled) reject(new Error(`synthetic coordinator worker failed (${status}): ${error.slice(0, 200)}`)); });
+  });
+  const workers = await Promise.all([run('worker-a'), run('worker-b')]);
+  const results = workers.map((w) => w.result);
+  assert.equal(results.filter((r) => r.ok).length, 1);
+  assert.equal(results.filter((r) => !r.ok).length, 1);
+  for (const worker of workers) worker.child.kill('SIGTERM');
+  await Promise.all(workers.map(({ child }) => new Promise((resolve) => child.once('close', resolve))));
 });
 test('worker lock ignores stale boot ownership', () => {
   const f = path.join(tmp, 'worker-lock', 'lock.json'); fs.mkdirSync(path.dirname(f), { recursive: true });

@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createSampler } from '../lib/telemetry.mjs';
+import { resourceAdmissionStateFile } from '../lib/resource-admission.mjs';
 
 const run = (bin, args) => {
   const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -35,17 +36,36 @@ export function readHostSnapshot(options = {}) {
   const localAIProcess = commands.some((p) => /ollama\s+runner|llama[-_]server|vllm|llm-worker/i.test(p.cmdline));
   const localAI = localAIProcess || (ollamaService && (ollama === null || ollama.split('\n').filter((line) => line.trim()).length > 1));
   const otherHeavy = commands.filter((p) => /java.*planetiler|check-repro|geometry-match/i.test(p.cmdline))
-    .map(({ pid, cmdline }) => ({ pid, cmdline: cmdline.slice(0, 240) }));
+    .map(({ pid, cmdline }) => ({ pid, kind: /planetiler/i.test(cmdline) ? 'planetiler' : /check-repro/i.test(cmdline) ? 'repro-check' : 'geometry-match' }));
   const otherHeavyActive = otherHeavy.length > 0;
   const leaseFile = path.join(factoryDir, 'state', 'heavy-work.json');
   let lease = null; const leaseExists = fs.existsSync(leaseFile);
   try { lease = JSON.parse(fs.readFileSync(leaseFile, 'utf8')); } catch { /* unreadable existing leases fail closed below */ }
   const bootId = (() => { try { return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); } catch { return null; } })();
   const validCurrentBootLease = lease && lease.boot_id === bootId;
+  const admissionFile = resourceAdmissionStateFile(factoryDir);
+  const admissionExists = fs.existsSync(admissionFile);
+  let admissionState = null; let admissionUnreadable = false;
+  try { admissionState = JSON.parse(fs.readFileSync(admissionFile, 'utf8')); }
+  catch { admissionUnreadable = admissionExists; }
+  const admissionMalformed = admissionExists && !admissionUnreadable &&
+    (admissionState?.schema !== 1 || !('lease' in admissionState) || !('factory_intent' in admissionState));
+  const admissionLease = admissionState?.schema === 1 ? admissionState.lease : null;
+  const admissionCurrentBoot = admissionLease?.boot_id === bootId;
   const workerFile = path.join(factoryDir, 'state', 'worker.json');
   let factoryWorker = null; try { factoryWorker = JSON.parse(fs.readFileSync(workerFile, 'utf8')); } catch { /* worker state unavailable */ }
   let disk = null;
   try { const s = fs.statfsSync(factoryDir); disk = { free_bytes: s.bavail * s.bsize, total_bytes: s.blocks * s.bsize }; } catch { /* not mounted */ }
+  const detectedOtherWorkloads = [...otherHeavy, ...commands.filter((p) => /ollama|llama[-_]server|vllm|llm-worker/i.test(p.cmdline))
+    .map(({ pid, cmdline }) => ({ pid, kind: /ollama/i.test(cmdline) ? 'local-ai' : 'local-ai-worker' }))];
+  const factoryCoordination = { verified: false, status: admissionUnreadable || admissionMalformed ? 'RED' : 'UNVERIFIED',
+    reason: admissionUnreadable || admissionMalformed ? 'shared admission state invalid; fail closed' : 'factory and Scout workers do not yet jointly use the protocol',
+    factory_intent: admissionState?.factory_intent?.owner ?? null,
+    lease_owner: admissionCurrentBoot ? admissionLease.owner ?? null : admissionExists ? 'unknown-or-stale' : null,
+    lease_priority: admissionCurrentBoot ? admissionLease.priority ?? null : null,
+    lease_phase: admissionCurrentBoot ? admissionLease.phase ?? null : null };
+  const heavyWorkBlockedReason = factoryCoordination.status === 'RED' ? factoryCoordination.reason
+    : factoryCoordination.verified ? null : 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED';
   return { ...telemetry,
     sensor_sources: options.sensor_sources ?? sampler?.sensors ?? null,
     host_capacity: options.host_capacity ?? sampler?.host ?? null,
@@ -58,9 +78,11 @@ export function readHostSnapshot(options = {}) {
     factory_worker: factoryWorker ? { pid: factoryWorker.pid ?? null, phase: factoryWorker.phase ?? null, job: factoryWorker.job ?? null,
       heartbeat_at: factoryWorker.heartbeat_at ?? null } : null,
     planetiler_active: planetiler, local_ai_active: localAI, other_heavy_workload_active: otherHeavyActive, ollama_service_active: ollamaService,
+    factory_coordination: factoryCoordination, factory_coordination_verified: false,
+    heavy_work_blocked_reason: heavyWorkBlockedReason,
+    resource_lease_owner: factoryCoordination.lease_owner,
     other_heavy_lease: validCurrentBootLease ? { owner: lease.owner, pid: lease.pid }
       : leaseExists && !lease ? { owner: 'unknown', status: 'unreadable' } : null,
     disk, scratch_bytes: telemetry.scratch_bytes ?? null,
-    other_heavy_processes: [...otherHeavy, ...commands.filter((p) => /ollama/.test(p.cmdline) && !/ollama\s+serve/.test(p.cmdline))
-      .map(({ pid, cmdline }) => ({ pid, cmdline: cmdline.slice(0, 240) }))] };
+    other_heavy_processes: detectedOtherWorkloads };
 }

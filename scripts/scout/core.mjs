@@ -469,7 +469,13 @@ export class ScoutHeavyWorkCoordinator {
   }
   async observe(snapshot) {
     if (!this.active) throw new Error('Scout heavy-work session is not active');
-    const decision = this.resources.evaluate(snapshot);
+    let decision = this.resources.evaluate(snapshot);
+    const shared = this.lease.status?.();
+    const coordination = shared?.state;
+    const coordinationUnavailable = typeof this.lease.status === 'function' && !shared?.ok;
+    const factoryPriority = coordinationUnavailable || Boolean(coordination?.factory_intent || coordination?.lease?.priority === 'factory');
+    if (factoryPriority) decision = { ...decision, allow_heavy: false, allow_ai: false, state: 'AMBER',
+      reasons: [...decision.reasons, coordinationUnavailable ? 'shared admission status unavailable' : 'factory priority admission requested'] };
     if (decision.allow_heavy) return { yielded: false, decision };
     if (typeof this.checkpoint !== 'function') throw new Error('cooperative heavy work requires a checkpoint callback');
     const checkpoint = await this.checkpoint();
