@@ -3,7 +3,7 @@ import { assignJurisdictions } from './jurisdictions.mjs';
 
 // Interval matcher v2 preserves uncertain boundary intervals rather than
 // labelling a whole sparse GPX chord UNKNOWN. It never changes source geometry.
-export const SEGMENTATION_VERSION = 'network-segmenter-2';
+export const SEGMENTATION_VERSION = 'network-segmenter-2.1';
 export const SEGMENT_CLASSES = Object.freeze(['ROAD','UNSEALED_ROAD','PROBABLE_OFFROAD','OFFROAD_CONFIRMED','UNKNOWN']);
 export class ScoutYieldRequested extends Error {
   constructor() { super('shared factory admission requested Scout yield'); this.name='ScoutYieldRequested'; this.code='SCOUT_YIELD_REQUESTED'; }

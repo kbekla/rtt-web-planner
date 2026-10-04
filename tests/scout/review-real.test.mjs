@@ -27,12 +27,12 @@ test('real Scout reviewer is loopback-only, read-only, private-root constrained,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[],pipeline_version:'network-segmenter-1',jurisdiction_ids:['BE-country']};
     store.saveSegment(prior);
     const segment={segment_id:'be-review-seg',observation_id:'be-review-obs',ordinal:0,component_index:0,classification:'PROBABLE_OFFROAD',confidence:0.8,
-      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2',jurisdiction_ids:['BE-country']};
+      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},evidence:[{rule:'nearest-network-edge',edge_id:'osm:way:5'}],pipeline_version:'network-segmenter-2.1',jurisdiction_ids:['BE-country']};
     store.saveSegment(segment);store.saveCandidate(segment,{candidate_id:'be-review-candidate',master_match:'UNMATCHED',network_snapshot_id:'geofabrik-be-261003',
       physical_state:'unknown',motorcycle_access:'unknown',routability:'unknown',review_state:'AWAITING_EVIDENCE',jurisdiction_ids:['BE-country']});
     store.saveSegment({segment_id:'be-review-unknown',observation_id:'be-review-obs',ordinal:1,component_index:0,classification:'UNKNOWN',confidence:null,
       geometry:{type:'LineString',coordinates:[[4.31,50.81],[4.311,50.811]]},evidence:[{rule:'no-network-match-within-threshold',threshold_m:8}],
-      pipeline_version:'network-segmenter-2',jurisdiction_ids:['BE-country']});
+      pipeline_version:'network-segmenter-2.1',jurisdiction_ids:['BE-country']});
     assert.ok(store.db.prepare("PRAGMA index_list('route_segments')").all().some(index=>index.name==='segments_observation_pipeline_idx'));
     store.close();
     server=createRealReviewServer({runId:'be-20000101',privateBase:base,port:0,onError:error=>{serverError=error;}});await new Promise(resolve=>server.once('listening',resolve));
