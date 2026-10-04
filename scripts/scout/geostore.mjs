@@ -204,20 +204,34 @@ export class ScoutGeoStore {
     return row?{...row,licence:JSON.parse(row.licence_json),coverage:JSON.parse(row.coverage_json)}:null;
   }
   saveNetworkEdge(snapshotId, edge) {
-    const parts=edge.geometry?.type==='LineString'?[edge.geometry.coordinates]:edge.geometry?.type==='MultiLineString'?edge.geometry.coordinates:[];
-    const coords=parts.flat();
-    if(!edge.edge_id||coords.length<2||coords.some((p)=>!Array.isArray(p)||p.length<2||!Number.isFinite(p[0])||!Number.isFinite(p[1])||Math.abs(p[0])>180||Math.abs(p[1])>90))throw new Error('network edge requires stable ID and valid WGS84 line geometry');
+    this.saveNetworkEdges(snapshotId, [edge]);
+    return edge.edge_id;
+  }
+  // Batch insertion keeps network-snapshot import bounded and restart-safe.
+  // Each caller chooses a modest batch size; a crash rolls back only that batch
+  // and stable edge IDs make replay idempotent.
+  saveNetworkEdges(snapshotId, edges) {
+    if (!this.getNetworkSnapshot(snapshotId)) throw new Error(`unknown network snapshot '${snapshotId}'`);
+    if (!Array.isArray(edges) || edges.length > 5000) throw new Error('network edge batch must contain 0-5000 edges');
+    const insert = this.db.prepare(`INSERT INTO network_edges(snapshot_id,edge_id,geometry_json,tags_json,evidence_json,jurisdiction_ids_json) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(snapshot_id,edge_id) DO UPDATE SET geometry_json=excluded.geometry_json,tags_json=excluded.tags_json,evidence_json=excluded.evidence_json,jurisdiction_ids_json=excluded.jurisdiction_ids_json`);
+    const rowFor = this.db.prepare('SELECT edge_rowid FROM network_edges WHERE snapshot_id=? AND edge_id=?');
+    const removeBounds = this.db.prepare('DELETE FROM network_edges_rtree WHERE edge_rowid=?');
+    const addBounds = this.db.prepare('INSERT INTO network_edges_rtree(edge_rowid,min_lon,max_lon,min_lat,max_lat) VALUES(?,?,?,?,?)');
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare(`INSERT INTO network_edges(snapshot_id,edge_id,geometry_json,tags_json,evidence_json,jurisdiction_ids_json) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(snapshot_id,edge_id) DO UPDATE SET geometry_json=excluded.geometry_json,tags_json=excluded.tags_json,evidence_json=excluded.evidence_json,jurisdiction_ids_json=excluded.jurisdiction_ids_json`)
-        .run(snapshotId,edge.edge_id,json(edge.geometry),json(edge.tags??{}),json(edge.evidence??[]),json(edge.jurisdiction_ids??[]));
-      const row=this.db.prepare('SELECT edge_rowid FROM network_edges WHERE snapshot_id=? AND edge_id=?').get(snapshotId,edge.edge_id);
-      const bounds=coords.reduce((b,p)=>[Math.min(b[0],p[0]),Math.max(b[1],p[0]),Math.min(b[2],p[1]),Math.max(b[3],p[1])],[Infinity,-Infinity,Infinity,-Infinity]);
-      this.db.prepare('DELETE FROM network_edges_rtree WHERE edge_rowid=?').run(row.edge_rowid);
-      this.db.prepare('INSERT INTO network_edges_rtree(edge_rowid,min_lon,max_lon,min_lat,max_lat) VALUES(?,?,?,?,?)').run(row.edge_rowid,...bounds);
-      this.db.exec('COMMIT');return edge.edge_id;
+      for (const edge of edges) {
+        const parts=edge.geometry?.type==='LineString'?[edge.geometry.coordinates]:edge.geometry?.type==='MultiLineString'?edge.geometry.coordinates:[];
+        const coords=parts.flat();
+        if(!edge.edge_id||coords.length<2||coords.some((p)=>!Array.isArray(p)||p.length<2||!Number.isFinite(p[0])||!Number.isFinite(p[1])||Math.abs(p[0])>180||Math.abs(p[1])>90))throw new Error('network edge requires stable ID and valid WGS84 line geometry');
+        insert.run(snapshotId,edge.edge_id,json(edge.geometry),json(edge.tags??{}),json(edge.evidence??[]),json(edge.jurisdiction_ids??[]));
+        const row=rowFor.get(snapshotId,edge.edge_id);
+        const bounds=coords.reduce((b,p)=>[Math.min(b[0],p[0]),Math.max(b[1],p[0]),Math.min(b[2],p[1]),Math.max(b[3],p[1])],[Infinity,-Infinity,Infinity,-Infinity]);
+        removeBounds.run(row.edge_rowid);addBounds.run(row.edge_rowid,...bounds);
+      }
+      this.db.exec('COMMIT');
     }catch(error){this.db.exec('ROLLBACK');throw error;}
+    return edges.length;
   }
   queryNetworkEdges(bbox, { limit=5000, snapshotId=null } = {}) {
     validateBbox(bbox);
