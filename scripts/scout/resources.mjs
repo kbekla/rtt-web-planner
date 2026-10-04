@@ -38,12 +38,14 @@ export function readHostSnapshot(options = {}) {
   const telemetry = sample(null);
   const mem = Object.fromEntries((() => { try { return fs.readFileSync('/proc/meminfo', 'utf8').split('\n'); } catch { return []; } })()
     .map((l) => /^([A-Za-z]+):\s+(\d+)/.exec(l)).filter(Boolean).map((m) => [m[1], Number(m[2])]));
-  const active = (unit) => runCommand('systemctl', ['--user', 'is-active', unit]) === 'active';
-  const factoryService = active('rtt-factory.service');
+  const unitState = (unit) => { const result=runCommand('systemctl', ['--user', 'is-active', unit]);return result==null?null:result==='active'; };
+  const factoryService = unitState('rtt-factory.service');
+  const factoryServiceState = factoryService===null?'unavailable':factoryService?'active':'inactive';
   const planetiler = commands.some((p) => /planetiler|build-region\.mjs/.test(p.cmdline));
   const runningJobs = path.join(factoryDir, 'queue', 'running');
   const factoryJob = fs.existsSync(runningJobs) && fs.readdirSync(runningJobs).some((f) => f.endsWith('.json'));
-  const ollamaService = active('rtt-ollama.service') || commands.some((p) => /ollama\s+serve/.test(p.cmdline));
+  const ollamaUnit = unitState('rtt-ollama.service');
+  const ollamaService = ollamaUnit===true || commands.some((p) => /ollama\s+serve/.test(p.cmdline));
   const ollama = ollamaService ? (runCommand('ollama', ['ps'])
     ?? runCommand('curl', ['--fail', '--silent', '--show-error', '--max-time', '2', 'http://127.0.0.1:11434/api/ps'])) : null;
   let ollamaHasLoadedModel = null;
@@ -82,7 +84,7 @@ export function readHostSnapshot(options = {}) {
   const detectedOtherWorkloads = [...otherHeavy, ...commands.filter((p) => /ollama|llama[-_]server|vllm|llm-worker/i.test(p.cmdline))
     .map(({ pid, cmdline }) => ({ pid, kind: /ollama/i.test(cmdline) ? 'local-ai' : 'local-ai-worker' }))];
   const heartbeatAge = factoryWorker?.heartbeat_at ? (Date.now() - Date.parse(factoryWorker.heartbeat_at)) / 1000 : Infinity;
-  const factoryProtocolLive = factoryService && factoryWorker?.coordination_protocol === 'rtt-heavy-admission-v1'
+  const factoryProtocolLive = factoryService===true && factoryWorker?.coordination_protocol === 'rtt-heavy-admission-v1'
     && heartbeatAge >= 0 && heartbeatAge <= 60;
   const coordinationVerified = factoryProtocolLive && !admissionUnreadable && !admissionMalformed;
   const activeAdmissionLease = admissionCurrentBoot ? admissionLease : null;
@@ -90,7 +92,11 @@ export function readHostSnapshot(options = {}) {
   const factoryCoordination = { verified: coordinationVerified,
     status: admissionUnreadable || admissionMalformed ? 'RED' : coordinationVerified ? 'VERIFIED' : 'UNVERIFIED',
     reason: admissionUnreadable || admissionMalformed ? 'shared admission state invalid; fail closed'
-      : coordinationVerified ? null : 'factory worker has not reported a fresh shared-admission heartbeat',
+      : coordinationVerified ? null : factoryService===null ? 'factory service state unavailable from systemd; coordination unverified'
+        : factoryService===false ? 'factory service is inactive; coordination unverified'
+          : factoryWorker?.coordination_protocol !== 'rtt-heavy-admission-v1' ? 'factory worker has not reported the required admission protocol'
+            : heartbeatAge<0||heartbeatAge>60 ? 'factory admission heartbeat is stale; coordination unverified'
+              : 'factory admission state is not verified',
     factory_intent: factoryIntent?.owner ?? null,
     factory_pending: Boolean(factoryIntent && !(activeAdmissionLease?.priority === 'factory'
       && activeAdmissionLease.owner === factoryIntent.owner && activeAdmissionLease.nonce === factoryIntent.nonce)),
@@ -112,8 +118,8 @@ export function readHostSnapshot(options = {}) {
     mem_total_mb: mem.MemTotal == null ? null : Math.round(mem.MemTotal / 1024),
     swap_total_mb: mem.SwapTotal == null ? null : Math.round(mem.SwapTotal / 1024),
     swap_free_mb: mem.SwapFree == null ? null : Math.round(mem.SwapFree / 1024),
-    factory_state: planetiler || factoryJob ? 'building' : factoryService ? 'active' : 'idle',
-    factory_service_active: factoryService, factory_job_active: factoryJob,
+    factory_state: planetiler || factoryJob ? 'building' : factoryService===null?'unknown':factoryService?'active':'idle',
+    factory_service_active: factoryService, factory_service_state:factoryServiceState, factory_job_active: factoryJob,
     factory_worker: factoryWorker ? { pid: factoryWorker.pid ?? null, phase: factoryWorker.phase ?? null, job: factoryWorker.job ?? null,
       heartbeat_at: factoryWorker.heartbeat_at ?? null } : null,
     planetiler_active: planetiler, local_ai_active: localAI, other_heavy_workload_active: otherHeavyActive, ollama_service_active: ollamaService,

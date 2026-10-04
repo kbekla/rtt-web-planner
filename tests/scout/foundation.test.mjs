@@ -268,6 +268,16 @@ test('host snapshot exposes shared lease owner and unverified coordination witho
   assert.equal(snapshot.factory_coordination.status, 'UNVERIFIED'); assert.equal(snapshot.resource_lease_owner, 'factory-build');
   assert.equal(snapshot.factory_coordination.lease_phase, 'running'); assert.equal(snapshot.heavy_work_blocked_reason, 'BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
 });
+test('unavailable user-systemd bus is reported as unknown, never as a verified or definitively idle factory', () => {
+  const root=path.join(tmp,'systemd-unavailable'),stateDir=path.join(root,'state');fs.mkdirSync(stateDir,{recursive:true});
+  fs.writeFileSync(path.join(stateDir,'worker.json'),JSON.stringify({coordination_protocol:'rtt-heavy-admission-v1',heartbeat_at:new Date().toISOString(),phase:'idle'}));
+  fs.writeFileSync(path.join(stateDir,'resource-admission.json'),JSON.stringify({schema:1,history:[],lease:null,factory_intent:null}));
+  const snapshot=readHostSnapshot({factoryDir:root,sample:()=>({}),commands:[],runCommand:()=>null});
+  assert.equal(snapshot.factory_service_state,'unavailable');assert.equal(snapshot.factory_service_active,null);
+  assert.equal(snapshot.factory_state,'unknown');assert.equal(snapshot.factory_coordination.status,'UNVERIFIED');
+  assert.match(snapshot.factory_coordination.reason,/unavailable from systemd/);
+  assert.equal(snapshot.heavy_work_blocked_reason,'BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
+});
 test('Scout status verifies a fresh factory protocol heartbeat and exposes a pending yield safely', () => {
   const root = path.join(tmp, 'admission-verified-status'), stateDir = path.join(root, 'state'); fs.mkdirSync(stateDir, { recursive: true });
   const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
