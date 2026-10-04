@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertGeoHostAdmission, parseGeoCtlArgs, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
+import { assertGeoHostAdmission, parseGeoCtlArgs, releaseGeoAdmission, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
 
 test('geoctl parses explicit kebab-case identifiers and rejects positional ambiguity',()=>{
   assert.deepEqual(parseGeoCtlArgs(['--observation-id','obs-1','--snapshot-id','osm-v1','--state=OPEN']),{'observation_id':'obs-1','snapshot_id':'osm-v1','state':'OPEN'});
@@ -34,4 +34,12 @@ test('geoctl yields on factory intent or unreadable admission state, but not an 
     assert.equal(sharedFactoryYieldRequested(file,'scout','n'),true);
     fs.writeFileSync(file,'not-json');assert.equal(sharedFactoryYieldRequested(file,'scout','n'),true);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('geoctl releases using the nonce nested in the shared admission grant',()=>{
+  const calls=[];const admission={release:(...args)=>{calls.push(args);return {ok:true};}};
+  const grant={ok:true,lease:{nonce:'lease-token'}};
+  assert.deepEqual(releaseGeoAdmission(admission,'scout-job',grant,'done'),{ok:true});
+  assert.deepEqual(calls,[['scout-job','lease-token','done']]);
+  assert.deepEqual(releaseGeoAdmission(admission,'scout-job',{ok:true},'done'),{ok:false,reason:'shared admission grant nonce is missing'});
 });

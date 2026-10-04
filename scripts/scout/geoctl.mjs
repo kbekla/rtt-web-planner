@@ -31,6 +31,11 @@ export function sharedFactoryYieldRequested(file,owner,nonce){
     return Boolean(intent&&!(lease?.owner===owner&&lease?.nonce===nonce&&lease?.priority==='factory'));
   }catch{return true;}
 }
+export function releaseGeoAdmission(admission,owner,grant,reason){
+  const nonce=grant?.lease?.nonce;
+  if(!nonce)return {ok:false,reason:'shared admission grant nonce is missing'};
+  return admission.release(owner,nonce,reason);
+}
 export function assertGeoHostAdmission(host){
   if(!host.factory_coordination?.verified)throw new Error('BLOCKED_FACTORY_COORDINATION_UNVERIFIED');
   if(host.factory_job_active||host.planetiler_active||host.factory_coordination.factory_pending)throw new Error('BLOCKED_FACTORY_OR_PLANETILER_ACTIVE');
@@ -85,7 +90,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
       console.log(JSON.stringify({observation_id:result.observation_id,network_snapshot:result.network_snapshot,segment_count:result.segment_count,
         candidate_count:result.candidate_count,continuity_hypotheses:result.continuity_hypotheses.length,source_geometry_preserved:true,
         motorcycle_access:'unknown',routability:'unknown'},null,2));return 0;
-    }finally{try{store?.close();}finally{const released=admission.release(owner,grant.nonce,'observation processing complete or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}}
+    }finally{try{store?.close();}finally{const released=releaseGeoAdmission(admission,owner,grant,'observation processing complete or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}}
   }
   throw new Error(`unknown command '${command}'\n${HELP}`);
 }
