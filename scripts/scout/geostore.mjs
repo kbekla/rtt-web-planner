@@ -19,6 +19,9 @@ export class ScoutGeoStore {
     fs.chmodSync(this.root,0o700);
     databaseFile=path.resolve(databaseFile);
     if(databaseFile!==this.root&&!databaseFile.startsWith(this.root+path.sep))throw new Error('Scout database must remain inside its private geostore root');
+    const databaseFd=fs.openSync(databaseFile,fs.constants.O_RDWR|fs.constants.O_CREAT|fs.constants.O_NOFOLLOW,0o600);
+    try { if(!fs.fstatSync(databaseFd).isFile())throw new Error('Scout database must be a regular file');fs.fchmodSync(databaseFd,0o600); }
+    finally { fs.closeSync(databaseFd); }
     this.db = new DatabaseSync(databaseFile);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
     this.migrate();

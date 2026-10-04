@@ -46,6 +46,7 @@ test('explicit private GPX import is checksum-aware, idempotent, versioned, and 
   const root=temp(), input=path.join(root,'mixed.gpx'), raw=path.join(root,'private-raw');
   const bytes=fs.readFileSync(fixture); fs.writeFileSync(input,bytes);
   const store=new ScoutGeoStore(path.join(root,'db')); store.registerSource(definition());
+  assert.equal(fs.statSync(path.join(root,'db','scout.sqlite')).mode&0o777,0o600,'private geostore database must be owner-only');
   const first=ingestRouteFile(store,{inputFile:input,sourceId:'synthetic-routes',rawRoot:raw});
   assert.equal(first.version,1); assert.equal(first.duplicate,false); assert.equal(first.observations.length,2);
   const storedRaw=first.observations[0].metadata.raw_source_ref;
