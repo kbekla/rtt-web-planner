@@ -33,6 +33,12 @@ test('unknown surface never invents off-road status',()=>{
   const result=segmentRouteObservation(obs(mixed),[edge('road', [mixed[0],mixed.at(-1)],'residential',null)]);
   assert.ok(result.segments.every((s)=>s.classification==='ROAD')); assert.equal(result.candidates.length,0);
 });
+test('matched network geometry with insufficient tags has an explicit UNKNOWN reason',()=>{
+  const result=segmentRouteObservation(obs(mixed),[edge('untagged-path',mixed,'path',null)]);
+  assert.ok(result.segments.every((s)=>s.classification==='UNKNOWN'&&s.unknown_reason==='network_tags_insufficient'));
+  assert.equal(result.candidates.length,0);
+  assert.ok(result.segments.every((s)=>s.confidence===null));
+});
 test('OSM access restrictions never alter physical road character',()=>{
   const coords=mixed,restricted=edge('restricted-road',coords,'residential','asphalt');
   restricted.tags.access='no';restricted.tags.motor_vehicle='no';restricted.tags.motorcycle='no';restricted.tags.vehicle='private';

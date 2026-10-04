@@ -76,6 +76,9 @@ function classifyInterval(a,b,index,{maxSnapMeters,ambiguityMarginMeters}) {
   if(supportClasses.size===1) {
     const classification=[...supportClasses][0];
     const competitors=possible.filter((x)=>x.classification!==classification);
+    if(classification==='UNKNOWN')return {classification:'UNKNOWN',reason:'network_tags_insufficient',evidence:{rule:'interval-network-ambiguity',reason:'network_tags_insufficient',
+      edge_ids:[...new Set(supported.map((x)=>x.edge_id))].sort(),edge_part_ids:[...new Set(supported.map((x)=>x.edge_part_id))].sort(),
+      distances_m:supported.slice(0,6).map((x)=>Number(x.distance_m.toFixed(2))),interval_m:Number(length.toFixed(2)),snap_m:maxSnapMeters}};
     if(competitors.length) return {classification:'UNKNOWN',reason:'competing_network_classes',evidence:{rule:'interval-network-ambiguity',reason:'competing_network_classes',edge_ids:[...new Set([...supported,...competitors].map((x)=>x.edge_id))].sort(),edge_part_ids:[...new Set([...supported,...competitors].map((x)=>x.edge_part_id))].sort(),distances_m:[...supported,...competitors].slice(0,6).map((x)=>Number(x.distance_m.toFixed(2))),interval_m:Number(length.toFixed(2)),snap_m:maxSnapMeters}};
     const best=supported[0],upper=best.distance_m+half+ambiguityMarginMeters,clearance=Math.max(0,maxSnapMeters-upper);
     return {classification,reason:null,confidence:maxSnapMeters?clearance/maxSnapMeters:0,evidence:{rule:'interval-network-support',edge_id:best.edge_id,edge_part_id:best.edge_part_id,network_class:classification,
