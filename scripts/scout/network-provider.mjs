@@ -8,17 +8,18 @@ import { createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 
 const GEOFABRIK_HOST='download.geofabrik.de';
-export function resolveNetworkExtract(source) {
+export function resolveNetworkExtract(source,{allowChecksumCalculation=false}={}) {
   if(!source?.roles?.routing_network||source.reuse?.private_processing!==true)throw new Error('network source is not registered for private routing-network processing');
   const x=source.network_extract;
-  if(!x||x.provider!=='geofabrik'||!x.url||!x.version||!x.snapshot_id||!/^([a-f0-9]{64})$/i.test(x.sha256??''))
+  const calculated=allowChecksumCalculation&&x?.checksum_policy==='calculate-after-download';
+  if(!x||x.provider!=='geofabrik'||!x.url||!x.version||!x.snapshot_id||(!/^([a-f0-9]{64})$/i.test(x.sha256??'')&&!calculated))
     throw new Error('network source needs a pinned provider, version, snapshot ID and expected SHA-256');
   let url;try{url=new URL(x.url);}catch{throw new Error('network extract URL is invalid');}
   if(url.protocol!=='https:'||url.hostname!==GEOFABRIK_HOST||url.username||url.password||url.search||url.hash||!url.pathname.endsWith('.osm.pbf')||/latest/i.test(url.pathname))
     throw new Error('Geofabrik extract must be a version-pinned HTTPS PBF on the registered provider host');
   if(!source.coverage.countries.includes(x.country_code)||!/^[A-Z]{2}$/.test(x.country_code??''))throw new Error('network extract country is outside registered source coverage');
   if(!source.licence?.name||!source.licence?.version||!source.attribution)throw new Error('network extract licence and attribution must be explicit');
-  return {...x,url:url.href,sha256:x.sha256.toLowerCase(),licence:{...source.licence,attribution:source.attribution},coverage:{countries:[x.country_code],regions:source.coverage.regions}};
+  return {...x,url:url.href,sha256:x.sha256?.toLowerCase()??null,licence:{...source.licence,attribution:source.attribution},coverage:{countries:[x.country_code],regions:source.coverage.regions}};
 }
 const fileSha256=async(file)=>{const h=crypto.createHash('sha256');for await(const chunk of fs.createReadStream(file))h.update(chunk);return h.digest('hex');};
 async function appendResponse(response,file,{start,progress,shouldYield}) {
@@ -32,22 +33,38 @@ async function appendResponse(response,file,{start,progress,shouldYield}) {
   } finally {await new Promise(resolve=>out.end(resolve));}
   return {bytes,yielded};
 }
-export async function acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot,fetchImpl=fetch,progress=async()=>false,shouldYield=()=>false}={}) {
+export async function acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot,fetchImpl=fetch,progress=async()=>false,shouldYield=()=>false,calculateChecksum=false}={}) {
   const source=store.getSource(sourceId);if(!source)throw new Error(`unregistered network source '${sourceId}'`);
   if(!store.sourceApproval(sourceId))throw new Error('network acquisition requires an explicit active source approval');
-  const extract=resolveNetworkExtract(source);if(snapshotId!==extract.snapshot_id)throw new Error('requested snapshot ID does not match the pinned source registry entry');
+  const extract=resolveNetworkExtract(source,{allowChecksumCalculation:calculateChecksum});if(snapshotId!==extract.snapshot_id)throw new Error('requested snapshot ID does not match the pinned source registry entry');
   const root=path.resolve(dataRoot),privateRoot=fs.realpathSync(store.root);
   if(root!==privateRoot&&!root.startsWith(privateRoot+path.sep))throw new Error('network data root must be inside the private Scout root');
   fs.mkdirSync(root,{recursive:true,mode:0o700});if(fs.lstatSync(root).isSymbolicLink()||!fs.realpathSync(root).startsWith(privateRoot+path.sep))throw new Error('network data directory cannot escape the private Scout root');
   const dest=path.join(root,`${snapshotId}.osm.pbf`),part=`${dest}.part`;
   const pinned=store.getNetworkSnapshot(snapshotId),artifact=store.getNetworkArtifact(snapshotId);
+  const pinCalculated=(checksum)=>{
+    if(extract.sha256)return;
+    if(!calculateChecksum||source.network_extract.checksum_policy!=='calculate-after-download')throw new Error('network SHA-256 cannot be derived without explicit provider checksum policy');
+    const definition={...source};for(const key of ['revision','health','last_retrieval','last_successful_processing','next_due'])delete definition[key];
+    definition.network_extract={...definition.network_extract,sha256:checksum,checksum_policy:'calculated-after-download'};store.registerSource(definition);
+  };
   if(artifact){
     const artifactPath=path.resolve(artifact.local_path);if(fs.lstatSync(artifactPath).isSymbolicLink()||!fs.statSync(artifactPath).isFile())throw new Error('registered network artifact is no longer a regular private file');
     const real=fs.realpathSync(artifactPath);if(real===privateRoot||!real.startsWith(privateRoot+path.sep))throw new Error('registered network artifact escaped the private Scout root');const digest=await fileSha256(real);
-    if(digest===extract.sha256&&digest===artifact.sha256&&fs.statSync(real).size===artifact.byte_size)return {status:'REUSED',snapshot_id:snapshotId,path:real,sha256:digest,bytes:artifact.byte_size};
+    if((!extract.sha256||digest===extract.sha256)&&digest===artifact.sha256&&fs.statSync(real).size===artifact.byte_size){pinCalculated(digest);return {status:'REUSED',snapshot_id:snapshotId,path:real,sha256:digest,bytes:artifact.byte_size};}
     throw new Error('registered network artifact checksum/size mismatch; refusing reuse');
   }
   if(pinned&&pinned.checksum!==extract.sha256)throw new Error('registered snapshot checksum conflicts with pinned source registry');
+  // Recover the narrow crash window after fsync+rename but before SQLite pins
+  // the artifact; never redownload a complete file without first verifying it.
+  if(!artifact&&fs.existsSync(dest)){
+    if(fs.lstatSync(dest).isSymbolicLink()||!fs.statSync(dest).isFile())throw new Error('unregistered network destination is not a regular private file');
+    const digest=await fileSha256(dest),bytes=fs.statSync(dest).size;if(extract.sha256&&digest!==extract.sha256)throw new Error('unregistered network destination failed pinned checksum validation');
+    if(pinned&&pinned.checksum!==digest)throw new Error('unregistered network destination conflicts with pinned snapshot checksum');
+    pinCalculated(digest);if(!pinned)store.recordNetworkSnapshot({snapshot_id:snapshotId,source_id:sourceId,version:extract.version,checksum:digest,licence:extract.licence,coverage:extract.coverage});
+    store.recordNetworkArtifact({snapshot_id:snapshotId,provider:extract.provider,source_url:extract.url,local_path:dest,byte_size:bytes,sha256:digest,last_modified:extract.last_modified});
+    return {status:'RECOVERED',snapshot_id:snapshotId,path:dest,sha256:digest,bytes};
+  }
   let existing=0;if(fs.existsSync(part)){if(fs.lstatSync(part).isSymbolicLink()||!fs.statSync(part).isFile())throw new Error('partial network download is not a regular private file');existing=fs.statSync(part).size;}
   const headers={};if(existing)headers.Range=`bytes=${existing}-`;
   const response=await fetchImpl(extract.url,{headers,redirect:'error'});
@@ -59,9 +76,10 @@ export async function acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot
   const received=await appendResponse(response,part,{start:existing,progress,shouldYield});
   if(received.yielded){const fd=fs.openSync(part,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}return {status:'YIELDED',snapshot_id:snapshotId,bytes:received.bytes,partial_path:part};}
   const checksum=await fileSha256(part);
-  if(checksum!==extract.sha256)throw new Error(`network extract SHA-256 mismatch for pinned version '${extract.version}'`);
+  if(extract.sha256&&checksum!==extract.sha256)throw new Error(`network extract SHA-256 mismatch for pinned version '${extract.version}'`);
   const fd=fs.openSync(part,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
   fs.renameSync(part,dest);fs.chmodSync(dest,0o600);
+  pinCalculated(checksum);
   if(!pinned)store.recordNetworkSnapshot({snapshot_id:snapshotId,source_id:sourceId,version:extract.version,checksum,
     licence:extract.licence,coverage:extract.coverage});
   store.recordNetworkArtifact({snapshot_id:snapshotId,provider:extract.provider,source_url:extract.url,local_path:dest,byte_size:received.bytes,sha256:checksum,

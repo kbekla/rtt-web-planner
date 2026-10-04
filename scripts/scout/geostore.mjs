@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 6;
+export const SCOUT_GEOSCHEMA_VERSION = 7;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -128,6 +128,11 @@ export class ScoutGeoStore {
         approval_scope TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_error TEXT,
         FOREIGN KEY(source_id) REFERENCES source_registry(source_id), FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
       );
+      CREATE TABLE IF NOT EXISTS scout_region_plans (
+        run_id TEXT PRIMARY KEY, plan_json TEXT NOT NULL, state TEXT NOT NULL,
+        stages_json TEXT NOT NULL, approved_by TEXT, approval_scope TEXT,
+        approved_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS scout_run_observations (
         run_id TEXT NOT NULL, observation_id TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
         checkpoint_json TEXT NOT NULL DEFAULT '{}', pipeline_version TEXT, started_at TEXT, completed_at TEXT, last_error TEXT,
@@ -165,7 +170,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4||version===5)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4||version===5||version===6)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -231,6 +236,30 @@ export class ScoutGeoStore {
     return {...r,config:JSON.parse(r.config_json),observation_counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))};
   }
   listRuns(){return this.db.prepare('SELECT run_id FROM scout_runs ORDER BY created_at,run_id').all().map(r=>this.getRun(r.run_id));}
+  saveRegionPlan(plan){
+    if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(plan?.run_id??'')||!plan?.route_source?.source_id||!plan?.network_source?.source_id||!plan?.provider?.snapshot_id)throw new Error('region plan is missing stable source/provider identities');
+    for(const permission of ['private_processing','redistribution','derived_public_use'])if(typeof plan.permissions?.[permission]!=='boolean')throw new Error(`region plan must explicitly record ${permission}`);
+    if(typeof plan.permissions.legal_evidence!=='boolean'||plan.permissions.private_processing!==true)throw new Error('region plan needs affirmative private research intent and an explicit legal-evidence role');
+    if(plan.permissions.legal_evidence)throw new Error('route-file discovery input cannot be promoted to a legal-evidence source by the regional wizard');
+    const normalized=JSON.parse(json(plan)),encoded=json(normalized),prior=this.db.prepare('SELECT plan_json FROM scout_region_plans WHERE run_id=?').get(plan.run_id);
+    if(prior){if(prior.plan_json!==encoded)throw new Error('region plan ID already exists with different source, permission, or provider inputs');return this.getRegionPlan(plan.run_id);}
+    const at=new Date().toISOString();this.db.prepare('INSERT INTO scout_region_plans(run_id,plan_json,state,stages_json,created_at,updated_at) VALUES(?,?,\'PREPARED\',?,?,?)')
+      .run(plan.run_id,encoded,json({inspection:'COMPLETE',provider_resolution:'COMPLETE',route_import:'PENDING',network_acquire:'PENDING',network_import:'PENDING',run_create:'PENDING',processing:'PENDING'}),at,at);
+    return this.getRegionPlan(plan.run_id);
+  }
+  getRegionPlan(runId){const row=this.db.prepare('SELECT * FROM scout_region_plans WHERE run_id=?').get(runId);return row?{...row,plan:JSON.parse(row.plan_json),stages:JSON.parse(row.stages_json)}:null;}
+  listRegionPlans(){return this.db.prepare('SELECT run_id FROM scout_region_plans ORDER BY created_at,run_id').all().map(r=>this.getRegionPlan(r.run_id));}
+  updateRegionPlan(runId,{state,stage,status_error,approved_by,approval_scope,approved_at}={}){
+    const prior=this.getRegionPlan(runId);if(!prior)throw new Error(`unknown Scout region plan '${runId}'`);
+    const allowed=['PREPARED','APPROVED','RUNNING','BLOCKED','REVIEW_REQUIRED','COMPLETE','FAILED'];
+    if(state&&!allowed.includes(state))throw new Error('invalid region plan state');
+    const stages={...prior.stages};if(stage){if(typeof stage.name!=='string'||!['PENDING','RUNNING','COMPLETE','BLOCKED','FAILED','REVIEW_REQUIRED'].includes(stage.status))throw new Error('invalid region plan stage update');stages[stage.name]=stage.status;}
+    const nextApproval=approved_by?{approved_by:approved_by.trim(),approval_scope:approval_scope?.trim(),approved_at:approved_at??new Date().toISOString()}:{};
+    if(approved_by&&(!approved_by.trim()||!nextApproval.approval_scope))throw new Error('region plan approval requires operator and scope');
+    this.db.prepare(`UPDATE scout_region_plans SET state=coalesce(?,state),stages_json=?,approved_by=coalesce(?,approved_by),approval_scope=coalesce(?,approval_scope),approved_at=coalesce(?,approved_at),last_error=?,updated_at=? WHERE run_id=?`)
+      .run(state??null,json(stages),nextApproval.approved_by??null,nextApproval.approval_scope??null,nextApproval.approved_at??null,status_error??null,new Date().toISOString(),runId);
+    return this.getRegionPlan(runId);
+  }
   runObservations(runId){return this.db.prepare(`SELECT ro.*,o.source_part,o.source_name FROM scout_run_observations ro JOIN route_observations o USING(observation_id)
     WHERE ro.run_id=? ORDER BY ro.observation_id`).all(runId).map(r=>({...r,checkpoint:JSON.parse(r.checkpoint_json)}));}
   setRunStatus(runId,status,{last_error=null}={}){

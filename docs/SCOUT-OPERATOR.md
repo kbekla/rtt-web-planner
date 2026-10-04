@@ -1,5 +1,17 @@
 # Scout operator workflow
 
+## Normal Karl workflow: open the desktop app
+
+On the A17, launch **RT&T Scout** from Ubuntu’s Applications view, then pin it with **Add to Favorites** if desired. The launcher opens the local operator in the browser. It uses the existing Scout database, source approvals, persistent region plans and processing pipeline; opening the app only reads status and does not start a job.
+
+To prepare an approved regional batch, select exactly one route file, enter its country code/region and source identity, and explicitly answer each permission question. For a TET/community discovery file, choose **Private research: Yes**, **Redistribution: No**, **Derived/public use: No**, and **Legal-access evidence: No**. Scout derives the route checksum/bounds and resolves a dated Geofabrik extract. Review those details, then choose **Approve for private Scout processing**. Approval records only the permissions selected; it does not approve legal access, canonical import or publication.
+
+The run appears in the same window. Choose **Process approved region** when ready. Processing can be closed and resumed because each stage is persisted. **Open Review** starts or reuses a loopback-only reviewer for a completed run. **Status**, **Details**, factory/admission state and pending notifications are available without starting heavy work. **Exit** closes the operator service while preserving jobs. A RED/AMBER dialog explains launch failures instead of leaving an empty terminal.
+
+The installed desktop entry calls a stable user wrapper which verifies the expected `/home/karl/rtt-map-factory/worktrees/codex-scout` checkout and `codex/scout` branch. It never selects `/home/karl/rtt-map-factory/runner/repo`. The UI binds to `127.0.0.1`; it has no public listener. Scout processing still requires explicit plan approval and the shared factory-priority resource admission. To install or repair the per-user launcher, run `scripts/scout/install-launcher.sh` from the expected worktree; ordinary app launch does not require a terminal or root.
+
+The advanced `scout-geoctl` and `npm run scout:geo` interfaces below remain available for diagnostics and administration. They use this same state and pipeline.
+
 `scout-geoctl` is the supported private operator boundary for a source batch. It registers explicit source manifests, requires recorded approval before route import or regional network acquisition/import, pins all network material by version and SHA-256, persists resumable processing state, and opens a read-only loopback reviewer for a selected run. It does not scan directories or crawl arbitrary sites.
 
 Set the two private roots in the calling environment. Both must be outside the repository/public tree and must not be symlinks:

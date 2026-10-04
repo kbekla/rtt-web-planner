@@ -82,6 +82,21 @@ test('pinned network acquisition resumes by HTTP Range, verifies checksum, recor
   }finally{store.close();fs.rmSync(dir,{recursive:true,force:true});}
 });
 
+test('approved provider-versioned network material is hashed after download and then checksum-pinned',async()=>{
+  const bytes=Buffer.from('provider-versioned synthetic snapshot'),sha=crypto.createHash('sha256').update(bytes).digest('hex'),dir=root(),privateRoot=path.join(dir,'private'),store=new ScoutGeoStore(privateRoot);
+  try{
+    const source=networkSource();source.network_extract={...source.network_extract,sha256:undefined,checksum_policy:'calculate-after-download'};
+    store.registerSource(routeSource());
+    store.registerSource(source);store.approveSource({source_id:'synthetic-network',approved_by:'Synthetic operator',scope:'Private network analysis'});
+    await assert.rejects(acquireNetworkSnapshot(store,{sourceId:'synthetic-network',snapshotId:'zz-261003',dataRoot:path.join(privateRoot,'network'),fetchImpl:async()=>fakeResponse(bytes)}),/expected SHA-256/);
+    const result=await acquireNetworkSnapshot(store,{sourceId:'synthetic-network',snapshotId:'zz-261003',dataRoot:path.join(privateRoot,'network'),calculateChecksum:true,fetchImpl:async()=>fakeResponse(bytes)});
+    assert.equal(result.sha256,sha);assert.equal(store.getSource('synthetic-network').network_extract.sha256,sha);
+    assert.equal(store.getSource('synthetic-network').network_extract.checksum_policy,'calculated-after-download');assert.equal(store.getNetworkSnapshot('zz-261003').checksum,sha);
+    const reused=await acquireNetworkSnapshot(store,{sourceId:'synthetic-network',snapshotId:'zz-261003',dataRoot:path.join(privateRoot,'network'),calculateChecksum:true,fetchImpl:async()=>{throw new Error('pinned bytes should be reused');}});
+    assert.equal(reused.status,'REUSED');assert.equal(reused.sha256,sha);
+  }finally{store.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('network acquisition checksum mismatch fails without registering a pinned artifact',async()=>{
   const {dir,privateRoot,store}=setup();try{
     store.approveSource({source_id:'synthetic-network',approved_by:'Synthetic operator',scope:'Private network analysis'});

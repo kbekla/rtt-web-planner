@@ -15,6 +15,7 @@ import { createZohoSmtpProvider } from './zoho-smtp.mjs';
 import { acquireNetworkSnapshot, importNetworkArtifact, resolveNetworkExtract } from './network-provider.mjs';
 import { SEGMENTATION_VERSION, lengthMeters } from './route-segmenter.mjs';
 import { createRealReviewServer } from './review-real-server.mjs';
+import { prepareRegionPlan, approveRegionPlan, validateRegionPlanForProcess } from './region-operator.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
 scout-geoctl source approve --source-id ID --by NAME --scope TEXT
@@ -24,6 +25,10 @@ scout-geoctl network import --snapshot-id ID
 scout-geoctl network status [--snapshot-id ID]
 scout-geoctl run create --run-id ID --source-id ID --snapshot-id ID --country-code CC --region-id ID --viewport W,S,E,N --approved-by NAME --approval-scope TEXT [--title TEXT]
 scout-geoctl run list|status --run-id ID
+scout-geoctl region prepare --route FILE --country-code CC --region NAME --source-name NAME --source-type TYPE --private-research --no-redistribution --no-derived-public-use --no-legal-evidence
+scout-geoctl region approve --run-id ID --by NAME --scope TEXT
+scout-geoctl region process|status --run-id ID
+scout-geoctl region list
 scout-geoctl process --run-id ID
 scout-geoctl review list [--run-id ID] [--decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD|ALL]
 scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD --reviewer NAME --reason TEXT
@@ -97,6 +102,46 @@ async function processRun(store,root,run,env){
     return {status,run_id:run.run_id,observation_count:observationRows.length,candidate_count:candidateCount,notification:notice};
   }finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'Scout run stage completed, failed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
 }
+async function networkStage(store,root,{sub,sourceId,snapshotId,env,calculateChecksum=false}){
+  const owner=`scout-network:${snapshotId}`,factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));
+  const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),grant=admission.acquireScout(owner);
+  if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
+  try{const shouldYield=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce});
+    const result=sub==='acquire'?await acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield,calculateChecksum}):await importNetworkArtifact(store,{snapshotId,shouldYield});
+    if(result.status==='YIELDED')result.yield_reason=shouldYield.reason()??'safe resource yield';return result;
+  }finally{const released=releaseGeoAdmission(admission,owner,grant,'regional network acquire/import completed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}
+}
+async function processRegionPlan(store,root,runId,env){
+  let plan=validateRegionPlanForProcess(store,runId),currentStage='route_import';const spec=plan.plan;
+  store.updateRegionPlan(runId,{state:'RUNNING',status_error:null});
+  try{
+    const mark=(stage,status='COMPLETE')=>store.updateRegionPlan(runId,{stage:{name:stage,status}});
+    mark('route_import','RUNNING');
+    const imported=ingestRouteFile(store,{inputFile:spec.route_file.path,sourceId:spec.route_source.source_id,relativeName:spec.route_file.original_filename,rawRoot:configuredPath('SCOUT_RAW_ROOT')});
+    if(imported.checksum!==spec.route_file.sha256)throw new Error('selected route file changed since preparation; prepare a new region plan');
+    mark('route_import');
+    currentStage='network_acquire';mark(currentStage,'RUNNING');
+    let result=await networkStage(store,root,{sub:'acquire',sourceId:spec.network_source.source_id,snapshotId:spec.provider.snapshot_id,env,calculateChecksum:true});
+    if(result.status==='YIELDED'){store.updateRegionPlan(runId,{state:'BLOCKED',stage:{name:currentStage,status:'BLOCKED'},status_error:result.yield_reason});return {status:'BLOCKED',run_id:runId,stage:currentStage,reason:result.yield_reason,resumable:true};}
+    mark(currentStage);
+    currentStage='network_import';mark(currentStage,'RUNNING');result=await networkStage(store,root,{sub:'import',snapshotId:spec.provider.snapshot_id,env});
+    if(result.status==='YIELDED'){store.updateRegionPlan(runId,{state:'BLOCKED',stage:{name:currentStage,status:'BLOCKED'},status_error:result.yield_reason});return {status:'BLOCKED',run_id:runId,stage:currentStage,reason:result.yield_reason,resumable:true};}
+    mark(currentStage);
+    currentStage='run_create';mark(currentStage,'RUNNING');
+    const snapshot=store.getNetworkSnapshot(spec.provider.snapshot_id);if(!snapshot?.checksum)throw new Error('network checksum was not pinned after download');
+    const approvalScope=plan.approval_scope;
+    const run=store.createRun({run_id:runId,source_id:spec.route_source.source_id,snapshot_id:spec.provider.snapshot_id,country_code:spec.country_code,
+      region_id:spec.region_id,title:`${spec.region_name} private Scout review`,viewport:spec.route_file.viewport,approved_by:plan.approved_by,approval_scope:approvalScope});
+    mark(currentStage);currentStage='processing';mark(currentStage,'RUNNING');
+    const processed=await processRun(store,root,run,env);
+    const planState=processed.status==='REVIEW_REQUIRED'?'REVIEW_REQUIRED':processed.status==='COMPLETE'?'COMPLETE':'BLOCKED';
+    mark(currentStage,planState==='BLOCKED'?'BLOCKED':'COMPLETE');store.updateRegionPlan(runId,{state:planState,status_error:processed.reason??null});
+    return {...processed,region_plan:runId,network_version:snapshot.version,network_sha256:snapshot.checksum};
+  }catch(error){
+    const state=error.code==='SCOUT_REVIEW_REQUIRED'?'REVIEW_REQUIRED':/^(BLOCKED_|YIELD_REQUESTED)/.test(error.message)?'BLOCKED':'FAILED';
+    store.updateRegionPlan(runId,{state,stage:{name:currentStage,status:state==='REVIEW_REQUIRED'?'REVIEW_REQUIRED':state==='BLOCKED'?'BLOCKED':'FAILED'},status_error:error.message});throw error;
+  }
+}
 function lineLength(geometry){const lines=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;return lines.reduce((sum,line)=>sum+line.slice(1).reduce((n,point,i)=>n+lengthMeters(line[i],point),0),0);}
 function unknownReason(evidence){const rs=[...new Set(evidence.flatMap(e=>e.rule==='interval-network-ambiguity'&&e.reason?[e.reason]:e.rule==='no-network-match-within-threshold'?['no_network_match']:[]))];return rs.length===1?rs[0]:rs.length?'multiple_unknown_reasons':'NONE';}
 function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new Error(`unknown Scout run '${runId}'`);const rows=store.runObservations(runId);let classes={},unknown={},matchStates={},distanceKm={},unknownReasonKm={},lengthBins={lt25:0,lt50:0,lt100:0,lt250:0,lt500:0,lt1000:0};
@@ -108,7 +153,22 @@ function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new E
 }
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
-  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify'].includes(command)?1:0));
+  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify','region'].includes(command)?1:0));
+  if(command==='region'&&sub==='prepare'){
+    const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
+    const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),
+      permissions:{private_processing:choice('private_research','no_private_research','private research'),redistribution:choice('redistribution','no_redistribution','redistribution'),
+        derived_public_use:choice('derived_public_use','no_derived_public_use','derived public use'),legal_evidence:choice('legal_evidence','no_legal_evidence','legal-evidence role')},
+      sourceLicence:opts.source_licence,attribution:opts.attribution});console.log(JSON.stringify({run_id:plan.run_id,state:plan.state,country_code:plan.plan.country_code,region:plan.plan.region_name,
+      source_id:plan.plan.route_source.source_id,source_checksum:plan.plan.route_file.sha256,route_bounds:plan.plan.route_file.bounds,viewport:plan.plan.route_file.viewport,
+      network_provider:plan.plan.provider.provider,network_version:plan.plan.provider.version,network_url:plan.plan.provider.url,snapshot_id:plan.plan.provider.snapshot_id,
+      permissions:plan.plan.permissions,approval_required:true},null,2));}finally{store.close();}return 0;
+  }
+  if(command==='region'&&sub==='approve'){const {store}=storeFor(env);try{const plan=approveRegionPlan(store,{runId:required(opts,'run_id'),approvedBy:required(opts,'by'),approvalScope:required(opts,'scope')});console.log(JSON.stringify({run_id:plan.run_id,state:plan.state,approved_by:plan.approved_by,approved_at:plan.approved_at},null,2));}finally{store.close();}return 0;}
+  if(command==='region'&&sub==='process'){const {root,store}=storeFor(env);try{const result=await processRegionPlan(store,root,required(opts,'run_id'),env);console.log(JSON.stringify(result,null,2));return result.status==='BLOCKED'?75:0;}finally{store.close();} }
+  if(command==='region'&&sub==='status'){const {store}=storeFor(env);try{const plan=store.getRegionPlan(required(opts,'run_id'));if(!plan)throw new Error(`unknown Scout region plan '${opts.run_id}'`);const run=store.getRun(plan.run_id);console.log(JSON.stringify({ ...plan,run:run?runStats(store,run.run_id):null },null,2));}finally{store.close();}return 0;}
+  if(command==='region'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRegionPlans().map(p=>({run_id:p.run_id,state:p.state,country_code:p.plan.country_code,region:p.plan.region_name,source_name:p.plan.source_name,network_version:p.plan.provider.version,updated_at:p.updated_at})),null,2));}finally{store.close();}return 0;}
+  if(command==='region'&&sub==='review'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getRegionPlan(runId))throw new Error(`unknown Scout region plan '${runId}'`);console.log(JSON.stringify(store.listRunReviewCandidates({runId,decision:opts.decision??'UNREVIEWED'}),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
   if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}
@@ -116,15 +176,12 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
     const registered=store.db.prepare('SELECT snapshot_id FROM network_snapshots WHERE source_id=? ORDER BY imported_at DESC').all(source.source_id).map(r=>store.getNetworkSnapshot(r.snapshot_id));
     return registered.length?registered.map(snapshot=>({source_id:source.source_id,network_extract:source.network_extract,...describe(snapshot)})):[{source_id:source.source_id,network_extract:source.network_extract,operator_state:'NOT_ACQUIRED'}];});
     console.log(JSON.stringify(rows,null,2));}finally{store.close();}return 0;}
-  if(command==='network'&&(sub==='acquire'||sub==='import')){const {root,store}=storeFor(env);const snapshotId=required(opts,'snapshot_id'),sourceId=opts.source_id;let owner=`scout-network:${snapshotId}`,grant,admission;try{
+  if(command==='network'&&(sub==='acquire'||sub==='import')){const {root,store}=storeFor(env);const snapshotId=required(opts,'snapshot_id'),sourceId=opts.source_id;try{
     if(sub==='acquire'){if(!sourceId)throw new Error('--source-id is required for network acquire');const source=store.getSource(sourceId);if(!source)throw new Error(`unknown network source '${sourceId}'`);resolveNetworkExtract(source);}
     else{const snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot||!store.sourceApproval(snapshot.source_id))throw new Error('network import requires a registered snapshot with explicit active source approval');}
-    const factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir));grant=admission.acquireScout(owner);if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
-    const shouldYield=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce});
-    const result=sub==='acquire'?await acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield}):await importNetworkArtifact(store,{snapshotId,shouldYield});
-    if(result.status==='YIELDED')result.yield_reason=shouldYield.reason()??'safe resource yield';
+    const result=await networkStage(store,root,{sub,sourceId,snapshotId,env});
     console.log(JSON.stringify(result,null,2));return result.status==='YIELDED'?75:0;
-  }finally{try{if(grant){const released=releaseGeoAdmission(admission,owner,grant,'regional network acquire/import completed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}}finally{store.close();}}}
+  }finally{store.close();}}
   if(command==='run'&&sub==='create'){const {store}=storeFor(env);try{const viewport=required(opts,'viewport').split(',').map(Number);if(viewport.length!==4)throw new Error('--viewport needs west,south,east,north');const run=store.createRun({run_id:required(opts,'run_id'),source_id:required(opts,'source_id'),snapshot_id:required(opts,'snapshot_id'),country_code:required(opts,'country_code').toUpperCase(),region_id:required(opts,'region_id'),title:opts.title,viewport,approved_by:required(opts,'approved_by'),approval_scope:required(opts,'approval_scope')});console.log(JSON.stringify(run,null,2));}finally{store.close();}return 0;}
   if(command==='run'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRuns(),null,2));}finally{store.close();}return 0;}
   if(command==='run'&&sub==='status'){const {store}=storeFor(env);try{console.log(JSON.stringify(runStats(store,required(opts,'run_id')),null,2));}finally{store.close();}return 0;}

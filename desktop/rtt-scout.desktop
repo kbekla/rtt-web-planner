@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RT&T Scout
+GenericName=Trail discovery and review
+Comment=Open the private RT&T Scout operator
+Exec=/home/karl/.local/bin/rtt-scout
+Icon=applications-internet
+Terminal=false
+Categories=Utility;
+StartupNotify=true

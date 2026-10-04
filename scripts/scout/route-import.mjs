@@ -90,3 +90,21 @@ export function ingestRouteFile(store, { inputFile, sourceId, relativeName = pat
   store.completeFileImport(registered.file_id, observations);
   return { file_id: registered.file_id, version: registered.version, checksum, format, duplicate: false, observations };
 }
+
+/** Inspect only the one operator-selected file; this does not persist or scan anything. */
+export function inspectRouteFile(inputFile, { maxBytes = 16 * 1024 * 1024, sourceLanguage = null } = {}) {
+  if (!inputFile) throw new Error('an explicitly selected route file is required');
+  const format = sourceExtension(inputFile), bytes = readSelectedFile(inputFile, maxBytes);
+  const parsed = parseRouteFile(format, bytes.toString('utf8'), { sourceLanguage });
+  const points = parsed.parts.flatMap((part) => part.geometry.type === 'LineString'
+    ? part.geometry.coordinates : part.geometry.coordinates.flat());
+  if (!points.length) throw new Error('selected route file contains no usable coordinates');
+  let south=Infinity,north=-Infinity;
+  const longitudes = points.map(([lon,lat]) => {south=Math.min(south,lat);north=Math.max(north,lat);return ((lon + 180) % 360 + 360) % 360;}).sort((a,b)=>a-b);
+  let largestGap=-1,gapAfter=0;for(let i=0;i<longitudes.length;i++){const next=i===longitudes.length-1?longitudes[0]+360:longitudes[i+1],gap=next-longitudes[i];if(gap>largestGap){largestGap=gap;gapAfter=i;}}
+  const start=longitudes[(gapAfter+1)%longitudes.length],end=longitudes[gapAfter]+(gapAfter===longitudes.length-1?0:longitudes[gapAfter]<start?360:0);
+  const longitude=(v)=>{const shifted=((v+180)%360+360)%360-180;return shifted===-180&&v>0?180:shifted;};
+  return { format, byte_size: bytes.length, checksum: hash(bytes), bounds: [longitude(start-180),
+    south, longitude(end-180), north],
+  observation_count: parsed.parts.length, point_count: points.length, geometries: parsed.parts.map((part) => part.geometry) };
+}
