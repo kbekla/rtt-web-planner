@@ -1,0 +1,66 @@
+# Scout evidence and corridor research
+
+Scout evidence is claim-specific, source-specific, jurisdiction-specific and time-specific. The current implementation adds private corridor hypotheses and a legal/status Watchkeeper foundation around the existing OSM discovery and route-hint stores. It does not promote any corridor to canonical data or public output.
+
+## Independent evidence planes
+
+Plane A contains discovery and corroboration: OSM ways, explicitly approved rider/community reports, and private partner/community route hints where their terms permit that use. It can support physical existence or character, recent traversal, surface, obstruction, or a reason to investigate. It cannot establish motorcycle legality by itself. An OSM `access` tag is retained as source text; a TET or other rider GPX remains a private discovery hint. Duplicate copies of one community report share an independence group and do not count as independent confirmations.
+
+Plane B contains legal/status evidence from an appropriate authority for the affected jurisdiction and vehicle class. A record retains its source/version, authority category, jurisdiction, affected geometry reference, publication and retrieval dates, effective interval, permanent/temporary/emergency character, superseded record, original-language/document references, extraction method and review/qualification state. AI-extracted material stays unqualified until a human verifies it. The evaluator requires explicit matched geometry and jurisdiction; unresolved identity returns `REVIEW_REQUIRED`.
+
+Physical existence, motorcycle access and routability remain separate fields. Temporary closure changes operational eligibility without deleting physical existence. An expired temporary order stops blocking at its end time; a verified underlying permission can then apply again. Current qualified authoritative restrictions take precedence over older permission, while contradictory evidence remains visible for review. `ROUTABLE` is derived only when physical existence, current motorcycle permission and a real routing check all support it. Otherwise the output can be `VISIBLE_NOT_ROUTABLE`, `TEMPORARILY_CLOSED`, `RESTRICTED_OR_REJECTED` or `REVIEW_REQUIRED`.
+
+## OSM corridor hypotheses
+
+OSM way parts remain immutable discovery observations. The corridor job reads the checksum-pinned regional PBF through `osmium` OPL to obtain ordered node references, then computes network degree only at candidate endpoints. It combines exact same-node-path observations and chains ways only where a shared mapped node has degree two, both physical-character classifications agree, and endpoint continuation is unambiguous. It does not infer identity from coordinate proximity. Branches, crossings without shared topology, parallel lines, classification changes, incomplete ways and ambiguous multipart records stay separate or enter `AMBIGUOUS` review.
+
+Corridor geometry is a derived hypothesis; the original way-part observations, tags, source/version references and geometry remain separately addressable. Short ways and connectors are retained. Explicit driveway/parking-aisle observations can be ranked `LOW_VALUE_FOR_MOTORCYCLE_DISCOVERY`, but are not deleted or labelled false. `NOT_COMPARED` is used when no canonical reference is supplied and is never rendered as `NEW`.
+
+Within a snapshot, identity is a reversal-insensitive hash of the ordered OSM node path, not the OSM way ID. Across snapshots, Scout carries an existing corridor ID only for a unique, continuous one-to-one shared-node lineage. Split, merge, multiple-match or insufficient lineage becomes `REVIEW_REQUIRED`. Node changes that destroy a unique shared sequence are not repaired with nearest geometry. The versioned lineage record explains every carried or unresolved identity.
+
+The real Belgium baseline contains 275,098 raw OSM way-part discoveries. The topology pass is deliberately separate and resumable: it checkpoints its two full-PBF scans and corridor persistence in bounded transactions. It must hold the shared A17 admission lease. It never changes the saved TET calibration run, network snapshot, or canonical master.
+
+## Source registry and Watchkeeper
+
+The versioned source registry records organisation, coverage, jurisdictions, origin, format/adapter, licence and version, explicit private/redistribution/derived-use permissions, attribution, evidence roles, authority category, update mechanism/frequency, rate limits, source revision, and retrieval/checksum metadata. A source can have multiple evidence roles, but each saved claim still cites its own source and claim type. Incomplete licence or private-use permission blocks automated retrieval. Public visibility alone is not a reuse licence.
+
+`scripts/scout/watchkeeper.mjs` supplies the deterministic monitoring foundation. Poll timing is source-specific, versions and SHA-256 values produce immutable change events, and failures use bounded source policy/backoff. Legal records are only qualified when the source is authoritative, the record is human-verified, the vehicle class applies, and geometry and jurisdiction match. It retains amendments and supersession rather than overwriting earlier status. This is an adapter/API foundation; no Belgian closure or motorcycle-access feed is currently enabled, and no legal record was ingested for the discovery run.
+
+## Community and partner evidence
+
+Community claims have typed effects (`TRAVERSED`, `BLOCKED`, `GATE_PRESENT`, `SURFACE_CHANGED`, `SIGN_SEEN`, `LEGAL_SIGNAGE_REPORTED`, `CLOSED`, `REOPENED`, `GEOMETRY_DIFFERENT`), observation time, provenance, optional media reference, independence grouping and freshness. Current traversal/condition claims can corroborate physical existence or character only. They never change legal access. Stale claims remain in history with stale status.
+
+Partner sources are a separate storage/access layer, not baked into RT&T-owned geometry. Registration requires an explicit permission reference, owner, audience, attribution and storage boundary; the layer remains inactive by default. TET, ACT, TRF/GRM, TrailVidz and other community/commercial material is not assumed to grant redistribution, derivative publication or commercial rights.
+
+## Belgium source review
+
+The pinned Geofabrik OSM snapshot is ODbL 1.0 and supplies discovery/physical-character evidence, not statutory legal status. It remains the only additional dataset actually used in the Belgium discovery pass; the already approved TET route is private discovery/corroboration only.
+
+Officially documented road-network candidates were reviewed for future independent physical/network corroboration:
+
+- Brussels Mobility's regional roads layer is CC0 and has downloadable GeoJSON/GeoPackage and WFS/WMS access. Its own metadata says it covers regional-managed roads, roughly one fifth of the Brussels road network, so it is incomplete and not a legal motorcycle-access source. It is suitable for a separately registered road-network adapter after version/checksum and fields are pinned. [Dataset metadata](https://data.mobility.brussels/nl/info/Regional_roads/).
+- Service public de Wallonie's regional road network and associated markers is CC BY 4.0, downloadable, with web services preferred for current versions. Attribution and change notes are required. It supports road-network identity/physical context, not motorcycle permission. It is a viable future adapter after a concrete endpoint/export and schema are pinned. [SPW series metadata](https://geoportail.wallonie.be/catalogue/d26f16df-5326-4cd7-b768-709e75a25507.html).
+- Agentschap Wegen en Verkeer's general open-data reuse terms allow reuse, transformation and commercial use with attribution and last-update date. No exact dataset/endpoint was selected for this run, so no AWV data was ingested. [AWV reuse terms](https://wegenenverkeer.be/gebruiksrecht).
+- The Belgian National Access Point describes machine-readable road restriction and closure categories, including DATEX II, but no source-specific feed, licence and update contract was registered or consumed. [Transport Data provider information](https://transportdata.be/pages/information-for-dataproviders).
+
+No Belgian definitive legal-access or temporary-restriction dataset has been qualified in Scout. Access for every Belgium corridor therefore remains `UNKNOWN`; routability is also `UNKNOWN`; canonical state remains `NOT_COMPARED`. No legal counts are inferred from OSM tags or route use.
+
+## Review, privacy and operation
+
+The private loopback MapLibre reviewer shows corridors as the top-level layer, with underlying way parts, OSM tags/provenance, TET support, legal-status records, community evidence, identity state and review decisions in the inspector. Raw discoveries are an optional layer. Corridor review states (`UNREVIEWED`, `INTERESTING`, `NEEDS_MORE_EVIDENCE`, `LOW_VALUE`, `FALSE_POSITIVE`, `AMBIGUOUS`, `HOLD`) are research workflow only and do not imply legal approval.
+
+Raw sources, topology, legal documents, community evidence and review state stay in the private Scout store. The reviewer is loopback-only and read-only. Public map endpoints and canonical output are not changed. Notifications use the existing Scout provider abstraction; detached operator jobs now inherit the configured non-secret recipient setting so queued AMBER events can construct the configured email provider. Credentials are still loaded only by the SMTP provider from the existing protected credential file and are never passed in child environment or status output.
+
+Before a real corridor pass, Scout must freshly verify shared factory admission, no factory/Planetiler work, no loaded/generating local model, healthy resource/thermal state and sufficient disk. OSM topology extraction and persistence are heavy work; they run in bounded batches with resumable checkpoints and yield to factory intent. Lightweight status and review remain available without the lease.
+
+## Belgium corridor reconciliation result (2026-10-05)
+
+The original Belgium discovery DB and PBF were copied read-only/checksum-verified into a separate owner-only (`0700` directories, `0600` DB/PBF) working store before the derived pass. The saved discovery/TET calibration store remained unchanged. Both complete OPL passes scanned 11,452,213 ways; the corridor build recorded 275,098 immutable OSM way-part observations and 247,662 topology-backed corridor versions. The median derived length is 164.17 m. Corridor length bins are: 86,407 under 100 m; 122,777 from 100–500 m; 29,396 from 500 m–1 km; 9,070 from 1–5 km; 12 at least 5 km. These are mapped topology hypotheses, not field-confirmed trail lengths.
+
+The derived corridor classes are 135,025 `PROBABLE_OFFROAD`, 40,115 `UNSEALED_ROAD` and 72,522 `UNKNOWN`. Existence remains probable for the set, with zero confirmed; motorcycle access is unknown for all 247,662; routability is unknown for all 247,662; canonical status is `NOT_COMPARED`. Exact OSM/TET support covers 150 corridors (169 candidate-part support links collapsed onto those corridor IDs); 247,512 are OSM-only. No other source was ingested, so there is no independent multi-source corroboration count. The network graph has 277,989 nodes with degree greater than two; 235,678 corridors touch one of those branch nodes. The single-snapshot lineage and geometry-ambiguity result is zero records, which means no cross-version correspondence was evaluated and no unresolved OSM way topology was found; it is not proof that nearby physical/legal alignments are identical. No possible-parallel pair was explicitly classified by this pass.
+
+Review triage preserves all corridor rows while creating a useful research queue: 150 exact route-hint-supported corridors are `UNREVIEWED` for research; 229 explicit driveway/parking/alley-like tagged corridors are retained as `LOW_VALUE`; the remaining 247,283 single-source OSM corridors are `CATALOGUED` and remain viewport-searchable without individual human-review alerts. This suppresses queue/notification noise, not data. The one corridor AMBER notification was sent through the configured Scout EMAIL provider after updating the earlier unconfigured pending event to the corrected corridor-queue count; unrelated pending events were not retried.
+
+The private reviewer was opened on an ephemeral `127.0.0.1` port and then stopped. Its status endpoint returned 275,098 discoveries, 247,662 corridor hypotheses and 150 human-review items. A selected corridor exposed its geometry, underlying observations, source/tags, legal evidence (none), unknown access/routability and non-routable state. The endpoint is read-only. Current code also exposes corridor-priority filters for corroborated, identity-review, catalog-only and low-value groups, and shows cross-snapshot lineage when present.
+
+During the admitted pass, the shared factory lease owner was `scout-corridor:be-osm-discovery-20261005`; no factory intent or Planetiler process appeared. The unloaded Ollama service remained present without a loaded model. MemAvailable stayed above 8.4 GiB; CPU remained about 56–58°C and NVMe peaked around 53°C in sampled reads. The one-worldview OSM database remains private; no TET coordinates, private provenance or canonical fields entered the public map build.

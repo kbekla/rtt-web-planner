@@ -530,8 +530,15 @@ export class NotificationCenter {
     if (recovery) s.active[key] = { ...old, resolved: true, pending_channels:[], recovered_at: event.at }; else s.active[key] = { severity, last_sent_ms: pending.length===sendChannels.length?(old?.last_sent_ms??null):nowMs,last_attempt_ms:nowMs, resolved: false,pending_channels:pending };
     this.save(s); return { sent: true, event };
   }
-  async retryPending(){
-    const s=this.state(),results=[];for(const item of s.pending){const event={key:item.key,severity:item.severity,message:item.message,recovery:Boolean(item.recovery),at:new Date(this.clock()).toISOString(),delivery:{}},remaining=[];
+  replacePending({key,severity,message}={}){
+    if(!key||!['INFO','AMBER','RED'].includes(severity)||typeof message!=='string')throw new Error('pending notification update requires a key, severity and message');
+    const s=this.state(),item=s.pending.find(value=>value.key===key);if(!item)return {updated:false,reason:'no pending event'};
+    const rank={INFO:0,AMBER:1,RED:2};item.severity=rank[severity]>rank[item.severity]?severity:item.severity;item.message=message;
+    const active=s.active[key];if(active&&!active.resolved&&rank[item.severity]>rank[active.severity])active.severity=item.severity;
+    this.save(s);return {updated:true,severity:item.severity};
+  }
+  async retryPending({key=null}={}){
+    const s=this.state(),results=[];for(const item of s.pending){if(key&&item.key!==key)continue;const event={key:item.key,severity:item.severity,message:item.message,recovery:Boolean(item.recovery),at:new Date(this.clock()).toISOString(),delivery:{}},remaining=[];
       for(const channel of item.channels){try{if(this.providers[channel]){await this.providers[channel].send(event);event.delivery[channel]='sent';}else{event.delivery[channel]='unconfigured';remaining.push(channel);}}catch(e){const code=typeof e?.code==='string'&&/^[A-Z0-9_]{1,24}$/.test(e.code)?` (${e.code})`:'';event.delivery[channel]=`failed${code}`;remaining.push(channel);}}
       s.events.push(event);const active=s.active[item.key]??{severity:item.severity,resolved:false};active.pending_channels=remaining;active.last_attempt_ms=this.clock();if(Object.values(event.delivery).includes('sent'))active.last_sent_ms=this.clock();s.active[item.key]=active;results.push({key:item.key,delivery:event.delivery,pending:remaining});
       if(remaining.length)item.channels=remaining;else item._delivered=true;

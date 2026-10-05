@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 8;
+export const SCOUT_GEOSCHEMA_VERSION = 9;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -76,6 +76,23 @@ export class ScoutGeoStore {
         edge_rowid INTEGER PRIMARY KEY, snapshot_id TEXT NOT NULL, edge_id TEXT NOT NULL, geometry_json TEXT NOT NULL,
         tags_json TEXT NOT NULL, evidence_json TEXT NOT NULL, jurisdiction_ids_json TEXT NOT NULL,
         UNIQUE(snapshot_id, edge_id), FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE TABLE IF NOT EXISTS osm_way_topology (
+        snapshot_id TEXT NOT NULL, edge_id TEXT NOT NULL, osm_version INTEGER NOT NULL,
+        node_refs_json TEXT NOT NULL, topology_hash TEXT NOT NULL, status TEXT NOT NULL,
+        updated_at TEXT NOT NULL, PRIMARY KEY(snapshot_id,edge_id),
+        FOREIGN KEY(snapshot_id,edge_id) REFERENCES network_edges(snapshot_id,edge_id)
+      );
+      CREATE TABLE IF NOT EXISTS osm_topology_stage_state (
+        snapshot_id TEXT NOT NULL, run_id TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL,
+        records_seen INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        PRIMARY KEY(snapshot_id,run_id,stage), FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id),
+        FOREIGN KEY(run_id) REFERENCES discovery_runs(run_id)
+      );
+      CREATE TABLE IF NOT EXISTS osm_topology_node_incidence (
+        snapshot_id TEXT NOT NULL, run_id TEXT NOT NULL, way_id TEXT NOT NULL, node_id TEXT NOT NULL,
+        degree INTEGER NOT NULL CHECK(degree>0), PRIMARY KEY(snapshot_id,run_id,way_id,node_id),
+        FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id), FOREIGN KEY(run_id) REFERENCES discovery_runs(run_id)
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS network_edges_rtree USING rtree(edge_rowid, min_lon, max_lon, min_lat, max_lat);
       CREATE TABLE IF NOT EXISTS route_segments (
@@ -172,6 +189,86 @@ export class ScoutGeoStore {
         PRIMARY KEY(candidate_id,related_type,related_id,relationship),
         FOREIGN KEY(candidate_id) REFERENCES discovery_candidates(candidate_id)
       );
+      CREATE TABLE IF NOT EXISTS physical_corridors (
+        corridor_id TEXT PRIMARY KEY, identity_scheme TEXT NOT NULL, created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL, current_status TEXT NOT NULL DEFAULT 'ACTIVE'
+      );
+      CREATE TABLE IF NOT EXISTS physical_corridor_versions (
+        corridor_version_rowid INTEGER PRIMARY KEY, corridor_version_id TEXT NOT NULL UNIQUE, corridor_id TEXT NOT NULL, run_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL, algorithm_version TEXT NOT NULL, classification TEXT NOT NULL,
+        physical_existence TEXT NOT NULL, motorcycle_access TEXT NOT NULL, routability TEXT NOT NULL,
+        canonical_status TEXT NOT NULL, review_priority TEXT NOT NULL, length_m REAL NOT NULL,
+        node_sequence_hash TEXT NOT NULL, node_sequence_json TEXT NOT NULL, identity_state TEXT NOT NULL, geometry_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, UNIQUE(run_id,node_sequence_hash),
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id),
+        FOREIGN KEY(run_id) REFERENCES discovery_runs(run_id),
+        FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS physical_corridor_versions_rtree USING rtree(corridor_version_rowid,min_lon,max_lon,min_lat,max_lat);
+      CREATE TABLE IF NOT EXISTS physical_corridor_observations (
+        corridor_version_id TEXT NOT NULL, candidate_id TEXT NOT NULL, relation TEXT NOT NULL,
+        PRIMARY KEY(corridor_version_id,candidate_id),
+        FOREIGN KEY(corridor_version_id) REFERENCES physical_corridor_versions(corridor_version_id),
+        FOREIGN KEY(candidate_id) REFERENCES discovery_candidates(candidate_id)
+      );
+      CREATE TABLE IF NOT EXISTS physical_corridor_lineage (
+        lineage_id TEXT PRIMARY KEY, from_version_id TEXT NOT NULL, to_version_id TEXT NOT NULL,
+        relation TEXT NOT NULL, match_state TEXT NOT NULL, evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY(from_version_id) REFERENCES physical_corridor_versions(corridor_version_id),
+        FOREIGN KEY(to_version_id) REFERENCES physical_corridor_versions(corridor_version_id)
+      );
+      CREATE TABLE IF NOT EXISTS corridor_review_decisions (
+        decision_id TEXT PRIMARY KEY, corridor_id TEXT NOT NULL, corridor_version_id TEXT NOT NULL,
+        decision TEXT NOT NULL, reviewer TEXT NOT NULL, reason TEXT NOT NULL, decided_at TEXT NOT NULL,
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id),
+        FOREIGN KEY(corridor_version_id) REFERENCES physical_corridor_versions(corridor_version_id)
+      );
+      CREATE TABLE IF NOT EXISTS corridor_review_queue (
+        corridor_version_id TEXT PRIMARY KEY, corridor_id TEXT NOT NULL, state TEXT NOT NULL,
+        reason_code TEXT NOT NULL, priority TEXT NOT NULL, ranking_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY(corridor_version_id) REFERENCES physical_corridor_versions(corridor_version_id),
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id)
+      );
+      CREATE TABLE IF NOT EXISTS legal_status_records (
+        status_record_id TEXT PRIMARY KEY, corridor_id TEXT, jurisdiction_id TEXT NOT NULL,
+        source_id TEXT NOT NULL, source_version TEXT NOT NULL, claim_type TEXT NOT NULL,
+        legal_effect TEXT NOT NULL, temporal_kind TEXT NOT NULL, effective_from TEXT, effective_until TEXT,
+        published_at TEXT, retrieved_at TEXT NOT NULL, vehicle_classes_json TEXT NOT NULL,
+        geometry_reference_json TEXT NOT NULL, source_document_reference TEXT NOT NULL,
+        original_language TEXT, original_text_reference TEXT, supersedes_record_id TEXT, extraction TEXT NOT NULL,
+        review_state TEXT NOT NULL, qualified INTEGER NOT NULL CHECK(qualified IN (0,1)),
+        evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id),
+        FOREIGN KEY(jurisdiction_id) REFERENCES jurisdictions(jurisdiction_id),
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id),
+        FOREIGN KEY(supersedes_record_id) REFERENCES legal_status_records(status_record_id)
+      );
+      CREATE TABLE IF NOT EXISTS source_watch_state (
+        source_id TEXT PRIMARY KEY, cursor_json TEXT NOT NULL, last_attempt_at TEXT,
+        last_success_at TEXT, next_due_at TEXT, failure_count INTEGER NOT NULL DEFAULT 0,
+        health TEXT NOT NULL DEFAULT 'UNKNOWN', last_error_code TEXT,
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE TABLE IF NOT EXISTS source_change_events (
+        change_event_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, prior_version TEXT, current_version TEXT,
+        prior_sha256 TEXT, current_sha256 TEXT, retrieved_at TEXT NOT NULL, event_type TEXT NOT NULL,
+        payload_reference TEXT, details_json TEXT NOT NULL,
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE TABLE IF NOT EXISTS community_claims (
+        claim_id TEXT PRIMARY KEY, corridor_id TEXT, source_id TEXT NOT NULL, claim_type TEXT NOT NULL,
+        observed_at TEXT NOT NULL, recorded_at TEXT NOT NULL, geometry_reference_json TEXT NOT NULL,
+        media_reference TEXT, provenance_json TEXT NOT NULL, independence_group TEXT,
+        freshness_state TEXT NOT NULL, claim_json TEXT NOT NULL,
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id),
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE TABLE IF NOT EXISTS partner_layers (
+        layer_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, owner TEXT NOT NULL, audience TEXT NOT NULL,
+        permission_reference TEXT NOT NULL, storage_boundary TEXT NOT NULL, attribution TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)), metadata_json TEXT NOT NULL,
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
       CREATE TABLE IF NOT EXISTS network_artifacts (
         snapshot_id TEXT PRIMARY KEY, provider TEXT NOT NULL, source_url TEXT NOT NULL, local_path TEXT NOT NULL,
         byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT, last_modified TEXT, status TEXT NOT NULL,
@@ -195,6 +292,9 @@ export class ScoutGeoStore {
       CREATE INDEX IF NOT EXISTS candidates_review_idx ON candidates(review_state, updated_at);
       CREATE INDEX IF NOT EXISTS corridor_hypothesis_observation_idx ON corridor_hypotheses(observation_id,component_index);
       CREATE INDEX IF NOT EXISTS evidence_question_idx ON evidence(question, jurisdiction_id, evidence_time);
+      CREATE INDEX IF NOT EXISTS legal_status_corridor_idx ON legal_status_records(corridor_id,jurisdiction_id,effective_from,effective_until);
+      CREATE INDEX IF NOT EXISTS legal_status_source_idx ON legal_status_records(source_id,retrieved_at);
+      CREATE INDEX IF NOT EXISTS corridor_review_queue_state_idx ON corridor_review_queue(state,priority,updated_at);
     `);
     const version = this.db.prepare('SELECT version FROM schema_version LIMIT 1').get()?.version;
     if(version===1) {
@@ -203,7 +303,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4||version===5||version===6||version===7)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4||version===5||version===6||version===7||version===8)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -684,6 +784,8 @@ export function validateSourceDefinition(source) {
   if (!Array.isArray(source.expected_formats) || !source.expected_formats.length) throw new Error('source expected_formats must be a non-empty array');
   if (!Array.isArray(source.coverage.countries) || !Array.isArray(source.coverage.regions) || !Array.isArray(source.jurisdiction_ids)) throw new Error('source coverage must list countries, regions and jurisdictions');
   for (const role of ['discovery_only','physical_existence','legal_access','routing_network','public_reuse','jurisdiction_boundaries']) if (typeof source.roles[role] !== 'boolean') throw new Error(`source role '${role}' must be explicit`);
+  const claimRoles = new Set(['DISCOVERY_HINT','PHYSICAL_EXISTENCE','PHYSICAL_CHARACTER','LEGAL_ACCESS','TEMPORARY_RESTRICTION','PERMANENT_RESTRICTION','ROUTING_NETWORK','SURFACE','CLOSURE','CORROBORATION']);
+  if (source.evidence_roles !== undefined && (!Array.isArray(source.evidence_roles) || source.evidence_roles.some(role => !claimRoles.has(role)))) throw new Error('source evidence_roles must be a list of registered claim roles');
   for (const permission of ['private_processing','redistribution','derived_public_use']) if (typeof source.reuse[permission] !== 'boolean') throw new Error(`reuse permission '${permission}' must be explicit`);
   if (source.roles.legal_access && !source.reuse.private_processing) throw new Error('legal evidence source must authorize private processing');
   if (source.roles.public_reuse && !source.reuse.redistribution) throw new Error('public reuse role requires redistribution permission');

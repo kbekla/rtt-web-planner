@@ -61,6 +61,10 @@ export SCOUT_GEO_ROOT="$STATE_ROOT"
 export SCOUT_RAW_ROOT="$STATE_ROOT/raw"
 export FACTORY_DIR
 export SCOUT_OPERATOR_PORT="$PORT"
+# The GNOME .desktop launch context is not guaranteed to inherit Karl's
+# interactive-shell exports. Keep the non-secret owner alert mailbox explicit
+# here so detached Scout operator jobs inherit it through operator-ui.
+export SCOUT_NOTIFICATION_EMAIL="${SCOUT_NOTIFICATION_EMAIL:-info@roadtrailandtide.com}"
 mkdir -p -m 700 "$STATE_ROOT/operator-logs"
 chmod 700 "$STATE_ROOT/operator-logs"
 log_file="$STATE_ROOT/operator-logs/operator-ui.log"

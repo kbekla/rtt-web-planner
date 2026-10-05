@@ -526,6 +526,16 @@ test('unconfigured or failed delivery stays persistently pending and retries wit
   await failed.emit({key:'smtp-failure',severity:'RED',message:'Delivery retry required',channels:['EMAIL']});
   const state=JSON.stringify(failed.state());assert.match(state,/failed/);assert.doesNotMatch(state,/secret=not-for-status/);assert.equal(failed.state().pending.length,1);
 });
+test('pending notification text can be safely corrected and one key retried without sending other pending alerts',async()=>{
+  const file=path.join(tmp,'notify-replace','state.json'),queue=new NotificationCenter(file);
+  await queue.emit({key:'corridor-review',severity:'AMBER',message:'Old provisional count',channels:['EMAIL']});
+  await queue.emit({key:'other-review',severity:'AMBER',message:'Another pending review',channels:['EMAIL']});
+  assert.equal(queue.replacePending({key:'corridor-review',severity:'AMBER',message:'Corrected corridor queue count'}).updated,true);
+  const email=new TestDeliveryProvider(),restarted=new NotificationCenter(file,{providers:{EMAIL:email}});
+  const result=await restarted.retryPending({key:'corridor-review'});
+  assert.equal(result.length,1);assert.equal(email.deliveries.length,1);assert.equal(email.deliveries[0].message,'Corrected corridor queue count');
+  assert.equal(restarted.state().pending.length,1);assert.equal(restarted.state().pending[0].key,'other-review');
+});
 test('a recovery notification remains a recovery event when delivery is retried after restart',async()=>{
   const file=path.join(tmp,'notify-recovery-pending','state.json'),queued=new NotificationCenter(file);
   await queued.emit({key:'thermal-hold',severity:'RED',message:'Thermal hold active',channels:['EMAIL']});

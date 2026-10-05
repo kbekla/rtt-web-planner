@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
-import { createScoutOperatorServer, deriveOperatorHealth, operatorBlockedReason } from '../../scripts/scout/operator-ui.mjs';
+import { createScoutOperatorServer, deriveOperatorHealth, operatorBlockedReason, scoutJobEnvironment } from '../../scripts/scout/operator-ui.mjs';
 
 const route={source_id:'synthetic-ui-route',name:'Synthetic route',type:'route-file',organisation:'fixture',expected_formats:['gpx'],coverage:{countries:['ZZ'],regions:['ZZ-region']},jurisdiction_ids:['zz-country'],location:'explicit test route',adapter_version:'fixture-v1',licence:{name:'synthetic',version:'1'},reuse:{private_processing:true,redistribution:false,derived_public_use:false},roles:{discovery_only:true,physical_existence:false,legal_access:false,routing_network:false,public_reuse:false,jurisdiction_boundaries:false},update:{mechanism:'fixture'},attribution:'synthetic',rate_limits:{requests_per_minute:0}};
 const network={...route,source_id:'synthetic-ui-network',name:'Synthetic network',type:'regional-network',expected_formats:['pbf'],reuse:{private_processing:true,redistribution:true,derived_public_use:false},roles:{discovery_only:false,physical_existence:false,legal_access:false,routing_network:true,public_reuse:true,jurisdiction_boundaries:false}};
@@ -18,6 +18,13 @@ test('operator health distinguishes ready, review, safety RED and fail-closed BL
   assert.equal(deriveOperatorHealth({...clear,factory_coordination:{verified:false,status:'UNVERIFIED',reason:'heartbeat unavailable'}},{active:0},[]),'BLOCKED');
   assert.match(operatorBlockedReason({...clear,planetiler_active:true}),/Planetiler is active/);
   assert.equal(deriveOperatorHealth({...clear,factory_coordination:{verified:false,status:'RED',reason:'corrupt admission state'}},{active:0},[]),'RED');
+});
+
+test('detached Scout jobs inherit the operator notification recipient without passing credential values',()=>{
+  const child=scoutJobEnvironment({PATH:'/usr/bin',SCOUT_NOTIFICATION_EMAIL:'info@roadtrailandtide.com'},{root:'/private/scout',raw:'/private/scout/raw',factoryDir:'/factory'});
+  assert.equal(child.SCOUT_NOTIFICATION_EMAIL,'info@roadtrailandtide.com');assert.equal(child.SCOUT_GEO_ROOT,'/private/scout');
+  assert.equal('SMTP_PASSWORD' in child,false);assert.equal('ZOHO_PASSWORD' in child,false);
+  assert.equal(scoutJobEnvironment({PATH:'/usr/bin'},{root:'/private/scout',raw:'/private/scout/raw',factoryDir:'/factory'}).SCOUT_NOTIFICATION_EMAIL,undefined);
 });
 
 test('desktop operator opens read-only status, lists existing runs and starts no processing on launch',async()=>{

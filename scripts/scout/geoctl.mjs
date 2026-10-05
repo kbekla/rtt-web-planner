@@ -17,6 +17,7 @@ import { SEGMENTATION_VERSION, lengthMeters } from './route-segmenter.mjs';
 import { createRealReviewServer } from './review-real-server.mjs';
 import { prepareRegionPlan, approveRegionPlan, validateRegionPlanForProcess } from './region-operator.mjs';
 import { discoverOsmRun, discoveryStats, registerOsmDiscoverySource } from './osm-discovery.mjs';
+import { buildCorridorRun, corridorRunStats, listCorridorReview, recordCorridorReview } from './osm-topology.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
 scout-geoctl source approve --source-id ID --by NAME --scope TEXT
@@ -33,6 +34,9 @@ scout-geoctl region list
 scout-geoctl discover create --run-id ID --snapshot-id ID --country-code CC --region-id ID [--reference-run-id TET_RUN] --approved-by NAME --approval-scope TEXT
 scout-geoctl discover process|status --run-id ID
 scout-geoctl discover list
+scout-geoctl corridor process|status --run-id ID
+scout-geoctl corridor review list --run-id ID [--state UNREVIEWED|AMBIGUOUS|NEEDS_MORE_EVIDENCE|LOW_VALUE|CATALOGUED|ALL]
+scout-geoctl corridor review decide --corridor-id ID --decision INTERESTING|NEEDS_MORE_EVIDENCE|LOW_VALUE|FALSE_POSITIVE|AMBIGUOUS|HOLD|UNREVIEWED --reviewer NAME --reason TEXT
 scout-geoctl process --run-id ID
 scout-geoctl review list [--run-id ID] [--decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD|ALL]
 scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD --reviewer NAME --reason TEXT
@@ -76,7 +80,9 @@ async function queueReviewNotice(root,runId,count,env){
   const recipient=env.SCOUT_NOTIFICATION_EMAIL;let provider=null;
   if(recipient){try{provider=createZohoSmtpProvider({recipient,subject:'RT&T Scout candidates need review'});}catch{/* persist event with provider unavailable; never block deterministic work */}}
   const center=new NotificationCenter(reviewFile(root),{providers:provider?{EMAIL:provider}:{}});
-  const result=await center.emit({key:`scout-review:${runId}`,severity:'AMBER',channels:['EMAIL'],message:`RT&T Scout needs review. Run ${runId} contains ${count} candidate sections. Source and evidence remain private. Open the private Scout reviewer for this run.`});
+  const key=`scout-review:${runId}`,message=`RT&T Scout needs review. Run ${runId} has ${count} corridor items in the human research queue. Single-source OSM catalog entries remain available in Scout without individual review. Access and routability are unknown unless separately evidenced. Open the private Scout reviewer for this run.`;
+  const replaced=center.replacePending({key,severity:'AMBER',message});
+  const result=replaced.updated?{sent:true,event:(await center.retryPending({key}))[0]}:await center.emit({key,severity:'AMBER',channels:['EMAIL'],message});
   return {queued:true,delivery:result.event?.delivery??{},dedupe_reason:result.reason??null};
 }
 async function processRun(store,root,run,env){
@@ -181,7 +187,8 @@ function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new E
 }
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
-  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify','region','discover'].includes(command)?1:0));
+  const sub=rest[0],operation=command==='corridor'&&sub==='review'?rest[1]:null;
+  const opts=parseGeoCtlArgs(rest.slice(operation?2:['source','network','run','review','notify','region','discover','corridor'].includes(command)?1:0));
   if(command==='region'&&sub==='prepare'){
     const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
     const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),
@@ -217,6 +224,26 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   if(command==='discover'&&sub==='process'){const {root,store}=storeFor(env);try{const result=await processDiscoveryRun(store,root,required(opts,'run_id'),env);console.log(JSON.stringify(result,null,2));return result.status==='BLOCKED'?75:0;}finally{store.close();}}
   if(command==='discover'&&sub==='status'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');console.log(JSON.stringify({...store.getDiscoveryRun(runId),stats:discoveryStats(store,runId)},null,2));}finally{store.close();}return 0;}
   if(command==='discover'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listDiscoveryRuns().map(run=>({...run,stats:discoveryStats(store,run.run_id)})),null,2));}finally{store.close();}return 0;}
+  if(command==='corridor'&&sub==='process'){
+    const {root,store}=storeFor(env),runId=required(opts,'run_id'),factoryDir=hostFactoryDir(env);let admission,grant,owner;
+    try{
+      assertGeoHostAdmission(readHostSnapshot({factoryDir}));admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir));owner=`scout-corridor:${runId}`;
+      grant=admission.acquireScout(owner);if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
+      let interrupted=false;const signal=()=>{interrupted=true;};process.once('SIGTERM',signal);process.once('SIGINT',signal);
+      const yieldCheck=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce}),shouldYield=()=>interrupted||yieldCheck();
+      try{
+        const result=await buildCorridorRun(store,{runId,shouldYield});if(result.status==='BLOCKED'){console.log(JSON.stringify(result,null,2));return 75;}
+        const reviewCount=Number(result.review_queue?.UNREVIEWED??0)+Number(result.review_queue?.AMBIGUOUS??0);
+        const notification=await queueReviewNotice(root,`corridors:${runId}`,reviewCount,env);
+        console.log(JSON.stringify({...result,notification},null,2));return 0;
+      }finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);}
+    }finally{
+      try{store.close();}finally{if(admission&&grant){const released=releaseGeoAdmission(admission,owner,grant,'Scout topology corridor run completed, failed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}}
+    }
+  }
+  if(command==='corridor'&&sub==='status'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getDiscoveryRun(runId))throw new Error('unknown OSM discovery run');console.log(JSON.stringify(corridorRunStats(store,runId),null,2));}finally{store.close();}return 0;}
+  if(command==='corridor'&&sub==='review'&&operation==='list'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');console.log(JSON.stringify(listCorridorReview(store,{runId,state:opts.state??'UNREVIEWED',limit:Number(opts.limit??200)}),null,2));}finally{store.close();}return 0;}
+  if(command==='corridor'&&sub==='review'&&operation==='decide'){const {store}=storeFor(env);try{console.log(JSON.stringify(recordCorridorReview(store,{corridorId:required(opts,'corridor_id'),decision:required(opts,'decision'),reviewer:required(opts,'reviewer'),reason:required(opts,'reason')}),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
   if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}

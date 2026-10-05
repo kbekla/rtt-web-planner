@@ -29,6 +29,10 @@ export function operatorBlockedReason(host){
   if(host.other_heavy_workload_active)return 'Another heavyweight RT&T workload is active; Scout heavy work is blocked.';
   return host.heavy_work_blocked_reason??null;
 }
+export function scoutJobEnvironment(baseEnv, { root, raw, factoryDir, notificationEmail = baseEnv.SCOUT_NOTIFICATION_EMAIL } = {}) {
+  return { ...baseEnv, SCOUT_GEO_ROOT: root, SCOUT_RAW_ROOT: raw, FACTORY_DIR: factoryDir,
+    ...(notificationEmail ? { SCOUT_NOTIFICATION_EMAIL: notificationEmail } : {}) };
+}
 export function deriveOperatorHealth(host,notifications,runs){
   if(host.factory_coordination?.status==='RED')return 'RED';
   if(operatorBlockedReason(host))return 'BLOCKED';
@@ -93,7 +97,7 @@ return {run_id:run.run_id,region:plan?.plan.region_name??run.region_id,country_c
   canonical_status:run.config.canonical_status??'NOT_COMPARED',run_exists:true,approvable:false,processable:['PENDING','BLOCKED','FAILED','RUNNING'].includes(run.status),updated_at:run.updated_at})))
 .sort((a,b)=>b.updated_at.localeCompare(a.updated_at));}
 
-export function createScoutOperatorServer({geoRoot=process.env.SCOUT_GEO_ROOT,rawRoot=process.env.SCOUT_RAW_ROOT,factoryDir=process.env.FACTORY_DIR??path.join(os.homedir(),'rtt-map-factory'),port=DEFAULT_PORT,spawnImpl=spawn,openReviewer=createRealReviewServer,readHost=readHostSnapshot}={}){
+export function createScoutOperatorServer({geoRoot=process.env.SCOUT_GEO_ROOT,rawRoot=process.env.SCOUT_RAW_ROOT,factoryDir=process.env.FACTORY_DIR??path.join(os.homedir(),'rtt-map-factory'),port=DEFAULT_PORT,spawnImpl=spawn,openReviewer=createRealReviewServer,readHost=readHostSnapshot,notificationEmail=process.env.SCOUT_NOTIFICATION_EMAIL}={}){
   if(!geoRoot||!rawRoot)throw new Error('SCOUT_GEO_ROOT and SCOUT_RAW_ROOT must name private Scout directories');
   const root=path.resolve(geoRoot),raw=path.resolve(rawRoot);if(root===REPO||root.startsWith(REPO+path.sep)||raw===REPO||raw.startsWith(REPO+path.sep))throw new Error('Scout operator data must remain outside the code/public tree');
   privateDirectory(root);privateDirectory(raw);const token=crypto.randomBytes(32).toString('hex'),children=new Map(),reviewers=new Map();let closing=false,boundPort=port;
@@ -134,14 +138,14 @@ export function createScoutOperatorServer({geoRoot=process.env.SCOUT_GEO_ROOT,ra
         if(req.url==='/api/region/process'){
           if(!safeId(body.run_id))return json(res,400,{error:'Choose a valid Scout run.'});const store=new ScoutGeoStore(root);try{const p=store.getRegionPlan(body.run_id);if(!p||!p.approved_by)return json(res,409,{error:'This region does not have an explicit Karl approval.'});if(['RUNNING'].includes(p.state)||children.has(body.run_id))return json(res,200,{already_running:true,run_id:body.run_id});}finally{store.close();}
           const logDir=privateDirectory(path.join(root,'operator-logs')),log=fs.openSync(path.join(logDir,`${body.run_id}.log`),fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_APPEND|fs.constants.O_NOFOLLOW,0o600);
-          const child=spawnImpl(process.execPath,[path.join(HERE,'geoctl.mjs'),'region','process','--run-id',body.run_id],{cwd:REPO,env:{...process.env,SCOUT_GEO_ROOT:root,SCOUT_RAW_ROOT:raw,FACTORY_DIR:factoryDir},detached:true,stdio:['ignore',log,log]});fs.closeSync(log);child.once('error',()=>children.delete(body.run_id));child.once('close',()=>children.delete(body.run_id));child.unref();children.set(body.run_id,child);return json(res,202,{started:true,run_id:body.run_id});
+          const child=spawnImpl(process.execPath,[path.join(HERE,'geoctl.mjs'),'region','process','--run-id',body.run_id],{cwd:REPO,env:scoutJobEnvironment(process.env,{root,raw,factoryDir,notificationEmail}),detached:true,stdio:['ignore',log,log]});fs.closeSync(log);child.once('error',()=>children.delete(body.run_id));child.once('close',()=>children.delete(body.run_id));child.unref();children.set(body.run_id,child);return json(res,202,{started:true,run_id:body.run_id});
         }
         if(req.url==='/api/discovery/process'){
           if(!safeId(body.run_id))return json(res,400,{error:'Choose a valid Scout discovery run.'});const store=new ScoutGeoStore(root);try{const run=store.getDiscoveryRun(body.run_id);if(!run)return json(res,409,{error:'Independent discovery run is not registered.'});
             const approval=store.sourceApproval(run.discovery_source_id);if(!approval||approval.approved_by!==run.approved_by||approval.scope!==run.approval_scope)return json(res,409,{error:'Discovery source approval is no longer active; review it before processing.'});
             if(run.status==='RUNNING'||children.has(body.run_id))return json(res,200,{already_running:true,run_id:body.run_id});}finally{store.close();}
           const logDir=privateDirectory(path.join(root,'operator-logs')),log=fs.openSync(path.join(logDir,`${body.run_id}.log`),fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_APPEND|fs.constants.O_NOFOLLOW,0o600);
-          const child=spawnImpl(process.execPath,[path.join(HERE,'geoctl.mjs'),'discover','process','--run-id',body.run_id],{cwd:REPO,env:{...process.env,SCOUT_GEO_ROOT:root,SCOUT_RAW_ROOT:raw,FACTORY_DIR:factoryDir},detached:true,stdio:['ignore',log,log]});fs.closeSync(log);child.once('error',()=>children.delete(body.run_id));child.once('close',()=>children.delete(body.run_id));child.unref();children.set(body.run_id,child);return json(res,202,{started:true,run_id:body.run_id});
+          const child=spawnImpl(process.execPath,[path.join(HERE,'geoctl.mjs'),'discover','process','--run-id',body.run_id],{cwd:REPO,env:scoutJobEnvironment(process.env,{root,raw,factoryDir,notificationEmail}),detached:true,stdio:['ignore',log,log]});fs.closeSync(log);child.once('error',()=>children.delete(body.run_id));child.once('close',()=>children.delete(body.run_id));child.unref();children.set(body.run_id,child);return json(res,202,{started:true,run_id:body.run_id});
         }
         if(req.url==='/api/review/open'){
           if(!safeId(body.run_id))return json(res,400,{error:'Choose a valid Scout run.'});const store=new ScoutGeoStore(root);try{if(!store.getRun(body.run_id)&&!store.getDiscoveryRun(body.run_id))return json(res,409,{error:'Review opens after a run has been created.'});}finally{store.close();}

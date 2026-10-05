@@ -3,14 +3,34 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
-import { createRealReviewServer } from '../../scripts/scout/review-real-server.mjs';
+import { createRealReviewServer, queryRouteHintSupports } from '../../scripts/scout/review-real-server.mjs';
 import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
 
 const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:'synthetic',organisation:'test',expected_formats:['gpx','pbf'],
   coverage:{countries:['BE'],regions:['BE']},jurisdiction_ids:['BE-country'],location:'synthetic fixture',adapter_version:'fixture-v1',licence:{name:'synthetic',version:'1'},
   reuse:{private_processing:true,redistribution:false,derived_public_use:false},roles:{discovery_only:!network,physical_existence:false,legal_access:false,routing_network:network,public_reuse:false,jurisdiction_boundaries:network},
   update:{mechanism:'fixed fixture'},attribution:'synthetic; no external data',rate_limits:{requests_per_minute:0}});
+
+test('private corridor route-hint provenance joins to the registered source file and route observation',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    db.exec(`CREATE TABLE discovery_candidate_matches(candidate_id TEXT,related_id TEXT,relationship TEXT,evidence_json TEXT);
+      CREATE TABLE candidates(candidate_id TEXT,segment_id TEXT);CREATE TABLE route_segments(segment_id TEXT,observation_id TEXT);
+      CREATE TABLE route_observations(observation_id TEXT,file_id INTEGER,source_part TEXT);CREATE TABLE source_files(file_id INTEGER,source_id TEXT,relative_name TEXT,sha256 TEXT,version INTEGER);
+      CREATE TABLE source_registry(source_id TEXT,current_json TEXT);`);
+    db.prepare('INSERT INTO discovery_candidate_matches VALUES(?,?,?,?)').run('osm-candidate','route-candidate','same_osm_network_part_support','{"distance_m":2}');
+    db.prepare('INSERT INTO candidates VALUES(?,?)').run('route-candidate','route-segment');db.prepare('INSERT INTO route_segments VALUES(?,?)').run('route-segment','route-observation');
+    db.prepare('INSERT INTO route_observations VALUES(?,?,?)').run('route-observation',1,'track-1-segment-1');
+    db.prepare('INSERT INTO source_files VALUES(?,?,?,?,?)').run(1,'tet-private-discovery','private.gpx','a'.repeat(64),1);
+    db.prepare('INSERT INTO source_registry VALUES(?,?)').run('tet-private-discovery','{"reuse":{"redistribution":false}}');
+    const [support]=queryRouteHintSupports(db,'osm-candidate');
+    assert.equal(support.source_id,'tet-private-discovery');assert.equal(support.source.reuse.redistribution,false);
+    assert.equal(support.relative_name,'private.gpx');assert.equal(support.source_part,'track-1-segment-1');assert.deepEqual(support.evidence,{distance_m:2});
+    assert.deepEqual(queryRouteHintSupports(db,'unrelated-candidate'),[]);
+  }finally{db.close();}
+});
 
 test('run-configurable Scout reviewer is loopback-only, read-only, and serves an arbitrary private region run',async()=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'scout-real-review-')),root=path.join(base,'be-20000101'),store=new ScoutGeoStore(path.join(root,'state'));
