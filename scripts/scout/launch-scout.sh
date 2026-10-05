@@ -2,7 +2,8 @@
 set -euo pipefail
 
 readonly EXPECTED_REPO="/home/karl/rtt-map-factory/worktrees/codex-scout"
-readonly STATE_ROOT="/home/karl/rtt-map-factory/scout/private/real-source-validation/be-20261004-r02-operator-v22/state"
+readonly STATE_BASE="/home/karl/rtt-map-factory/scout/private/real-source-validation"
+readonly STATE_ROOT="$STATE_BASE/operator-state/state"
 readonly FACTORY_DIR="/home/karl/rtt-map-factory"
 readonly PORT="${SCOUT_OPERATOR_PORT:-8770}"
 readonly URL="http://127.0.0.1:${PORT}/"
@@ -29,6 +30,26 @@ health_ready() {
   last_health_result="$response"
   [[ "$response" == '{"status":"RTT_SCOUT_READY"}' ]]
 }
+operator_current() {
+  local response
+  response="$(curl --silent --connect-timeout 0.5 --max-time 8 "${URL%/}/api/status" 2>/dev/null)" || return 1
+  [[ "$response" == *'"operator_store_registry":true'* ]]
+}
+upgrade_healthy_old_operator() {
+  local page token response
+  page="$(curl --silent --connect-timeout 0.5 --max-time 3 "$URL" 2>/dev/null)" || return 1
+  token="$(sed -n 's/.*<meta name="scout-token" content="\([^"]*\)".*/\1/p' <<<"$page" | head -n 1)"
+  [[ "$token" =~ ^[A-Za-z0-9_-]{32,128}$ ]] || return 1
+  response="$(curl --silent --connect-timeout 0.5 --max-time 3 -X POST \
+    -H "Origin: http://127.0.0.1:${PORT}" -H "x-scout-token: $token" \
+    -H 'Content-Type: application/json' --data '{}' "${URL%/}/api/shutdown" 2>/dev/null)" || return 1
+  [[ "$response" == *'"stopping":true'* ]] || return 1
+  for _ in {1..40}; do
+    if ! health_ready; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
 show_open_failure() {
   local reason="$1"
   log_event browser-failed "url=$URL reason=$reason scout_health=healthy"
@@ -48,8 +69,8 @@ if [[ "$(git -C "$repo" branch --show-current 2>/dev/null || true)" != "codex/sc
   notify_failure "RED — the Scout development installation is not on its expected branch. No service was started."
   exit 2
 fi
-if [[ ! -f "$STATE_ROOT/scout.sqlite" || -L "$STATE_ROOT" || -L "$STATE_ROOT/scout.sqlite" ]]; then
-  notify_failure "RED — the existing private Scout state database is unavailable. No Scout service was started. Ask for the configured Scout state path to be repaired."
+if [[ -L "$STATE_BASE" || ! -d "$STATE_BASE" ]]; then
+  notify_failure "RED — the private Scout state directory is unavailable or unsafe. No Scout service was started."
   exit 2
 fi
 if ! command -v node >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1; then
@@ -59,6 +80,7 @@ fi
 
 export SCOUT_GEO_ROOT="$STATE_ROOT"
 export SCOUT_RAW_ROOT="$STATE_ROOT/raw"
+export SCOUT_STATE_BASE="$STATE_BASE"
 export FACTORY_DIR
 export SCOUT_OPERATOR_PORT="$PORT"
 # The GNOME .desktop launch context is not guaranteed to inherit Karl's
@@ -67,6 +89,7 @@ export SCOUT_OPERATOR_PORT="$PORT"
 export SCOUT_NOTIFICATION_EMAIL="${SCOUT_NOTIFICATION_EMAIL:-info@roadtrailandtide.com}"
 mkdir -p -m 700 "$STATE_ROOT/operator-logs"
 chmod 700 "$STATE_ROOT/operator-logs"
+chmod 700 "$STATE_ROOT"
 log_file="$STATE_ROOT/operator-logs/operator-ui.log"
 lock_file="$STATE_ROOT/operator-logs/operator-ui.lock"
 launcher_log="$STATE_ROOT/operator-logs/launcher.log"
@@ -107,7 +130,28 @@ if ! health_ready; then
   fi
   log_event operator-started "health=RTT_SCOUT_READY wait_seconds<=20"
 else
-  log_event operator-reused "health=RTT_SCOUT_READY"
+  if operator_current; then
+    log_event operator-reused "health=RTT_SCOUT_READY store_registry=current"
+  else
+    log_event operator-upgrade "health=RTT_SCOUT_READY store_registry=old action=graceful_shutdown"
+    if ! upgrade_healthy_old_operator; then
+      notify_failure "AMBER — RT&T Scout is running at $URL, but its operator is an older version and could not be upgraded safely. No duplicate was started. Details: $launcher_log"
+      exit 0
+    fi
+    log_event operator-upgrade-complete "prior_operator=gracefully_stopped"
+    nohup flock -n "$lock_file" node "$repo/scripts/scout/operator-ui.mjs" >>"$log_file" 2>&1 </dev/null &
+    ready=0
+    for _ in {1..40}; do
+      if health_ready; then ready=1; break; fi
+      sleep 0.5
+    done
+    if [[ "$ready" != 1 ]] || ! operator_current; then
+      log_event operator-upgrade-start-failed "health=${last_health_result:0:120} log=$log_file"
+      notify_failure "RED — RT&T Scout could not start the updated operator safely. Existing data and jobs remain on disk. See $launcher_log"
+      exit 2
+    fi
+    log_event operator-upgraded "health=RTT_SCOUT_READY store_registry=current"
+  fi
 fi
 
 open_output="$(mktemp "$STATE_ROOT/operator-logs/browser-open.XXXXXX")"

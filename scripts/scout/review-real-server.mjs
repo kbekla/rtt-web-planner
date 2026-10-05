@@ -23,6 +23,7 @@ function assertNoSymlinkComponents(base,target){
 }
 function lineGeometry(row,coordinates='geometry_json'){return JSON.parse(row[coordinates]);}
 function feature(geometry,properties){return {type:'Feature',geometry,properties};}
+function tableExists(db,name){return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));}
 function escapeHtml(value){return String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');}
 const RELEVANT_OSM_TAGS=['highway','surface','tracktype','smoothness','service','access','motor_vehicle','motorcycle','vehicle','construction','ford','bridge','tunnel','name','ref','lit','width','oneway'];
 function selectedTags(raw){const input=JSON.parse(raw),out={};for(const key of RELEVANT_OSM_TAGS)if(input[key]!=null)out[key]=input[key];return out;}
@@ -43,7 +44,7 @@ export function queryRouteHintSupports(db,candidateId){
 }
 function geometryLength(geometry){const parts=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;return parts.reduce((sum,line)=>sum+line.slice(1).reduce((n,p,i)=>n+lengthMeters(line[i],p),0),0);}
 
-export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE_BASE,databaseFile=null,onError=()=>{}}={}){
+export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE_BASE,databaseFile=null,onError=()=>{},autostart=true}={}){
   if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(runId))throw new Error('review requires one explicit safe Scout run ID');
   const base=path.resolve(privateBase),legacyRoot=path.join(base,runId),dbFile=databaseFile?path.resolve(databaseFile):path.join(legacyRoot,'state/scout.sqlite');
   if(fs.lstatSync(base).isSymbolicLink())throw new Error('private review storage cannot contain symlinks');
@@ -100,23 +101,47 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
         return reply(res,200,fs.readFileSync(real),MIME[path.extname(real)]);
       }
       if(url.pathname==='/api/status'){
-        const counts=db.prepare(`SELECT (SELECT count(*) FROM scout_run_observations WHERE run_id=?) observations,
+        const routeCounts=routeRunId?db.prepare(`SELECT (SELECT count(*) FROM scout_run_observations WHERE run_id=?) observations,
           (SELECT count(*) FROM route_segments s JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version WHERE ro.run_id=? AND ro.status='COMPLETE') segments,
           (SELECT count(*) FROM candidates c JOIN route_segments s USING(segment_id) JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version WHERE ro.run_id=? AND ro.status='COMPLETE') candidates,
           (SELECT count(DISTINCT h.hypothesis_id) FROM corridor_hypotheses h JOIN scout_run_observations ro USING(observation_id)
             WHERE ro.run_id=? AND ro.status='COMPLETE' AND EXISTS(SELECT 1 FROM json_each(h.candidate_ids_json) ids JOIN candidates c ON c.candidate_id=ids.value
-              JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=ro.pipeline_version)) corridor_hypotheses,
-          (SELECT count(*) FROM network_edges WHERE snapshot_id=?) network_edges,
-          (SELECT count(*) FROM discovery_candidates WHERE run_id=?) discovery_candidates,
-          (SELECT count(DISTINCT v.corridor_id) FROM physical_corridor_versions v WHERE v.run_id=?) physical_corridors,
-          (SELECT count(*) FROM corridor_review_queue q JOIN physical_corridor_versions v USING(corridor_version_id) WHERE v.run_id=? AND q.state IN ('UNREVIEWED','AMBIGUOUS','NEEDS_MORE_EVIDENCE')) corridor_review_queue,
-          (SELECT count(DISTINCT m.candidate_id) FROM discovery_candidate_matches m JOIN discovery_candidates d USING(candidate_id) WHERE d.run_id=? AND m.relationship='same_osm_network_part_support') discovery_corroborated`)
-          .get(routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',snapshot.snapshot_id,runId,runId,runId,runId);
+              JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=ro.pipeline_version)) corridor_hypotheses`)
+          .get(routeRunId,routeRunId,routeRunId,routeRunId):{observations:0,segments:0,candidates:0,corridor_hypotheses:0};
+        const networkEdges=Number(db.prepare('SELECT count(*) n FROM network_edges WHERE snapshot_id=?').get(snapshot.snapshot_id).n);
+        const discoveryCandidates=isDiscovery?Number(db.prepare('SELECT count(*) n FROM discovery_candidates WHERE run_id=?').get(runId).n):0;
+        const physicalCorridors=tableExists(db,'physical_corridor_versions')?Number(db.prepare('SELECT count(*) n FROM physical_corridor_versions WHERE run_id=?').get(runId).n):0;
+        // State-index-first keeps this scalar bounded to active review states.
+        const corridorQueue=tableExists(db,'corridor_review_queue')?Number(db.prepare(`SELECT count(*) n FROM corridor_review_queue q INDEXED BY corridor_review_queue_state_idx
+          CROSS JOIN physical_corridor_versions v ON v.corridor_version_id=q.corridor_version_id
+          WHERE q.state IN ('UNREVIEWED','AMBIGUOUS','NEEDS_MORE_EVIDENCE') AND v.run_id=?`).get(runId).n):0;
+        const discoveryCorroborated=isDiscovery?Number(db.prepare(`SELECT count(DISTINCT d.candidate_id) n FROM discovery_candidates d
+          JOIN discovery_candidate_matches m ON m.candidate_id=d.candidate_id WHERE d.run_id=? AND m.relationship='same_osm_network_part_support'`).get(runId).n):0;
+        const counts={...routeCounts,network_edges:networkEdges,discovery_candidates:discoveryCandidates,physical_corridors:physicalCorridors,
+          corridor_review_queue:corridorQueue,discovery_corroborated:discoveryCorroborated};
         return reply(res,200,JSON.stringify({mode:'PRIVATE_SCOUT_REVIEW',bind:'127.0.0.1',public:false,read_only:true,private_data_loaded:true,
           run_id:runId,run_status:run.status,country_code:run.country_code,region_id:run.region_id,title:run.config.title,source_id:source.source_id,
           discovery_run:isDiscovery,reference_run_id:routeRunId,discovery_source_id:discoverySource?.source_id??null,
           network_snapshot_id:snapshot.snapshot_id,network_version:snapshot.version,network_sha256:snapshot.checksum,
           attribution:licence.attribution??network.attribution,licence:licence.name,matched_network_edge_ids:matchedNetworkIds.size,...counts}),MIME['.json']);
+      }
+      if(url.pathname==='/api/review-queue'){
+        if(!isDiscovery||!tableExists(db,'corridor_review_queue'))return reply(res,200,JSON.stringify({state:'UNREVIEWED',count:0,items:[]}),MIME['.json']);
+        const state=url.searchParams.get('state')??'UNREVIEWED',limit=Number(url.searchParams.get('limit')??200);
+        if(!['UNREVIEWED','AMBIGUOUS','NEEDS_MORE_EVIDENCE','LOW_VALUE','CATALOGUED','HOLD'].includes(state)||!Number.isInteger(limit)||limit<1||limit>500)return reply(res,400,'invalid review queue state or limit');
+        // UNREVIEWED/AMBIGUOUS rows are selective; CROSS JOIN preserves the
+        // queue-state-index-first plan and avoids catalog-wide geometry scans.
+        const rows=db.prepare(`SELECT v.corridor_id,v.corridor_version_id,v.classification,v.physical_existence,v.motorcycle_access,v.routability,
+          v.canonical_status,v.identity_state,v.length_m,v.geometry_json,q.state,q.reason_code,q.priority
+          FROM corridor_review_queue q INDEXED BY corridor_review_queue_state_idx
+          CROSS JOIN physical_corridor_versions v ON v.corridor_version_id=q.corridor_version_id
+          WHERE q.state=? AND v.run_id=?
+          ORDER BY CASE q.priority WHEN 'HIGH_VALUE' THEN 0 WHEN 'LEGAL_REVIEW' THEN 1 WHEN 'GEOMETRY_REVIEW' THEN 2 WHEN 'NORMAL_REVIEW' THEN 3 ELSE 4 END,
+            v.length_m DESC,v.corridor_id LIMIT ?`).all(state,runId,limit+1);
+        const items=rows.slice(0,limit).map(row=>feature(JSON.parse(row.geometry_json),{corridor_id:row.corridor_id,corridor_version_id:row.corridor_version_id,
+          classification:row.classification,physical_existence:row.physical_existence,motorcycle_access:row.motorcycle_access,routability:row.routability,
+          canonical_status:row.canonical_status,identity_state:row.identity_state,length_m:row.length_m,review_state:row.state,review_reason:row.reason_code,review_priority:row.priority}));
+        return reply(res,200,JSON.stringify({state,count:items.length,truncated:rows.length>limit,items}),MIME['.json']);
       }
       if(url.pathname==='/api/source-routes'){
         const rows=routeRunId?db.prepare(`SELECT o.observation_id,o.source_part,o.source_name,o.geometry_json,f.version,f.sha256 FROM route_observations o JOIN source_files f USING(file_id)
@@ -261,12 +286,13 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
       return reply(res,404,'not found');
     }catch(error){try{onError(error);}catch{}return reply(res,500,'private reviewer request failed');}
   });
-  server.on('close',()=>db.close());server.listen(port,'127.0.0.1');return server;
+  server.on('close',()=>db.close());if(autostart)server.listen(port,'127.0.0.1');return server;
 }
 
 const HTML=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RT&amp;T Scout • {{RUN_TITLE}}</title>
 <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css"><style>*{box-sizing:border-box}html,body{margin:0;height:100%;font:14px system-ui,sans-serif;color:#17212b}body{display:grid;grid-template-columns:minmax(0,1fr) 360px}#map{height:100%;min-height:420px;background:#e8ecef}.panel{padding:16px;overflow:auto;background:#fff;border-left:1px solid #ccd3d9}.badge{padding:6px 8px;background:#fff0e5;border:1px solid #d98d57;border-radius:4px;font-weight:700;color:#612d0d}.legend{display:grid;gap:6px;margin:14px 0}.legend span{display:flex;align-items:center;gap:8px}.swatch{width:26px;border-top:4px solid}.ROAD{border-color:#555f68}.UNSEALED_ROAD{border-color:#a76c20}.PROBABLE_OFFROAD{border-color:#b82f88;border-top-style:dashed}.OFFROAD_CONFIRMED{border-color:#d33824}.UNKNOWN{border-color:#7c8791;border-top-style:dotted}.source{border-color:#1b6c93;border-top-style:dashed}.network{border-color:#adb9bb;border-top-width:2px}.continuity{border-color:#087f8c;border-top-style:dotted}.discovery{border-color:#d04c18;border-top-style:dashed}label{display:block;margin:8px 0}select{padding:5px;max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}.small{font-size:12px;color:#556}.filters{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px}.filters label{margin:3px 0}.filters select{width:100%}@media(max-width:850px){body{grid-template-columns:1fr;grid-template-rows:55% 45%}.panel{border-left:0;border-top:1px solid #ccd3d9}}</style></head><body>
 <div id="map" aria-label="Private Scout regional review map"></div><aside class="panel"><div class="badge">PRIVATE LOOPBACK REVIEW • APPROVED SOURCE MATERIAL</div><h1>{{RUN_TITLE}}</h1><p class="badge">{{CANONICAL_NOTE}}</p><p id="summary">Loading private validation records…</p>
+<section id="corridor-review-panel"><h2>UNREVIEWED corridor items</h2><p id="review-queue-note" class="small">Loading corridor review queue…</p><ol id="review-queue-list" style="max-height:300px;overflow:auto;padding-left:25px"></ol></section>
 <p>Source-route hints, OSM discoveries and candidate sections are separate layers. Mapped OSM geometry is unverified existence evidence; it does not establish motorcycle access or routability.</p>
 <div class="filters"><label>Physical character <select data-filter="classification"><option value="ALL">All</option><option>ROAD</option><option>UNSEALED_ROAD</option><option>PROBABLE_OFFROAD</option><option>OFFROAD_CONFIRMED</option><option>UNKNOWN</option></select></label>
 <label>Canonical comparison <select data-filter="match"><option value="ALL">All</option><option>EXACT_EXISTING</option><option>LIKELY_EXISTING</option><option>PARTIAL_OVERLAP</option><option>POSSIBLE_PARALLEL</option><option>AMBIGUOUS</option><option>NEW_CANDIDATE</option><option>UNMATCHED</option><option>NOT_COMPARED</option></select></label>
@@ -298,8 +324,10 @@ else if(k==='confidence_band'){if(v==='UNKNOWN')terms.push(['==',['get','confide
 else terms.push(['==',['get',k],v]);}map.setFilter('segments-line',terms.length?['all',...terms]:null);map.setFilter('discovery-line',terms.length?['all',...terms]:null);map.setFilter('corridor-line',terms.length?['all',...terms]:null);}
 const allBounds=(features)=>{let west=180,south=90,east=-180,north=-90;for(const f of features){const walk=x=>{if(Array.isArray(x)&&typeof x[0]==='number'){west=Math.min(west,x[0]);east=Math.max(east,x[0]);south=Math.min(south,x[1]);north=Math.max(north,x[1]);}else if(Array.isArray(x))x.forEach(walk);};walk(f.geometry.coordinates);}return [[west,south],[east,north]];};
 async function refreshSegments(){const note=document.querySelector('#segment-note');try{const data=await fetchJson('/api/segments?bbox='+encodeURIComponent(bbox())+'&limit=2000');segments.setData(data);note.textContent=data.features.length.toLocaleString()+' derived sections in this viewport'+(data.truncated?' • viewport cap reached; zoom in to inspect every section':'');if(window.__scoutReview){window.__scoutReview.counts.segments_loaded=data.features.length;window.__scoutReview.counts.segments_truncated=data.truncated;}}catch{note.textContent='Derived sections unavailable; retry by moving the map.';}}
-const status=await fetchJson('/api/status'),[routesData,canonicalData]=await Promise.all([fetchJson('/api/source-routes'),fetchJson('/api/canonical')]);routes=routesData;segments={type:'FeatureCollection',features:[]};canonical=canonicalData;discoveries={type:'FeatureCollection',features:[]};corridors={type:'FeatureCollection',features:[]};
-document.querySelector('#summary').textContent=status.observations+' private source parts • '+status.segments.toLocaleString()+' derived sections • '+status.candidates+' source-route candidates • '+status.discovery_candidates+' raw OSM way-parts ('+status.discovery_corroborated+' exact TET support links) • '+status.physical_corridors+' stable corridor hypotheses • '+status.corridor_review_queue+' in normal corridor review • '+status.network_edges.toLocaleString()+' OSM network edges. OSM does not establish legal access or routability.';
+const status=await fetchJson('/api/status'),[routesData,canonicalData,reviewQueue]=await Promise.all([fetchJson('/api/source-routes'),fetchJson('/api/canonical'),fetchJson('/api/review-queue?state=UNREVIEWED&limit=200')]);routes=routesData;segments={type:'FeatureCollection',features:[]};canonical=canonicalData;discoveries={type:'FeatureCollection',features:[]};corridors={type:'FeatureCollection',features:[]};
+document.querySelector('#summary').textContent=status.observations+' private source parts • '+status.segments.toLocaleString()+' derived sections • '+status.candidates+' source-route candidates • '+status.discovery_candidates+' raw OSM way-parts ('+status.discovery_corroborated+' exact TET support links) • '+status.physical_corridors+' stable corridor hypotheses • '+status.corridor_review_queue+' in active corridor review • '+status.network_edges.toLocaleString()+' OSM network edges. OSM does not establish legal access or routability.';
+document.querySelector('#review-queue-note').textContent=reviewQueue.count.toLocaleString()+' UNREVIEWED corridor items'+(reviewQueue.truncated?' shown (queue is paged)':'');
+const queueList=document.querySelector('#review-queue-list');for(const item of reviewQueue.items){const li=document.createElement('li'),button=document.createElement('button'),p=item.properties;button.type='button';button.textContent=p.classification+' · '+Math.round(p.length_m)+' m · '+p.corridor_id;button.style.cssText='display:block;width:100%;margin:3px 0;padding:6px;text-align:left;font-size:12px';button.onclick=async()=>{try{const detail=await fetchJson('/api/corridor/'+encodeURIComponent(p.corridor_id));document.querySelector('#inspector').textContent=JSON.stringify({corridor_id:p.corridor_id,queue_state:p.review_state,queue_reason:p.review_reason,...detail.properties},null,2);map.fitBounds(allBounds([item]),{padding:90,maxZoom:14});}catch{document.querySelector('#inspector').textContent='This private corridor item could not be loaded.';}};li.append(button);queueList.append(li);}
 const initialize=()=>{network=source('network', {type:'FeatureCollection',features:[]});source('source-routes',routes);segments=source('segments',segments);source('canonical',canonical);discoveries=source('discoveries',discoveries);corridors=source('corridors',corridors);
 map.addLayer({id:'network-line',source:'network',type:'line',paint:{'line-color':'#84999e','line-width':['interpolate',['linear'],['zoom'],7,0.8,13,2.4],'line-opacity':0.9}});
 map.addLayer({id:'source-routes-line',source:'source-routes',type:'line',paint:{'line-color':'#1b6c93','line-width':2.2,'line-dasharray':[2,2],'line-opacity':0.8}});
