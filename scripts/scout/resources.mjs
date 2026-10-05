@@ -25,7 +25,11 @@ function processCommands() {
   for (const entry of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
     const pid = Number(entry);
     if (exclude.has(pid)) continue;
-    try { list.push({ pid, cmdline: fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replaceAll('\0', ' ').trim() }); } catch { /* process ended */ }
+    try {
+      const cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
+      const comm = fs.readFileSync(`/proc/${entry}/comm`, 'utf8').trim();
+      list.push({ pid, comm, cmdline });
+    } catch { /* process ended */ }
   }
   return list;
 }
@@ -41,7 +45,13 @@ export function readHostSnapshot(options = {}) {
   const unitState = (unit) => { const result=runCommand('systemctl', ['--user', 'is-active', unit]);return result==null?null:result==='active'; };
   const factoryService = unitState('rtt-factory.service');
   const factoryServiceState = factoryService===null?'unavailable':factoryService?'active':'inactive';
-  const planetiler = commands.some((p) => /planetiler|build-region\.mjs/.test(p.cmdline));
+  // Match the executable as well as argv. A parent shell can contain arbitrary
+  // prompt/script text mentioning Planetiler; that must not look like a build.
+  const isPlanetiler = (p) => p.comm
+    ? (/^java(?:\d+)?$/i.test(p.comm) && /planetiler/i.test(p.cmdline))
+      || (/^node(?:js)?$/i.test(p.comm) && /(?:^|\s)(?:[^\s]*\/)?build-region\.mjs(?:\s|$)/.test(p.cmdline))
+    : /java.*planetiler|(?:^|\s)(?:[^\s]*\/)?build-region\.mjs(?:\s|$)/i.test(p.cmdline);
+  const planetiler = commands.some(isPlanetiler);
   const runningJobs = path.join(factoryDir, 'queue', 'running');
   const factoryJob = fs.existsSync(runningJobs) && fs.readdirSync(runningJobs).some((f) => f.endsWith('.json'));
   const ollamaUnit = unitState('rtt-ollama.service');
@@ -60,7 +70,7 @@ export function readHostSnapshot(options = {}) {
   }
   const localAIProcess = commands.some((p) => /ollama\s+runner|llama[-_]server|vllm|llm-worker/i.test(p.cmdline));
   const localAI = localAIProcess || (ollamaService && (ollamaHasLoadedModel === null || ollamaHasLoadedModel));
-  const otherHeavy = commands.filter((p) => /java.*planetiler|check-repro|geometry-match/i.test(p.cmdline))
+  const otherHeavy = commands.filter((p) => isPlanetiler(p) || /check-repro|geometry-match/i.test(p.cmdline))
     .map(({ pid, cmdline }) => ({ pid, kind: /planetiler/i.test(cmdline) ? 'planetiler' : /check-repro/i.test(cmdline) ? 'repro-check' : 'geometry-match' }));
   const otherHeavyActive = otherHeavy.length > 0;
   const leaseFile = path.join(factoryDir, 'state', 'heavy-work.json');

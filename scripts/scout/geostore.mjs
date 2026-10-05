@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 7;
+export const SCOUT_GEOSCHEMA_VERSION = 8;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -139,6 +139,39 @@ export class ScoutGeoStore {
         PRIMARY KEY(run_id,observation_id), FOREIGN KEY(run_id) REFERENCES scout_runs(run_id),
         FOREIGN KEY(observation_id) REFERENCES route_observations(observation_id)
       );
+      CREATE TABLE IF NOT EXISTS discovery_runs (
+        run_id TEXT PRIMARY KEY, discovery_source_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
+        country_code TEXT NOT NULL, region_id TEXT NOT NULL, reference_run_id TEXT,
+        config_json TEXT NOT NULL, approved_by TEXT NOT NULL, approval_scope TEXT NOT NULL, status TEXT NOT NULL, checkpoint_edge_rowid INTEGER NOT NULL DEFAULT 0,
+        edges_examined INTEGER NOT NULL DEFAULT 0, candidates_created INTEGER NOT NULL DEFAULT 0,
+        corroborated_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        last_error TEXT, FOREIGN KEY(discovery_source_id) REFERENCES source_registry(source_id),
+        FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id), FOREIGN KEY(reference_run_id) REFERENCES scout_runs(run_id)
+      );
+      CREATE TABLE IF NOT EXISTS discovery_candidates (
+        candidate_rowid INTEGER PRIMARY KEY, candidate_id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL, source_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
+        edge_id TEXT NOT NULL, part_index INTEGER NOT NULL, classification TEXT NOT NULL,
+        physical_state TEXT NOT NULL, motorcycle_access TEXT NOT NULL, routability TEXT NOT NULL,
+        canonical_status TEXT NOT NULL, access_tag_state TEXT NOT NULL, length_m REAL NOT NULL,
+        geometry_json TEXT NOT NULL, tags_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, UNIQUE(run_id,snapshot_id,edge_id,part_index),
+        FOREIGN KEY(run_id) REFERENCES discovery_runs(run_id), FOREIGN KEY(source_id) REFERENCES source_registry(source_id),
+        FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS discovery_candidates_rtree USING rtree(candidate_rowid,min_lon,max_lon,min_lat,max_lat);
+      CREATE TABLE IF NOT EXISTS discovery_candidate_sources (
+        candidate_id TEXT NOT NULL, source_id TEXT NOT NULL, relationship TEXT NOT NULL,
+        source_reference TEXT NOT NULL, evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(candidate_id,source_id,relationship,source_reference),
+        FOREIGN KEY(candidate_id) REFERENCES discovery_candidates(candidate_id),
+        FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE TABLE IF NOT EXISTS discovery_candidate_matches (
+        candidate_id TEXT NOT NULL, related_type TEXT NOT NULL, related_id TEXT NOT NULL,
+        relationship TEXT NOT NULL, evidence_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(candidate_id,related_type,related_id,relationship),
+        FOREIGN KEY(candidate_id) REFERENCES discovery_candidates(candidate_id)
+      );
       CREATE TABLE IF NOT EXISTS network_artifacts (
         snapshot_id TEXT PRIMARY KEY, provider TEXT NOT NULL, source_url TEXT NOT NULL, local_path TEXT NOT NULL,
         byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, etag TEXT, last_modified TEXT, status TEXT NOT NULL,
@@ -170,7 +203,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4||version===5||version===6)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4||version===5||version===6||version===7)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -206,6 +239,7 @@ export class ScoutGeoStore {
   sourceApproval(sourceId) { return this.db.prepare('SELECT * FROM source_approvals WHERE source_id=? AND revoked_at IS NULL ORDER BY approved_at DESC LIMIT 1').get(sourceId)??null; }
   createRun({run_id,source_id,snapshot_id,country_code,region_id,title,viewport,approved_by,approval_scope}) {
     if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(run_id??''))throw new Error('run ID must be a stable safe identifier');
+    if(this.getDiscoveryRun(run_id))throw new Error('route-processing run ID conflicts with an existing OSM discovery run');
     const source=this.getSource(source_id),snapshot=this.getNetworkSnapshot(snapshot_id);
     if(!source?.reuse?.private_processing||source.roles?.discovery_only!==true)throw new Error('run source must be registered for private discovery processing');
     if(!snapshot||!this.getSource(snapshot.source_id)?.roles?.routing_network)throw new Error('run requires a registered routing-network snapshot');
@@ -236,6 +270,74 @@ export class ScoutGeoStore {
     return {...r,config:JSON.parse(r.config_json),observation_counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))};
   }
   listRuns(){return this.db.prepare('SELECT run_id FROM scout_runs ORDER BY created_at,run_id').all().map(r=>this.getRun(r.run_id));}
+  createDiscoveryRun({run_id,discovery_source_id,snapshot_id,country_code,region_id,reference_run_id=null,title,viewport,approved_by,approval_scope,config={}}) {
+    if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(run_id??''))throw new Error('discovery run ID must be a stable safe identifier');
+    const source=this.getSource(discovery_source_id),snapshot=this.getNetworkSnapshot(snapshot_id);
+    if(!source?.reuse?.private_processing||source.roles?.discovery_only!==true||source.roles?.legal_access===true)throw new Error('discovery source must be registered for private discovery and not legal-access evidence');
+    if(!snapshot||snapshot.source_id!==source.parent_network_source_id||source.bound_snapshot_id&&snapshot_id!==source.bound_snapshot_id)throw new Error('discovery run requires the registered network snapshot named by its discovery source');
+    if(!snapshot.checksum||this.networkEdgeCount(snapshot_id)<1)throw new Error('discovery run requires a checksum-pinned imported network snapshot');
+    if(!/^[A-Z]{2}$/.test(country_code??'')||!source.coverage.countries.includes(country_code)||!snapshot.coverage.countries?.includes(country_code))throw new Error('discovery region is not covered by registered source and snapshot');
+    if(typeof region_id!=='string'||!region_id.trim()||!Array.isArray(viewport)||viewport.length!==4||viewport.some(v=>!Number.isFinite(v)))throw new Error('discovery run requires region ID and four numeric viewport bounds');
+    if(viewport[0]<-180||viewport[2]>180||viewport[1]<-90||viewport[3]>90||viewport[1]>viewport[3])throw new Error('discovery viewport is invalid');
+    if(!approved_by?.trim()||!approval_scope?.trim())throw new Error('discovery run requires explicit operator approval identity and scope');
+    const approval=this.sourceApproval(discovery_source_id);if(!approval||approval.approved_by!==approved_by.trim()||approval.scope!==approval_scope.trim())throw new Error('discovery source needs a matching explicit active operator approval');
+    if(reference_run_id){const reference=this.getRun(reference_run_id);if(!reference||reference.country_code!==country_code||reference.snapshot_id!==snapshot_id)throw new Error('discovery reference run must use this same country and pinned snapshot');}
+    const normalized={title:title??`${region_id} independent Scout discovery`,viewport,canonical_status:'NOT_COMPARED',...config};
+    if(this.getRun(run_id))throw new Error('discovery run ID conflicts with an existing route-processing run');
+    const encoded=json(normalized),prior=this.db.prepare('SELECT * FROM discovery_runs WHERE run_id=?').get(run_id);
+    if(prior){if(prior.discovery_source_id!==discovery_source_id||prior.snapshot_id!==snapshot_id||prior.country_code!==country_code||prior.region_id!==region_id||prior.reference_run_id!==reference_run_id||prior.config_json!==encoded||prior.approved_by!==approved_by.trim()||prior.approval_scope!==approval_scope.trim())throw new Error('discovery run ID already exists with different immutable inputs');return this.getDiscoveryRun(run_id);}
+    const at=new Date().toISOString();this.db.prepare(`INSERT INTO discovery_runs(run_id,discovery_source_id,snapshot_id,country_code,region_id,reference_run_id,config_json,approved_by,approval_scope,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,'PENDING',?,?)`).run(run_id,discovery_source_id,snapshot_id,country_code,region_id,reference_run_id,encoded,approved_by.trim(),approval_scope.trim(),at,at);
+    return this.getDiscoveryRun(run_id);
+  }
+  getDiscoveryRun(runId){const row=this.db.prepare('SELECT * FROM discovery_runs WHERE run_id=?').get(runId);return row?{...row,config:JSON.parse(row.config_json)}:null;}
+  listDiscoveryRuns(){return this.db.prepare('SELECT run_id FROM discovery_runs ORDER BY created_at,run_id').all().map(r=>this.getDiscoveryRun(r.run_id));}
+  updateDiscoveryRun(runId,{status,checkpoint_edge_rowid,edges_examined,candidates_created,corroborated_count,last_error=null}={}){
+    const allowed=['PENDING','RUNNING','COMPLETE','BLOCKED','REVIEW_REQUIRED','FAILED','SUPERSEDED'];if(status&&!allowed.includes(status))throw new Error('invalid discovery run status');
+    for(const n of [checkpoint_edge_rowid,edges_examined,candidates_created,corroborated_count])if(n!==undefined&&(!Number.isSafeInteger(n)||n<0))throw new Error('discovery run checkpoint/counts must be nonnegative integers');
+    const changed=this.db.prepare(`UPDATE discovery_runs SET status=coalesce(?,status),checkpoint_edge_rowid=coalesce(?,checkpoint_edge_rowid),
+      edges_examined=coalesce(?,edges_examined),candidates_created=coalesce(?,candidates_created),corroborated_count=coalesce(?,corroborated_count),
+      last_error=?,updated_at=? WHERE run_id=?`).run(status??null,checkpoint_edge_rowid??null,edges_examined??null,candidates_created??null,corroborated_count??null,last_error,new Date().toISOString(),runId);
+    if(changed.changes!==1)throw new Error(`unknown discovery run '${runId}'`);return this.getDiscoveryRun(runId);
+  }
+  saveDiscoveryCandidateBatch(runId,rows){
+    if(!Array.isArray(rows)||rows.length>1000)throw new Error('discovery candidate batch must contain 0-1000 rows');
+    const run=this.getDiscoveryRun(runId);if(!run)throw new Error(`unknown discovery run '${runId}'`);
+    const insert=this.db.prepare(`INSERT OR IGNORE INTO discovery_candidates(candidate_id,run_id,source_id,snapshot_id,edge_id,part_index,classification,physical_state,motorcycle_access,routability,
+      canonical_status,access_tag_state,length_m,geometry_json,tags_json,provenance_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const rowFor=this.db.prepare('SELECT candidate_rowid FROM discovery_candidates WHERE candidate_id=?');
+    const addBounds=this.db.prepare('INSERT OR IGNORE INTO discovery_candidates_rtree(candidate_rowid,min_lon,max_lon,min_lat,max_lat) VALUES(?,?,?,?,?)');
+    const sourceLink=this.db.prepare('INSERT OR IGNORE INTO discovery_candidate_sources VALUES(?,?,?,?,?,?)');
+    const matchLink=this.db.prepare('INSERT OR IGNORE INTO discovery_candidate_matches VALUES(?,?,?,?,?,?)');
+    const at=new Date().toISOString();this.db.exec('BEGIN IMMEDIATE');let inserted=0;const newlyCorroborated=new Set();
+    try{
+      for(const c of rows){
+        if(!c.candidate_id||c.run_id&&c.run_id!==runId||c.source_id!==run.discovery_source_id||c.snapshot_id!==run.snapshot_id||!c.edge_id||!Number.isSafeInteger(c.part_index)||c.part_index<0||
+          !['ROAD','UNSEALED_ROAD','PROBABLE_OFFROAD','OFFROAD_CONFIRMED','UNKNOWN'].includes(c.classification)||!['unknown','probable'].includes(c.physical_state)||
+          c.motorcycle_access!=='unknown'||c.routability!=='unknown'||c.canonical_status!=='NOT_COMPARED'||!['OSM_TAGS_PRESENT','NO_EXPLICIT_ACCESS_TAG'].includes(c.access_tag_state)||!Number.isFinite(c.length_m)||c.length_m<0)
+          throw new Error('invalid discovery candidate or unsafe access/routability/canonical state');
+        const coordinates=c.geometry?.type==='LineString'?c.geometry.coordinates:null;if(!coordinates||coordinates.length<2||coordinates.some(p=>!Array.isArray(p)||p.length<2||p.some(v=>!Number.isFinite(v))))throw new Error('discovery candidate requires one valid LineString part');
+        const bounds=coordinates.reduce((b,p)=>[Math.min(b[0],p[0]),Math.max(b[1],p[0]),Math.min(b[2],p[1]),Math.max(b[3],p[1])],[Infinity,-Infinity,Infinity,-Infinity]);
+        const result=insert.run(c.candidate_id,runId,c.source_id,c.snapshot_id,c.edge_id,c.part_index,c.classification,c.physical_state,'unknown','unknown','NOT_COMPARED',c.access_tag_state,c.length_m,json(c.geometry),json(c.tags??{}),json(c.provenance??{}),at);if(result.changes)inserted++;
+        const row=rowFor.get(c.candidate_id);if(!row)throw new Error('discovery candidate insert was not recoverable');addBounds.run(row.candidate_rowid,...bounds);
+        for(const s of c.sources??[])sourceLink.run(c.candidate_id,s.source_id,s.relationship,s.source_reference,json(s.evidence??{}),at);
+        for(const m of c.matches??[]){const link=matchLink.run(c.candidate_id,m.related_type,m.related_id,m.relationship,json(m.evidence??{}),at);
+          if(link.changes&&m.relationship==='same_osm_network_part_support')newlyCorroborated.add(c.candidate_id);}
+      }
+      this.db.exec('COMMIT');return {inserted,newly_corroborated:newlyCorroborated.size};
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
+  queryDiscoveryCandidates(runId,bbox,{limit=1000}={}){
+    validateBbox(bbox);if(!Number.isInteger(limit)||limit<1||limit>10000)throw new Error('discovery viewport limit must be 1-10000');
+    const run=this.getDiscoveryRun(runId);if(!run)throw new Error(`unknown discovery run '${runId}'`);
+    const sql=`SELECT c.* FROM discovery_candidates c JOIN discovery_candidates_rtree r USING(candidate_rowid) WHERE c.run_id=? AND r.max_lon>=? AND r.min_lon<=? AND r.max_lat>=? AND r.min_lat<=? ORDER BY c.candidate_id LIMIT ?`;
+    const rows=bbox[0]<=bbox[2]?this.db.prepare(sql).all(runId,bbox[0],bbox[2],bbox[1],bbox[3],limit+1):
+      this.db.prepare(sql).all(runId,bbox[0],180,bbox[1],bbox[3],limit+1).concat(this.db.prepare(sql).all(runId,-180,bbox[2],bbox[1],bbox[3],limit+1));
+    const unique=[...new Map(rows.map(r=>[r.candidate_id,r])).values()].slice(0,limit);
+    return {truncated:rows.length>limit,features:unique.map(r=>({...r,geometry:JSON.parse(r.geometry_json),tags:JSON.parse(r.tags_json),provenance:JSON.parse(r.provenance_json),
+      sources:this.db.prepare('SELECT source_id,relationship,source_reference,evidence_json FROM discovery_candidate_sources WHERE candidate_id=? ORDER BY source_id,relationship').all(r.candidate_id).map(x=>({...x,evidence:JSON.parse(x.evidence_json)})),
+      matches:this.db.prepare('SELECT related_type,related_id,relationship,evidence_json FROM discovery_candidate_matches WHERE candidate_id=? ORDER BY relationship,related_id').all(r.candidate_id).map(x=>({...x,evidence:JSON.parse(x.evidence_json)}))}))};
+  }
   saveRegionPlan(plan){
     if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(plan?.run_id??'')||!plan?.route_source?.source_id||!plan?.network_source?.source_id||!plan?.provider?.snapshot_id)throw new Error('region plan is missing stable source/provider identities');
     for(const permission of ['private_processing','redistribution','derived_public_use'])if(typeof plan.permissions?.[permission]!=='boolean')throw new Error(`region plan must explicitly record ${permission}`);

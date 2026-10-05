@@ -24,7 +24,7 @@ function distancePointSegmentMeters(point, a, b) {
 const lineParts=(geometry)=>geometry?.type==='LineString'?[geometry.coordinates]:geometry?.type==='MultiLineString'?geometry.coordinates:[];
 function validLine(coords) { return Array.isArray(coords)&&coords.length>=2&&coords.every((p)=>Array.isArray(p)&&p.length>=2&&Number.isFinite(p[0])&&Number.isFinite(p[1])&&Math.abs(p[0])<=180&&Math.abs(p[1])<=90); }
 export function lengthMeters(a,b) { const lat=rad((a[1]+b[1])/2);let dlon=b[0]-a[0];while(dlon>180)dlon-=360;while(dlon< -180)dlon+=360;return Math.hypot(dlon*111320*Math.cos(lat),(b[1]-a[1])*110574); }
-function edgeClass(edge) {
+export function classifyNetworkEdge(edge) {
   const t=edge.tags??{}, highway=String(t.highway??'').toLowerCase(), surface=String(t.surface??'').toLowerCase(), tracktype=String(t.tracktype??'').toLowerCase();
   const confirmed=(edge.evidence??[]).some((e)=>e.question==='physical_existence'&&e.outcome==='confirmed'&&e.qualified===true&&e.reference);
   if (confirmed && PATH.has(highway) && (UNSEALED.has(surface)||/^grade[3-5]$/.test(tracktype))) return 'OFFROAD_CONFIRMED';
@@ -46,7 +46,7 @@ function buildNetworkIndex(edges, shouldYield=()=>false) {
   let visited=0;
   for(const edge of edges) {
     if((visited++&255)===0&&shouldYield())throw new ScoutYieldRequested();
-    const classification=edgeClass(edge);
+    const classification=classifyNetworkEdge(edge);
     for(const [partIndex,part] of lineParts(edge.geometry).entries())if(validLine(part))for(let i=1;i<part.length;i++) {
       const segment={edge,classification,partIndex,edge_part_id:`${edge.edge_id}#part:${partIndex}`,a:part[i-1],b:part[i]};
       const x0=Math.floor(Math.min(segment.a[0],segment.b[0])/NETWORK_CELL_DEGREES),x1=Math.floor(Math.max(segment.a[0],segment.b[0])/NETWORK_CELL_DEGREES);

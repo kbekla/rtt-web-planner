@@ -230,6 +230,13 @@ test('host snapshot reuses factory job state and detects loaded Ollama without s
   assert.equal(snapshot.factory_state, 'building'); assert.equal(snapshot.planetiler_active, false);
   assert.equal(snapshot.local_ai_active, true); assert.equal(snapshot.other_heavy_lease, null);
 });
+test('host process detection ignores wrapper command text mentioning Planetiler', () => {
+  const snapshot = readHostSnapshot({ factoryDir: path.join(tmp, 'host-wrapper-text'), sample: () => ({}),
+    commands: [{ pid: 99, comm: 'bash', cmdline: 'bash -c "Planetiler build-region.mjs is mentioned in a test prompt"' }],
+    runCommand: (_bin, args) => args.includes('is-active') ? 'inactive' : null });
+  assert.equal(snapshot.planetiler_active, false);
+  assert.equal(snapshot.factory_state, 'idle');
+});
 test('an active but unloaded Ollama service is distinguished from model work through its read-only API', () => {
   const snapshot = readHostSnapshot({ factoryDir: path.join(tmp, 'ollama-unloaded'), sample: () => ({}), commands: [],
     runCommand: (bin, args) => args.includes('is-active') ? (args.at(-1) === 'rtt-ollama.service' ? 'active' : 'inactive')

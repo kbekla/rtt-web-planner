@@ -16,6 +16,7 @@ import { acquireNetworkSnapshot, importNetworkArtifact, resolveNetworkExtract } 
 import { SEGMENTATION_VERSION, lengthMeters } from './route-segmenter.mjs';
 import { createRealReviewServer } from './review-real-server.mjs';
 import { prepareRegionPlan, approveRegionPlan, validateRegionPlanForProcess } from './region-operator.mjs';
+import { discoverOsmRun, discoveryStats, registerOsmDiscoverySource } from './osm-discovery.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
 scout-geoctl source approve --source-id ID --by NAME --scope TEXT
@@ -29,6 +30,9 @@ scout-geoctl region prepare --route FILE --country-code CC --region NAME --sourc
 scout-geoctl region approve --run-id ID --by NAME --scope TEXT
 scout-geoctl region process|status --run-id ID
 scout-geoctl region list
+scout-geoctl discover create --run-id ID --snapshot-id ID --country-code CC --region-id ID [--reference-run-id TET_RUN] --approved-by NAME --approval-scope TEXT
+scout-geoctl discover process|status --run-id ID
+scout-geoctl discover list
 scout-geoctl process --run-id ID
 scout-geoctl review list [--run-id ID] [--decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD|ALL]
 scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD --reviewer NAME --reason TEXT
@@ -56,6 +60,15 @@ export function assertGeoHostAdmission(host){
   if(temps.some(([v,limit])=>Number.isFinite(v)&&v>=limit))throw new Error('BLOCKED_THERMAL_HOLD');
 }
 function hostFactoryDir(env){return env.FACTORY_DIR??path.join(os.homedir(),'rtt-map-factory');}
+export function jurisdictionViewport(store,source,countryCode){
+  for(const jurisdictionId of source.jurisdiction_ids??[]){const row=store.db.prepare('SELECT * FROM jurisdictions WHERE jurisdiction_id=? AND country_code=?').get(jurisdictionId,countryCode);if(!row)continue;
+    const boundary=JSON.parse(row.boundary_json),coords=boundary.coordinates;let west=180,south=90,east=-180,north=-90;
+    const walk=value=>{if(Array.isArray(value)&&typeof value[0]==='number'){west=Math.min(west,value[0]);east=Math.max(east,value[0]);south=Math.min(south,value[1]);north=Math.max(north,value[1]);}else if(Array.isArray(value))value.forEach(walk);};walk(coords);
+    if(!(west<east&&south<north))continue;const dx=Math.max((east-west)*0.015,0.02),dy=Math.max((north-south)*0.015,0.02);
+    return {viewport:[Math.max(-180,west-dx),Math.max(-90,south-dy),Math.min(180,east+dx),Math.min(90,north+dy)],jurisdiction_id:jurisdictionId,jurisdiction_version:row.version,boundary_source:JSON.parse(row.metadata_json).boundary_source??null};
+  }
+  throw new Error(`REVIEW_REQUIRED: registered ${countryCode} coverage boundary is unavailable; TET route bounds are never used for regional discovery`);
+}
 function assertRunSources(store,run){const source=store.getSource(run.source_id),snapshot=store.getNetworkSnapshot(run.snapshot_id),approval=store.sourceApproval(run.source_id);if(!source||!snapshot)throw new Error('run source or pinned network snapshot is missing');if(source.reuse.private_processing!==true||source.roles.discovery_only!==true)throw new Error('run source is not approved for private discovery use');if(!approval||approval.approved_by!==run.approved_by||approval.scope!==run.approval_scope)throw new Error('run source approval is missing, revoked or differs from this run scope');if(!snapshot.checksum||store.networkEdgeCount(run.snapshot_id)<1)throw new Error('BLOCKED_NETWORK_NOT_IMPORTED: pinned snapshot has no imported network edges');return {source,snapshot};}
 function reviewFile(root){return path.join(root,'notifications','scout-notifications.json');}
 async function queueReviewNotice(root,runId,count,env){
@@ -142,6 +155,21 @@ async function processRegionPlan(store,root,runId,env){
     store.updateRegionPlan(runId,{state,stage:{name:currentStage,status:state==='REVIEW_REQUIRED'?'REVIEW_REQUIRED':state==='BLOCKED'?'BLOCKED':'FAILED'},status_error:error.message});throw error;
   }
 }
+async function processDiscoveryRun(store,root,runId,env){
+  const run=store.getDiscoveryRun(runId);if(!run)throw new Error(`unknown OSM discovery run '${runId}'`);
+  const factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));
+  const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),owner=`scout-discovery:${runId}`,grant=admission.acquireScout(owner);
+  if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
+  let interrupted=false;const signal=()=>{interrupted=true;};process.once('SIGTERM',signal);process.once('SIGINT',signal);
+  const yieldCheck=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce}),shouldYield=()=>interrupted||yieldCheck();
+  try{
+    const result=discoverOsmRun(store,runId,{shouldYield,yieldReason:()=>yieldCheck.reason()});
+    if(result.status==='BLOCKED')return result;
+    const notice=await queueReviewNotice(root,runId,result.candidate_count,env);
+    return {...result,notification:notice};
+  }catch(error){store.updateDiscoveryRun(runId,{status:'FAILED',last_error:error.message});throw error;}
+  finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'OSM discovery completed, failed or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
+}
 function lineLength(geometry){const lines=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;return lines.reduce((sum,line)=>sum+line.slice(1).reduce((n,point,i)=>n+lengthMeters(line[i],point),0),0);}
 function unknownReason(evidence){const rs=[...new Set(evidence.flatMap(e=>e.rule==='interval-network-ambiguity'&&e.reason?[e.reason]:e.rule==='no-network-match-within-threshold'?['no_network_match']:[]))];return rs.length===1?rs[0]:rs.length?'multiple_unknown_reasons':'NONE';}
 function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new Error(`unknown Scout run '${runId}'`);const rows=store.runObservations(runId);let classes={},unknown={},matchStates={},distanceKm={},unknownReasonKm={},lengthBins={lt25:0,lt50:0,lt100:0,lt250:0,lt500:0,lt1000:0};
@@ -153,7 +181,7 @@ function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new E
 }
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
-  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify','region'].includes(command)?1:0));
+  const sub=rest[0],opts=parseGeoCtlArgs(rest.slice(['source','network','run','review','notify','region','discover'].includes(command)?1:0));
   if(command==='region'&&sub==='prepare'){
     const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
     const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),
@@ -169,6 +197,26 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   if(command==='region'&&sub==='status'){const {store}=storeFor(env);try{const plan=store.getRegionPlan(required(opts,'run_id'));if(!plan)throw new Error(`unknown Scout region plan '${opts.run_id}'`);const run=store.getRun(plan.run_id);console.log(JSON.stringify({ ...plan,run:run?runStats(store,run.run_id):null },null,2));}finally{store.close();}return 0;}
   if(command==='region'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRegionPlans().map(p=>({run_id:p.run_id,state:p.state,country_code:p.plan.country_code,region:p.plan.region_name,source_name:p.plan.source_name,network_version:p.plan.provider.version,updated_at:p.updated_at})),null,2));}finally{store.close();}return 0;}
   if(command==='region'&&sub==='review'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getRegionPlan(runId))throw new Error(`unknown Scout region plan '${runId}'`);console.log(JSON.stringify(store.listRunReviewCandidates({runId,decision:opts.decision??'UNREVIEWED'}),null,2));}finally{store.close();}return 0;}
+  if(command==='discover'&&sub==='create'){
+    const {store}=storeFor(env);try{const snapshotId=required(opts,'snapshot_id'),snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot)throw new Error('discovery requires a registered pinned OSM snapshot');
+      const countryCode=required(opts,'country_code').toUpperCase(),sourceInfo=registerOsmDiscoverySource(store,snapshotId),source=sourceInfo.source,regionId=required(opts,'region_id');
+      const approvedBy=required(opts,'approved_by'),approvalScope=required(opts,'approval_scope');let approval=store.sourceApproval(source.source_id);
+      if(approval&&(approval.approved_by!==approvedBy||approval.scope!==approvalScope))throw new Error('discovery source already has a different active approval; revoke/review it explicitly');
+      if(!approval)approval=store.approveSource({source_id:source.source_id,approved_by:approvedBy,scope:approvalScope});
+      const area=jurisdictionViewport(store,source,countryCode),config={title:opts.title??`${regionId} independent OSM discovery`,viewport:area.viewport,
+        discovery_version:'osm-way-discovery-1',jurisdiction:{id:area.jurisdiction_id,version:area.jurisdiction_version,boundary_source:area.boundary_source},
+        source_filter:'registered OSM way parts selected by highway/surface/tracktype/smoothness/service context; excludes ordinary ROAD classifications',canonical_status:'NOT_COMPARED'};
+      const run=store.createDiscoveryRun({run_id:required(opts,'run_id'),discovery_source_id:source.source_id,snapshot_id:snapshotId,country_code:countryCode,region_id:regionId,
+        reference_run_id:opts.reference_run_id??null,title:config.title,viewport:area.viewport,approved_by:approvedBy,approval_scope:approvalScope,config});
+      console.log(JSON.stringify({run_id:run.run_id,status:run.status,source_id:source.source_id,source_revision:source.revision,snapshot_id:snapshotId,snapshot_version:snapshot.version,
+        snapshot_sha256:snapshot.checksum,country_code:countryCode,region_id:regionId,viewport:area.viewport,viewport_source:{jurisdiction_id:area.jurisdiction_id,version:area.jurisdiction_version},
+        reference_run_id:run.reference_run_id,approved_by:approvedBy,approval_scope:approvalScope,redistribution_allowed:source.reuse.redistribution,derived_public_use_allowed:source.reuse.derived_public_use,
+        legal_access_evidence_role:source.roles.legal_access,canonical_status:'NOT_COMPARED'},null,2));
+    }finally{store.close();}return 0;
+  }
+  if(command==='discover'&&sub==='process'){const {root,store}=storeFor(env);try{const result=await processDiscoveryRun(store,root,required(opts,'run_id'),env);console.log(JSON.stringify(result,null,2));return result.status==='BLOCKED'?75:0;}finally{store.close();}}
+  if(command==='discover'&&sub==='status'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');console.log(JSON.stringify({...store.getDiscoveryRun(runId),stats:discoveryStats(store,runId)},null,2));}finally{store.close();}return 0;}
+  if(command==='discover'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listDiscoveryRuns().map(run=>({...run,stats:discoveryStats(store,run.run_id)})),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
   if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}

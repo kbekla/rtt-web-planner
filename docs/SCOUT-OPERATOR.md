@@ -12,6 +12,27 @@ The installed desktop entry calls a stable user wrapper which verifies the expec
 
 The advanced `scout-geoctl` and `npm run scout:geo` interfaces below remain available for diagnostics and administration. They use this same state and pipeline.
 
+## Independent regional discovery
+
+For an already approved and checksum-pinned region network snapshot, `discover create` registers a versioned discovery-adapter source and creates an immutable discovery run. Its spatial extent comes from the registered jurisdiction coverage boundary, never from a supplied GPX route. An optional `--reference-run-id` attaches already processed route candidates for exact OSM way-part corroboration; it does not limit which network features Scout scans.
+
+```sh
+npm run scout:geo -- discover create \
+  --run-id be-osm-discovery-20261005 \
+  --snapshot-id geofabrik-be-261003 \
+  --country-code BE --region-id BE \
+  --reference-run-id be-operator-v22-20261004 \
+  --approved-by Karl \
+  --approval-scope 'Private Belgium OSM mapped-way discovery against this pinned snapshot'
+npm run scout:geo -- discover process --run-id be-osm-discovery-20261005
+npm run scout:geo -- discover status --run-id be-osm-discovery-20261005
+npm run scout:geo -- review serve --run-id be-osm-discovery-20261005
+```
+
+`discover process` scans only the explicitly selected registered snapshot, uses the shared factory admission lease, checkpoints by stable network-row cursor, and can resume after yield/crash. Each candidate is one stable OSM way-part tied to its source snapshot. Eligible types include non-road `track`, suitably tagged `path`/`bridleway`, non-driveway `service`, unsealed `unclassified`, and unusually trail-tagged footways. Ordinary ROAD classifications and lifecycle/construction features are excluded. A way's access tags are retained as context and never set motorcycle access; all discovery candidates start with legal access and routability `unknown`. Mapped geometry gives only `probable` existence pending independent corroboration. No geometry-only snapping, endpoint stitching, canonical `NEW` state, or geometry merge is performed. Repeated processing reuses stable candidate IDs.
+
+When a reference run is supplied, Scout links candidates only when the route candidate's completed v2.2 evidence cites the exact same snapshot OSM way part. This is an auditable cross-source support relationship, not a copied legal verdict. Unlinked OSM candidates remain independent discovery records; without a canonical reference their canonical state is `NOT_COMPARED`, not `NEW`. The reviewer shows route candidates and independent OSM way-part discoveries as distinct layers, with tag/access evidence and source relationships in the inspector. Its discovery endpoint is RTree-bounded to the current viewport and capped at 5,000 records per request.
+
 `scout-geoctl` is the supported private operator boundary for a source batch. It registers explicit source manifests, requires recorded approval before route import or regional network acquisition/import, pins all network material by version and SHA-256, persists resumable processing state, and opens a read-only loopback reviewer for a selected run. It does not scan directories or crawl arbitrary sites.
 
 Set the two private roots in the calling environment. Both must be outside the repository/public tree and must not be symlinks:

@@ -37,18 +37,24 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
   if(!inPrivateTree(storageRoot,base)||fs.realpathSync(base)===fs.realpathSync(REPO))throw new Error('review data must remain in configured private Scout storage');
   const st=fs.statSync(dbFile);if(!st.isFile()||(st.mode&0o077)!==0)throw new Error('private review database must be a regular owner-only file');
   const db=new DatabaseSync(dbFile,{readOnly:true});
-  const runRow=db.prepare('SELECT * FROM scout_runs WHERE run_id=?').get(runId);if(!runRow){db.close();throw new Error(`Scout run '${runId}' is not registered`);}
-  const run={...runRow,config:JSON.parse(runRow.config_json)};
+  const standardRun=db.prepare('SELECT * FROM scout_runs WHERE run_id=?').get(runId),discoveryRow=standardRun?null:db.prepare('SELECT * FROM discovery_runs WHERE run_id=?').get(runId);
+  if(!standardRun&&!discoveryRow){db.close();throw new Error(`Scout run '${runId}' is not registered`);}
+  const isDiscovery=Boolean(discoveryRow),runRow=standardRun??discoveryRow,routeRunId=isDiscovery?discoveryRow.reference_run_id:runId;
+  const run={...runRow,run_id:runId,config:JSON.parse(runRow.config_json)};
   const snapshot=db.prepare('SELECT snapshot_id,source_id,version,checksum,licence_json,coverage_json FROM network_snapshots WHERE snapshot_id=?').get(run.snapshot_id);
   if(!snapshot){db.close();throw new Error('registered run network snapshot is missing');}
-  const sourceRow=db.prepare('SELECT current_json FROM source_registry WHERE source_id=?').get(run.source_id);
-  if(!sourceRow){db.close();throw new Error('approved private route source record is missing');}
+  const referenceRun=routeRunId?db.prepare('SELECT * FROM scout_runs WHERE run_id=?').get(routeRunId):null;
+  const sourceId=isDiscovery?(referenceRun?.source_id??discoveryRow.discovery_source_id):run.source_id;
+  const sourceRow=db.prepare('SELECT current_json FROM source_registry WHERE source_id=?').get(sourceId);
+  if(!sourceRow){db.close();throw new Error('registered private source record is missing');}
+  const discoverySourceRow=isDiscovery?db.prepare('SELECT current_json FROM source_registry WHERE source_id=?').get(discoveryRow.discovery_source_id):null;
+  if(isDiscovery&&!discoverySourceRow){db.close();throw new Error('registered private OSM discovery source record is missing');}
   const networkSource=db.prepare('SELECT current_json FROM source_registry WHERE source_id=?').get(snapshot.source_id);
   if(!networkSource){db.close();throw new Error('registered regional network source is missing');}
-  const source=JSON.parse(sourceRow.current_json),network=JSON.parse(networkSource.current_json),licence=JSON.parse(snapshot.licence_json);
+  const source=JSON.parse(sourceRow.current_json),discoverySource=discoverySourceRow?JSON.parse(discoverySourceRow.current_json):null,network=JSON.parse(networkSource.current_json),licence=JSON.parse(snapshot.licence_json);
   const matchedNetworkIds=new Set();
   for(const row of db.prepare(`SELECT s.evidence_json FROM route_segments s JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version
-    WHERE ro.run_id=? AND ro.status='COMPLETE'`).iterate(runId)){
+    WHERE ro.run_id=? AND ro.status='COMPLETE'`).iterate(routeRunId??'__no_reference_run__')){
     for(const item of JSON.parse(row.evidence_json)){if(item.edge_id)matchedNetworkIds.add(item.edge_id);for(const id of item.edge_ids??[])matchedNetworkIds.add(id);}
   }
   const tagByEdge=new Map(),networkIds=[...matchedNetworkIds];
@@ -57,7 +63,7 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
   for(const row of db.prepare(`SELECT h.hypothesis_id,h.candidate_ids_json,h.connector_segment_ids_json FROM corridor_hypotheses h
     JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? AND ro.status='COMPLETE' AND EXISTS(
       SELECT 1 FROM json_each(h.candidate_ids_json) ids JOIN candidates c ON c.candidate_id=ids.value
-      JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=ro.pipeline_version)`).all(runId)){
+      JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=ro.pipeline_version)`).all(routeRunId??'__no_reference_run__')){
     for(const id of JSON.parse(row.candidate_ids_json))continuityBySubject.set(id,row.hypothesis_id);
     for(const id of JSON.parse(row.connector_segment_ids_json))continuityBySubject.set(id,row.hypothesis_id);
   }
@@ -84,30 +90,53 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
           (SELECT count(DISTINCT h.hypothesis_id) FROM corridor_hypotheses h JOIN scout_run_observations ro USING(observation_id)
             WHERE ro.run_id=? AND ro.status='COMPLETE' AND EXISTS(SELECT 1 FROM json_each(h.candidate_ids_json) ids JOIN candidates c ON c.candidate_id=ids.value
               JOIN route_segments s USING(segment_id) WHERE s.pipeline_version=ro.pipeline_version)) corridor_hypotheses,
-          (SELECT count(*) FROM network_edges WHERE snapshot_id=?) network_edges`)
-          .get(runId,runId,runId,runId,snapshot.snapshot_id);
+          (SELECT count(*) FROM network_edges WHERE snapshot_id=?) network_edges,
+          (SELECT count(*) FROM discovery_candidates WHERE run_id=?) discovery_candidates,
+          (SELECT count(DISTINCT m.candidate_id) FROM discovery_candidate_matches m JOIN discovery_candidates d USING(candidate_id) WHERE d.run_id=? AND m.relationship='same_osm_network_part_support') discovery_corroborated`)
+          .get(routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',routeRunId??'__no_reference_run__',snapshot.snapshot_id,runId,runId);
         return reply(res,200,JSON.stringify({mode:'PRIVATE_SCOUT_REVIEW',bind:'127.0.0.1',public:false,read_only:true,private_data_loaded:true,
           run_id:runId,run_status:run.status,country_code:run.country_code,region_id:run.region_id,title:run.config.title,source_id:source.source_id,
+          discovery_run:isDiscovery,reference_run_id:routeRunId,discovery_source_id:discoverySource?.source_id??null,
           network_snapshot_id:snapshot.snapshot_id,network_version:snapshot.version,network_sha256:snapshot.checksum,
           attribution:licence.attribution??network.attribution,licence:licence.name,matched_network_edge_ids:matchedNetworkIds.size,...counts}),MIME['.json']);
       }
       if(url.pathname==='/api/source-routes'){
-        const rows=db.prepare(`SELECT o.observation_id,o.source_part,o.source_name,o.geometry_json,f.version,f.sha256 FROM route_observations o JOIN source_files f USING(file_id)
-          JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? ORDER BY o.source_part`).all(runId);
+        const rows=routeRunId?db.prepare(`SELECT o.observation_id,o.source_part,o.source_name,o.geometry_json,f.version,f.sha256 FROM route_observations o JOIN source_files f USING(file_id)
+          JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? ORDER BY o.source_part`).all(routeRunId):[];
         const collection={type:'FeatureCollection',features:rows.map(r=>feature(lineGeometry(r),{id:r.observation_id,source_part:r.source_part,source_name:r.source_name,
           source_id:source.source_id,source_file_version:r.version,source_file_sha256:r.sha256,privacy:'private discovery geometry'}))};
         return reply(res,200,JSON.stringify(collection),MIME['.json']);
       }
+      if(url.pathname.startsWith('/api/segment/')){
+        if(!routeRunId)return reply(res,404,'segment not found');
+        const segmentId=decodeURIComponent(url.pathname.slice('/api/segment/'.length));
+        if(!/^[a-z0-9._:-]{1,160}$/i.test(segmentId))return reply(res,404,'segment not found');
+        const r=db.prepare(`SELECT s.segment_id,s.observation_id,s.ordinal,s.component_index,s.classification,s.confidence,s.geometry_json,s.evidence_json,
+          s.jurisdiction_ids_json,o.source_part,o.source_name,c.candidate_id,c.master_match,c.physical_state,c.motorcycle_access,c.routability,c.review_state,c.issues_json,c.matched_rtt_ids_json,c.match_details_json
+          FROM route_segments s JOIN route_observations o USING(observation_id) JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version
+          LEFT JOIN candidates c USING(segment_id) WHERE ro.run_id=? AND ro.status='COMPLETE' AND s.segment_id=?`).get(routeRunId,segmentId);
+        if(!r)return reply(res,404,'segment not found');
+        const geometry=lineGeometry(r),evidence=JSON.parse(r.evidence_json),ids=[...new Set(evidence.flatMap(e=>[...(e.edge_id?[e.edge_id]:[]),...(e.edge_ids??[])]))];
+        const details=JSON.parse(r.match_details_json??'{}'),match=r.master_match==='UNMATCHED'&&details.reason==='canonical master not supplied'?'NOT_COMPARED':r.master_match??'NOT_COMPARED';
+        const decision=db.prepare('SELECT decision,reviewer,reason,decided_at FROM review_decisions WHERE candidate_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1').get(r.candidate_id);
+        const network_matches=ids.map(id=>{const edge=db.prepare('SELECT tags_json FROM network_edges WHERE snapshot_id=? AND edge_id=?').get(snapshot.snapshot_id,id);return {edge_id:id,tags:edge?selectedTags(edge.tags_json):{}};});
+        return reply(res,200,JSON.stringify(feature(geometry,{id:r.segment_id,segment_id:r.segment_id,candidate_id:r.candidate_id,source_observation_id:r.observation_id,
+          source_part:r.source_part,source_track:r.source_name,classification:r.classification,confidence:r.confidence,match,physical_existence:r.physical_state??'unknown',
+          motorcycle_access:r.motorcycle_access??'unknown',routability:r.routability??'unknown',review_state:r.review_state??'AWAITING_EVIDENCE',
+          length_m:Number(geometryLength(geometry).toFixed(2)),review_decision:decision?.decision??'UNREVIEWED',reviewer:decision?.reviewer??null,
+          reviewed_at:decision?.decided_at??null,review_reason:decision?.reason??null,corridor_hypothesis_id:continuityBySubject.get(r.candidate_id??r.segment_id)??null,
+          jurisdiction_ids:JSON.parse(r.jurisdiction_ids_json),matched_rtt_ids:JSON.parse(r.matched_rtt_ids_json??'[]'),issues:JSON.parse(r.issues_json??'[]'),network_matches,evidence})),MIME['.json']);
+      }
       if(url.pathname==='/api/segments'){
         const bounds=bbox(url.searchParams.get('bbox'));if(!bounds)return reply(res,400,'invalid bbox');
-        const [w,s,e,n]=bounds,limit=Number(url.searchParams.get('limit')??10000);if(!Number.isInteger(limit)||limit<1||limit>20000)return reply(res,400,'limit must be 1-20000');
+        const [w,s,e,n]=bounds,limit=Number(url.searchParams.get('limit')??2000);if(!Number.isInteger(limit)||limit<1||limit>20000)return reply(res,400,'limit must be 1-20000');
         const query=db.prepare(`SELECT s.segment_id,s.observation_id,s.ordinal,s.component_index,s.classification,s.confidence,s.geometry_json,s.evidence_json,
           s.jurisdiction_ids_json,s.pipeline_version,o.source_part,o.source_name,c.candidate_id,c.master_match,c.physical_state,c.motorcycle_access,c.routability,c.review_state,c.issues_json,c.matched_rtt_ids_json,c.match_details_json
           FROM route_segments s JOIN route_observations o USING(observation_id) JOIN scout_run_observations ro ON ro.observation_id=s.observation_id AND ro.pipeline_version=s.pipeline_version
           LEFT JOIN candidates c USING(segment_id) JOIN route_segments_rtree r USING(segment_rowid)
           WHERE ro.run_id=? AND ro.status='COMPLETE'
             AND r.max_lon>=? AND r.min_lon<=? AND r.max_lat>=? AND r.min_lat<=? ORDER BY s.segment_id LIMIT ?`);
-        const rows=w<=e?query.all(runId,w,e,s,n,limit+1):query.all(runId,w,180,s,n,limit+1).concat(query.all(runId,-180,e,s,n,limit+1));
+        const rows=routeRunId?(w<=e?query.all(routeRunId,w,e,s,n,limit+1):query.all(routeRunId,w,180,s,n,limit+1).concat(query.all(routeRunId,-180,e,s,n,limit+1))):[];
         const unique=[...new Map(rows.map(r=>[r.segment_id,r])).values()].slice(0,limit);
         const features=unique.map(r=>{
           const geometry=lineGeometry(r),evidence=JSON.parse(r.evidence_json),unknownReasons=[...new Set(evidence.flatMap(e=>e.rule==='interval-network-ambiguity'&&e.reason?[e.reason]:e.rule==='no-network-match-within-threshold'?['no_network_match']:[]))].sort();
@@ -120,14 +149,35 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
             length_m:Number(geometryLength(geometry).toFixed(2)),review_decision:decision?.decision??'UNREVIEWED',reviewer:decision?.reviewer??null,reviewed_at:decision?.decided_at??null,review_reason:decision?.reason??null,
             corridor_hypothesis_id:continuityBySubject.get(r.candidate_id??r.segment_id)??null,
             jurisdiction_ids:JSON.parse(r.jurisdiction_ids_json),matched_rtt_ids:JSON.parse(r.matched_rtt_ids_json??'[]'),issues:JSON.parse(r.issues_json??'[]'),
-            network_matches:ids.map(id=>({edge_id:id,tags:tagByEdge.get(id)??{}})),evidence});
+            network_matches:ids.map(id=>({edge_id:id,tags:tagByEdge.get(id)??{}})),evidence_summary:{rules:[...new Set(evidence.map(e=>e.rule).filter(Boolean))],network_edge_ids:ids}});
         });
         return reply(res,200,JSON.stringify({type:'FeatureCollection',features,truncated:rows.length>limit,read_only:true}),MIME['.json']);
+      }
+      if(url.pathname==='/api/discovery-candidates'){
+        if(!isDiscovery)return reply(res,200,JSON.stringify({type:'FeatureCollection',features:[],truncated:false}),MIME['.json']);
+        const bounds=bbox(url.searchParams.get('bbox'));if(!bounds)return reply(res,400,'invalid bbox');const limit=Number(url.searchParams.get('limit')??1000);
+        if(!Number.isInteger(limit)||limit<1||limit>10000)return reply(res,400,'limit must be 1-10000');const [w,s,e,n]=bounds;
+        const sql=`SELECT d.* FROM discovery_candidates d JOIN discovery_candidates_rtree r USING(candidate_rowid) WHERE d.run_id=? AND r.max_lon>=? AND r.min_lon<=? AND r.max_lat>=? AND r.min_lat<=? ORDER BY d.candidate_id LIMIT ?`;
+        const rows=w<=e?db.prepare(sql).all(runId,w,e,s,n,limit+1):db.prepare(sql).all(runId,w,180,s,n,limit+1).concat(db.prepare(sql).all(runId,-180,e,s,n,limit+1));
+        const unique=[...new Map(rows.map(r=>[r.candidate_id,r])).values()].slice(0,limit),features=unique.map(r=>{
+          const sources=db.prepare('SELECT source_id,relationship,source_reference,evidence_json FROM discovery_candidate_sources WHERE candidate_id=? ORDER BY source_id,relationship').all(r.candidate_id)
+            .map(x=>({source_id:x.source_id,relationship:x.relationship,source_reference:x.source_reference,evidence:JSON.parse(x.evidence_json)}));
+          const matches=db.prepare('SELECT related_type,related_id,relationship,evidence_json FROM discovery_candidate_matches WHERE candidate_id=? ORDER BY relationship,related_id').all(r.candidate_id)
+            .map(x=>({related_type:x.related_type,related_id:x.related_id,relationship:x.relationship,evidence:JSON.parse(x.evidence_json)}));
+          const tags=JSON.parse(r.tags_json),provenance=JSON.parse(r.provenance_json),geometry=JSON.parse(r.geometry_json);
+          return feature(geometry,{candidate_id:r.candidate_id,source_id:r.source_id,origin:'OSM',discovery_source_id:discoverySource.source_id,
+            classification:r.classification,physical_state:r.physical_state,motorcycle_access:r.motorcycle_access,routability:r.routability,canonical_status:r.canonical_status,
+            match:r.canonical_status,review_decision:'UNREVIEWED',unknown_reason:r.classification==='UNKNOWN'?'osm_character_signals_insufficient':'NONE',confidence:null,
+            length_m:r.length_m,access_tag_state:r.access_tag_state,osm_way_id:r.edge_id,osm_part_index:r.part_index,tags,provenance,sources,matches,
+            multi_source_corroborated:matches.length>0,existence_evidence:provenance.existence_basis});
+        });
+        return reply(res,200,JSON.stringify({type:'FeatureCollection',features,truncated:rows.length>limit,source_id:discoverySource.source_id,
+          attribution:licence.attribution??network.attribution,licence:licence.name}),MIME['.json']);
       }
       if(url.pathname==='/api/network'){
         const bounds=bbox(url.searchParams.get('bbox'));if(!bounds)return reply(res,400,'invalid bbox');
         if(Number(url.searchParams.get('zoom')??0)<7)return reply(res,200,JSON.stringify({type:'FeatureCollection',features:[],truncated:false,zoomed_out:true}),MIME['.json']);
-        const limit=Number(url.searchParams.get('limit')??5000);if(!Number.isInteger(limit)||limit<1||limit>5000)return reply(res,400,'limit must be 1-5000');
+        const limit=Number(url.searchParams.get('limit')??1000);if(!Number.isInteger(limit)||limit<1||limit>5000)return reply(res,400,'limit must be 1-5000');
         if(!matchedNetworkIds.size)return reply(res,200,JSON.stringify({type:'FeatureCollection',features:[],truncated:false,attribution:licence.attribution,licence:licence.name}),MIME['.json']);
         const ids=[...matchedNetworkIds].slice(0,30000),placeholders=ids.map(()=>'?').join(','),[w,s,e,n]=bounds;
         const query=db.prepare(`SELECT e.edge_id,e.geometry_json,e.tags_json FROM network_edges e JOIN network_edges_rtree r USING(edge_rowid)
@@ -145,48 +195,52 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
 }
 
 const HTML=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RT&amp;T Scout • {{RUN_TITLE}}</title>
-<link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css"><style>*{box-sizing:border-box}html,body{margin:0;height:100%;font:14px system-ui,sans-serif;color:#17212b}body{display:grid;grid-template-columns:minmax(0,1fr) 360px}#map{height:100%;min-height:420px;background:#e8ecef}.panel{padding:16px;overflow:auto;background:#fff;border-left:1px solid #ccd3d9}.badge{padding:6px 8px;background:#fff0e5;border:1px solid #d98d57;border-radius:4px;font-weight:700;color:#612d0d}.legend{display:grid;gap:6px;margin:14px 0}.legend span{display:flex;align-items:center;gap:8px}.swatch{width:26px;border-top:4px solid}.ROAD{border-color:#555f68}.UNSEALED_ROAD{border-color:#a76c20}.PROBABLE_OFFROAD{border-color:#b82f88;border-top-style:dashed}.OFFROAD_CONFIRMED{border-color:#d33824}.UNKNOWN{border-color:#7c8791;border-top-style:dotted}.source{border-color:#1b6c93;border-top-style:dashed}.network{border-color:#adb9bb;border-top-width:2px}.continuity{border-color:#087f8c;border-top-style:dotted}label{display:block;margin:8px 0}select{padding:5px;max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}.small{font-size:12px;color:#556}.filters{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px}.filters label{margin:3px 0}.filters select{width:100%}@media(max-width:850px){body{grid-template-columns:1fr;grid-template-rows:55% 45%}.panel{border-left:0;border-top:1px solid #ccd3d9}}</style></head><body>
+<link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css"><style>*{box-sizing:border-box}html,body{margin:0;height:100%;font:14px system-ui,sans-serif;color:#17212b}body{display:grid;grid-template-columns:minmax(0,1fr) 360px}#map{height:100%;min-height:420px;background:#e8ecef}.panel{padding:16px;overflow:auto;background:#fff;border-left:1px solid #ccd3d9}.badge{padding:6px 8px;background:#fff0e5;border:1px solid #d98d57;border-radius:4px;font-weight:700;color:#612d0d}.legend{display:grid;gap:6px;margin:14px 0}.legend span{display:flex;align-items:center;gap:8px}.swatch{width:26px;border-top:4px solid}.ROAD{border-color:#555f68}.UNSEALED_ROAD{border-color:#a76c20}.PROBABLE_OFFROAD{border-color:#b82f88;border-top-style:dashed}.OFFROAD_CONFIRMED{border-color:#d33824}.UNKNOWN{border-color:#7c8791;border-top-style:dotted}.source{border-color:#1b6c93;border-top-style:dashed}.network{border-color:#adb9bb;border-top-width:2px}.continuity{border-color:#087f8c;border-top-style:dotted}.discovery{border-color:#d04c18;border-top-style:dashed}label{display:block;margin:8px 0}select{padding:5px;max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px system-ui}.small{font-size:12px;color:#556}.filters{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px}.filters label{margin:3px 0}.filters select{width:100%}@media(max-width:850px){body{grid-template-columns:1fr;grid-template-rows:55% 45%}.panel{border-left:0;border-top:1px solid #ccd3d9}}</style></head><body>
 <div id="map" aria-label="Private Scout regional review map"></div><aside class="panel"><div class="badge">PRIVATE LOOPBACK REVIEW • APPROVED SOURCE MATERIAL</div><h1>{{RUN_TITLE}}</h1><p class="badge">{{CANONICAL_NOTE}}</p><p id="summary">Loading private validation records…</p>
-<p>Complete source routes remain separate from derived segments. Route membership is discovery-only. Motorcycle access and routability are unknown.</p>
+<p>Source-route hints, OSM discoveries and candidate sections are separate layers. Mapped OSM geometry is unverified existence evidence; it does not establish motorcycle access or routability.</p>
 <div class="filters"><label>Physical character <select data-filter="classification"><option value="ALL">All</option><option>ROAD</option><option>UNSEALED_ROAD</option><option>PROBABLE_OFFROAD</option><option>OFFROAD_CONFIRMED</option><option>UNKNOWN</option></select></label>
-<label>Canonical comparison <select data-filter="match"><option value="ALL">All</option><option>EXACT_EXISTING</option><option>LIKELY_EXISTING</option><option>PARTIAL_OVERLAP</option><option>POSSIBLE_PARALLEL</option><option>AMBIGUOUS</option><option>NEW_CANDIDATE</option><option>UNMATCHED</option></select></label>
+<label>Canonical comparison <select data-filter="match"><option value="ALL">All</option><option>EXACT_EXISTING</option><option>LIKELY_EXISTING</option><option>PARTIAL_OVERLAP</option><option>POSSIBLE_PARALLEL</option><option>AMBIGUOUS</option><option>NEW_CANDIDATE</option><option>UNMATCHED</option><option>NOT_COMPARED</option></select></label>
 <label>UNKNOWN reason <select data-filter="unknown_reason"><option value="ALL">All</option><option>no_network_match</option><option>competing_network_classes</option><option>interval_support_uncertain</option><option>network_tags_insufficient</option><option>multiple_unknown_reasons</option><option value="NONE">Not UNKNOWN</option></select></label>
 <label>Candidate length <select data-filter="candidate_length"><option value="ALL">All</option><option value="LT100">Under 100 m</option><option value="100_500">100–500 m</option><option value="500_1000">500–1,000 m</option><option value="GE1000">1,000 m or longer</option></select></label>
 <label>Match-margin score <select data-filter="confidence_band"><option value="ALL">All</option><option value="HIGH">Above 0.5</option><option value="MID">0.1–0.5</option><option value="LOW">0.1 or below</option><option value="UNKNOWN">Unknown score</option></select></label>
 <label>Motorcycle access <select data-filter="motorcycle_access"><option value="ALL">All</option><option>unknown</option><option>confirmed</option><option>prohibited</option><option>contradictory</option></select></label><label>Routability <select data-filter="routability"><option value="ALL">All</option><option>unknown</option><option>yes</option><option>no</option></select></label>
 <label>Operator review <select data-filter="review_decision"><option value="ALL">All</option><option>UNREVIEWED</option><option>ACCEPT_FOR_RESEARCH</option><option>NEEDS_MORE_EVIDENCE</option><option>REJECT_FALSE_POSITIVE</option><option>AMBIGUOUS</option><option>HOLD</option></select></label></div>
-<label><input id="show-source" type="checkbox" checked> Complete private source routes</label><label><input id="show-network" type="checkbox" checked> Regional OSM network matches</label>
-<div class="legend"><strong>Physical character • line style shows source / evidence</strong><span><i class="swatch ROAD"></i>Ordinary road</span><span><i class="swatch UNSEALED_ROAD"></i>Unsealed road</span><span><i class="swatch PROBABLE_OFFROAD"></i>Probable off-road</span><span><i class="swatch OFFROAD_CONFIRMED"></i>Physical existence confirmed by qualified evidence</span><span><i class="swatch UNKNOWN"></i>Unknown / ambiguous</span><span><i class="swatch continuity"></i>Ambiguous connector hypothesis (not merged)</span><span><i class="swatch source"></i>Complete private source route</span><span><i class="swatch network"></i>Matched network way</span></div>
-<p class="small" id="network-note">Matched OSM edges cited by segmentation • © OpenStreetMap contributors • ODbL 1.0</p><h2>Selection</h2><pre id="inspector">Select a route section or network edge.</pre>
+<label><input id="show-source" type="checkbox" checked> Complete private source routes</label><label><input id="show-network" type="checkbox" checked> Regional OSM network evidence</label><label><input id="show-discovery" type="checkbox" checked> Independent OSM discoveries</label>
+<div class="legend"><strong>Physical character • line style shows source / evidence</strong><span><i class="swatch ROAD"></i>Ordinary road</span><span><i class="swatch UNSEALED_ROAD"></i>Unsealed road</span><span><i class="swatch PROBABLE_OFFROAD"></i>Probable off-road</span><span><i class="swatch OFFROAD_CONFIRMED"></i>Physical existence confirmed by qualified evidence</span><span><i class="swatch UNKNOWN"></i>Unknown / ambiguous</span><span><i class="swatch continuity"></i>Ambiguous connector hypothesis (not merged)</span><span><i class="swatch source"></i>Complete private source route</span><span><i class="swatch network"></i>Matched network way</span><span><i class="swatch discovery"></i>Independent OSM way-part discovery</span></div>
+<p class="small" id="segment-note">Derived sections load by viewport (up to 2,000 features at a time).</p><p class="small" id="network-note">Matched OSM edges cited by segmentation • © OpenStreetMap contributors • ODbL 1.0</p><p class="small" id="discovery-note">Independent OSM discoveries load by viewport (up to 1,000 features at a time).</p><h2>Selection</h2><pre id="inspector">Select a route section or network edge.</pre>
 <p class="small">Match-margin score is geometric clearance, not a probability. Access/motorcycle tags are shown as source text only; the physical classifier ignores them and they do not establish RT&amp;T legal access. Network geometry and tags remain source evidence. Muted network lines show cited edges only. Extract coverage outlines are approximate, not legal boundaries. Source routes are private discovery material only and do not prove existence or legal access.</p></aside>
 <script src="/review.js" type="module"></script></body></html>`;
 
 const CLIENT=`import * as maplibregl from '/vendor/maplibre-gl/maplibre-gl.mjs';
 const map=new maplibregl.Map({container:'map',style:{version:8,sources:{},layers:[{id:'background',type:'background',paint:{'background-color':'#e8ecef'}}]},center:{{CENTER}},zoom:{{ZOOM}},attributionControl:false});
 window.__scoutMap=map;map.addControl(new maplibregl.NavigationControl(),'top-right');map.addControl(new maplibregl.AttributionControl({customAttribution:'© OpenStreetMap contributors • ODbL 1.0'}),'bottom-right');
-const colors={ROAD:'#555f68',UNSEALED_ROAD:'#a76c20',PROBABLE_OFFROAD:'#b82f88',OFFROAD_CONFIRMED:'#d33824',UNKNOWN:'#7c8791'};let routes,segments,network,canonical;
-const source=(id,data)=>map.addSource(id,{type:'geojson',data});
+const colors={ROAD:'#555f68',UNSEALED_ROAD:'#a76c20',PROBABLE_OFFROAD:'#b82f88',OFFROAD_CONFIRMED:'#d33824',UNKNOWN:'#7c8791'};let routes,segments,network,canonical,discoveries;
+const source=(id,data)=>{map.addSource(id,{type:'geojson',data});return map.getSource(id);};
 const fetchJson=async(url)=>{const r=await fetch(url);if(!r.ok)throw new Error('private Scout data request failed');return r.json();};
 function bbox(){const b=map.getBounds();return [b.getWest(),b.getSouth(),b.getEast(),b.getNorth()].join(',');}
-async function refreshNetwork(){if(!document.querySelector('#show-network').checked)return;const data=await fetchJson('/api/network?bbox='+encodeURIComponent(bbox())+'&zoom='+map.getZoom().toFixed(1));network.setData(data);document.querySelector('#network-note').textContent='Matched OSM edges cited by segmentation • © OpenStreetMap contributors • ODbL 1.0'+(data.truncated?' • zoom in to see all cited edges at this viewport':'');}
+async function refreshNetwork(){if(!document.querySelector('#show-network').checked)return;const data=await fetchJson('/api/network?bbox='+encodeURIComponent(bbox())+'&zoom='+map.getZoom().toFixed(1)+'&limit=1000');network.setData(data);document.querySelector('#network-note').textContent='Matched OSM edges cited by segmentation • © OpenStreetMap contributors • ODbL 1.0'+(data.truncated?' • viewport cap reached; zoom in to inspect all cited edges':'');}
+async function refreshDiscoveries(){if(!document.querySelector('#show-discovery').checked)return;const note=document.querySelector('#discovery-note');try{const data=await fetchJson('/api/discovery-candidates?bbox='+encodeURIComponent(bbox())+'&limit=1000');discoveries.setData(data);note.textContent=data.features.length.toLocaleString()+' OSM way-parts in this viewport'+(data.truncated?' • viewport cap reached; zoom in to inspect every way-part':'')+' • OSM is not legal-access evidence';if(window.__scoutReview){window.__scoutReview.counts.discovery_candidates=data.features.length;window.__scoutReview.counts.discovery_truncated=data.truncated;}}catch{note.textContent='OSM discovery layer unavailable; retry by moving the map. Private reviewer remains read-only.';}}
 function filters(){const terms=[];for(const el of document.querySelectorAll('[data-filter]')){const k=el.dataset.filter,v=el.value;if(v==='ALL')continue;
 if(k==='candidate_length'){terms.push(['!=',['get','candidate_id'],null]);if(v==='LT100')terms.push(['<',['get','length_m'],100]);if(v==='100_500')terms.push(['all',['>=',['get','length_m'],100],['<',['get','length_m'],500]]);if(v==='500_1000')terms.push(['all',['>=',['get','length_m'],500],['<',['get','length_m'],1000]]);if(v==='GE1000')terms.push(['>=',['get','length_m'],1000]);}
 else if(k==='confidence_band'){if(v==='UNKNOWN')terms.push(['==',['get','confidence'],null]);if(v==='HIGH')terms.push(['>',['get','confidence'],0.5]);if(v==='MID')terms.push(['all',['>=',['get','confidence'],0.1],['<=',['get','confidence'],0.5]]);if(v==='LOW')terms.push(['<=',['get','confidence'],0.1]);}
-else terms.push(['==',['get',k],v]);}map.setFilter('segments-line',terms.length?['all',...terms]:null);}
+else terms.push(['==',['get',k],v]);}map.setFilter('segments-line',terms.length?['all',...terms]:null);map.setFilter('discovery-line',terms.length?['all',...terms]:null);}
 const allBounds=(features)=>{let west=180,south=90,east=-180,north=-90;for(const f of features){const walk=x=>{if(Array.isArray(x)&&typeof x[0]==='number'){west=Math.min(west,x[0]);east=Math.max(east,x[0]);south=Math.min(south,x[1]);north=Math.max(north,x[1]);}else if(Array.isArray(x))x.forEach(walk);};walk(f.geometry.coordinates);}return [[west,south],[east,north]];};
-const status=await fetchJson('/api/status'),[routesData,segmentsData,canonicalData]=await Promise.all([fetchJson('/api/source-routes'),fetchJson('/api/segments?bbox=-180,-90,180,90'),fetchJson('/api/canonical')]);routes=routesData;segments=segmentsData;canonical=canonicalData;
-document.querySelector('#summary').textContent=status.observations+' private source parts • '+status.segments.toLocaleString()+' derived sections • '+status.candidates+' candidate sections • '+status.corridor_hypotheses+' non-destructive continuity hypotheses • '+status.network_edges.toLocaleString()+' OSM network edges.';
-const initialize=()=>{source('network', {type:'FeatureCollection',features:[]});source('source-routes',routes);source('segments',segments);source('canonical',canonical);
+async function refreshSegments(){const note=document.querySelector('#segment-note');try{const data=await fetchJson('/api/segments?bbox='+encodeURIComponent(bbox())+'&limit=2000');segments.setData(data);note.textContent=data.features.length.toLocaleString()+' derived sections in this viewport'+(data.truncated?' • viewport cap reached; zoom in to inspect every section':'');if(window.__scoutReview){window.__scoutReview.counts.segments_loaded=data.features.length;window.__scoutReview.counts.segments_truncated=data.truncated;}}catch{note.textContent='Derived sections unavailable; retry by moving the map.';}}
+const status=await fetchJson('/api/status'),[routesData,canonicalData]=await Promise.all([fetchJson('/api/source-routes'),fetchJson('/api/canonical')]);routes=routesData;segments={type:'FeatureCollection',features:[]};canonical=canonicalData;discoveries={type:'FeatureCollection',features:[]};
+document.querySelector('#summary').textContent=status.observations+' private source parts • '+status.segments.toLocaleString()+' derived sections • '+status.candidates+' source-route candidates • '+status.discovery_candidates+' OSM way-part discoveries ('+status.discovery_corroborated+' supported by route candidates) • '+status.corridor_hypotheses+' non-destructive continuity hypotheses • '+status.network_edges.toLocaleString()+' OSM network edges. OSM route evidence does not establish access or routability.';
+const initialize=()=>{network=source('network', {type:'FeatureCollection',features:[]});source('source-routes',routes);segments=source('segments',segments);source('canonical',canonical);discoveries=source('discoveries',discoveries);
 map.addLayer({id:'network-line',source:'network',type:'line',paint:{'line-color':'#84999e','line-width':['interpolate',['linear'],['zoom'],7,0.8,13,2.4],'line-opacity':0.9}});
 map.addLayer({id:'source-routes-line',source:'source-routes',type:'line',paint:{'line-color':'#1b6c93','line-width':2.2,'line-dasharray':[2,2],'line-opacity':0.8}});
 map.addLayer({id:'segments-line',source:'segments',type:'line',paint:{'line-color':['match',['get','classification'],'ROAD',colors.ROAD,'UNSEALED_ROAD',colors.UNSEALED_ROAD,'PROBABLE_OFFROAD',colors.PROBABLE_OFFROAD,'OFFROAD_CONFIRMED',colors.OFFROAD_CONFIRMED,colors.UNKNOWN],'line-width':['match',['get','classification'],'PROBABLE_OFFROAD',4.4,'OFFROAD_CONFIRMED',4.4,'UNKNOWN',2.5,3],'line-dasharray':['match',['get','classification'],'PROBABLE_OFFROAD',['literal',[2.5,1]],'UNKNOWN',['literal',[0.8,1.8]],['literal',[1,0]]],'line-opacity':0.95}});
 map.addLayer({id:'continuity-hypothesis-line',source:'segments',type:'line',filter:['all',['==',['get','classification'],'UNKNOWN'],['!=',['get','corridor_hypothesis_id'],null]],paint:{'line-color':'#087f8c','line-width':5,'line-dasharray':[0.35,1.1],'line-opacity':0.9}});
 map.addLayer({id:'canonical-line',source:'canonical',type:'line',paint:{'line-color':'#1565c0','line-width':3,'line-dasharray':[2,1]}});
+map.addLayer({id:'discovery-line',source:'discoveries',type:'line',paint:{'line-color':['match',['get','classification'],'PROBABLE_OFFROAD','#d04c18','UNSEALED_ROAD','#b46e10','UNKNOWN','#8c3e9e','#8c3e9e'],'line-width':['interpolate',['linear'],['zoom'],6,1.4,11,3.8],'line-dasharray':[1.3,1.1],'line-opacity':0.92}});
 document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('change',filters));document.querySelector('#show-source').addEventListener('change',e=>map.setLayoutProperty('source-routes-line','visibility',e.target.checked?'visible':'none'));
 document.querySelector('#show-network').addEventListener('change',()=>refreshNetwork().catch(()=>{}));filters();const bounds={{VIEWPORT}};map.fitBounds(bounds,{padding:42,maxZoom:9});
-let timer;map.on('moveend',()=>{clearTimeout(timer);timer=setTimeout(()=>refreshNetwork().catch(()=>{}),180);});refreshNetwork().catch(()=>{});
-const inspector=document.querySelector('#inspector');map.on('click',event=>{const hits=map.queryRenderedFeatures(event.point,{layers:['segments-line','source-routes-line','network-line','canonical-line']});inspector.textContent=hits.length?JSON.stringify({layer:hits[0].layer.id,...hits[0].properties},null,2):'No route section at this point.';});
-window.__scoutReview={ready:true,mode:'PRIVATE_SCOUT_REVIEW',counts:{source_routes:routes.features.length,segments:segments.features.length,candidates:segments.features.filter(f=>f.properties.candidate_id).length,corridor_hypotheses:status.corridor_hypotheses,canonical:canonical.features.length},filterCount:document.querySelectorAll('[data-filter]').length};};
+document.querySelector('#show-discovery').addEventListener('change',e=>map.setLayoutProperty('discovery-line','visibility',e.target.checked?'visible':'none'));
+let timer;map.on('moveend',()=>{clearTimeout(timer);timer=setTimeout(()=>{refreshSegments();refreshNetwork().catch(()=>{});refreshDiscoveries().catch(()=>{});},180);});refreshSegments();refreshNetwork().catch(()=>{});refreshDiscoveries().catch(()=>{});
+const inspector=document.querySelector('#inspector');map.on('click',async event=>{const hits=map.queryRenderedFeatures(event.point,{layers:['discovery-line','segments-line','source-routes-line','network-line','canonical-line']});if(!hits.length){inspector.textContent='No route section at this point.';return;}const hit=hits[0];inspector.textContent=JSON.stringify({layer:hit.layer.id,...hit.properties},null,2);if(hit.layer.id==='segments-line'&&hit.properties.segment_id){try{const detail=await fetchJson('/api/segment/'+encodeURIComponent(hit.properties.segment_id));inspector.textContent=JSON.stringify({layer:hit.layer.id,...detail.properties},null,2);}catch{inspector.textContent+='\\n\\nDetailed private evidence could not be loaded.';}}});
+window.__scoutReview={ready:true,mode:'PRIVATE_SCOUT_REVIEW',counts:{source_routes:routes.features.length,segments_total:status.segments,segments_loaded:0,segments_truncated:false,candidates:status.candidates,discovery_candidates:0,discovery_truncated:false,discovery_corroborated:status.discovery_corroborated,corridor_hypotheses:status.corridor_hypotheses,canonical:canonical.features.length},filterCount:document.querySelectorAll('[data-filter]').length};};
 if(map.isStyleLoaded())initialize();else map.once('load',initialize);`;
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){const runId=process.env.SCOUT_REVIEW_RUN_ID,privateBase=process.env.SCOUT_GEO_ROOT;if(!runId||!privateBase)throw new Error('SCOUT_REVIEW_RUN_ID and SCOUT_GEO_ROOT are required; select an explicit private run');const port=Number(process.env.SCOUT_REVIEW_PORT||8766);if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('SCOUT_REVIEW_PORT must be an unprivileged port');const server=createRealReviewServer({runId,privateBase,databaseFile:path.join(privateBase,'scout.sqlite'),port});server.on('listening',()=>console.log(`private loopback Scout review at http://127.0.0.1:${server.address().port}/`));}

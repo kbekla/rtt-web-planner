@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
 import { createRealReviewServer } from '../../scripts/scout/review-real-server.mjs';
+import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
 
 const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:'synthetic',organisation:'test',expected_formats:['gpx','pbf'],
   coverage:{countries:['BE'],regions:['BE']},jurisdiction_ids:['BE-country'],location:'synthetic fixture',adapter_version:'fixture-v1',licence:{name:'synthetic',version:'1'},
@@ -62,7 +63,11 @@ test('run-configurable Scout reviewer is loopback-only, read-only, and serves an
     const segments=await getJson(`${address}/api/segments?bbox=4.2,50.7,4.4,50.9`);assert.equal(segments.features.length,2);
     assert.equal(segments.features[0].properties.motorcycle_access,'unknown');assert.equal(segments.features[0].properties.routability,'unknown');
     const trail=segments.features.find(f=>f.properties.candidate_id),unknown=segments.features.find(f=>f.properties.classification==='UNKNOWN');
-    assert.equal(trail.properties.length_m>0,true);assert.equal(trail.properties.network_matches[0].tags.surface,'ground');assert.equal(trail.properties.review_decision,'ACCEPT_FOR_RESEARCH');assert.equal(unknown.properties.unknown_reason,'no_network_match');
+    assert.equal(trail.properties.length_m>0,true);assert.equal(trail.properties.evidence_summary.network_edge_ids[0],'osm:way:5');assert.equal('evidence' in trail.properties,false);
+    assert.equal(trail.properties.review_decision,'ACCEPT_FOR_RESEARCH');assert.equal(unknown.properties.unknown_reason,'no_network_match');
+    const detail=await getJson(`${address}/api/segment/${encodeURIComponent(trail.properties.segment_id)}`);
+    assert.equal(detail.properties.network_matches[0].tags.surface,'ground');assert.equal(detail.properties.evidence[0].rule,'nearest-network-edge');
+    assert.equal((await fetch(`${address}/api/segment/../api/status`)).status,404);
     const network=await getJson(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&zoom=10`);assert.equal(network.features[0].properties.highway,'track');
     assert.equal((await fetch(`${address}/api/network?bbox=4.2,50.7,4.4,50.9&limit=5001&zoom=10`)).status,400);
     assert.equal((await fetch(address,{method:'POST'})).status,405);assert.equal((await fetch(`${address}/api/unknown`)).status,404);
@@ -78,4 +83,30 @@ test('real reviewer refuses symlinked source-validation roots',()=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'scout-review-link-')),target=path.join(base,'be-20000101'),link=path.join(base,'be-20000102');
   try{fs.mkdirSync(path.join(target,'state'),{recursive:true});fs.symlinkSync(target,link);assert.throws(()=>createRealReviewServer({runId:'be-20000102',privateBase:base}),/symlink/);}
   finally{fs.rmSync(base,{recursive:true,force:true});}
+});
+
+test('private reviewer can inspect an independent OSM discovery run without serving raw source bytes',async()=>{
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'scout-discovery-review-')),root=path.join(base,'be-discovery'),store=new ScoutGeoStore(path.join(root,'state'));
+  let server;
+  try{
+    store.registerSource(source('osm-network',{network:true}));store.recordNetworkSnapshot({snapshot_id:'osm-discovery-v1',source_id:'osm-network',version:'synthetic Belgium',checksum:'d'.repeat(64),
+      licence:{name:'ODbL 1.0',version:'1.0',attribution:'© OpenStreetMap contributors'},coverage:{countries:['BE']}});
+    const registered=registerOsmDiscoverySource(store,'osm-discovery-v1');store.approveSource({source_id:registered.source.source_id,approved_by:'Fixture',scope:'private OSM discovery'});
+    store.saveNetworkEdge('osm-discovery-v1',{edge_id:'w-555',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',tracktype:'grade3',motorcycle:'no'}});
+    store.createDiscoveryRun({run_id:'be-osm-discovery',discovery_source_id:registered.source.source_id,snapshot_id:'osm-discovery-v1',country_code:'BE',region_id:'BE',
+      title:'Belgium independent OSM discovery',viewport:[2,49,7,52],approved_by:'Fixture',approval_scope:'private OSM discovery'});
+    store.saveDiscoveryCandidateBatch('be-osm-discovery',[{candidate_id:'odc-fixture',source_id:registered.source.source_id,snapshot_id:'osm-discovery-v1',edge_id:'w-555',part_index:0,
+      classification:'PROBABLE_OFFROAD',physical_state:'probable',motorcycle_access:'unknown',routability:'unknown',canonical_status:'NOT_COMPARED',access_tag_state:'OSM_TAGS_PRESENT',length_m:100,
+      geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',tracktype:'grade3',motorcycle:'no'},
+      provenance:{existence_basis:'OSM mapped geometry only; unverified'},sources:[{source_id:registered.source.source_id,relationship:'origin',source_reference:'w-555#part:0',evidence:{}}]}]);
+    store.close();server=createRealReviewServer({runId:'be-osm-discovery',privateBase:base,databaseFile:path.join(root,'state','scout.sqlite')});await new Promise(resolve=>server.once('listening',resolve));
+    const address=`http://127.0.0.1:${server.address().port}`;const html=await (await fetch(address)).text();assert.match(html,/Independent OSM discoveries/);assert.match(html,/Mapped OSM geometry is unverified/);
+    const status=await (await fetch(`${address}/api/status`)).json();assert.equal(status.discovery_run,true);assert.equal(status.discovery_candidates,1);assert.equal(status.discovery_corroborated,0);
+    const features=await (await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.7,4.4,50.9`)).json();assert.equal(features.features.length,1);
+    const item=features.features[0];assert.equal(item.properties.origin,'OSM');assert.equal(item.properties.motorcycle_access,'unknown');assert.equal(item.properties.routability,'unknown');
+    assert.equal(item.properties.canonical_status,'NOT_COMPARED');assert.equal(item.properties.tags.motorcycle,'no');assert.equal(item.properties.sources[0].source_id,registered.source.source_id);
+    assert.equal((await (await fetch(`${address}/api/source-routes`)).json()).features.length,0);assert.equal((await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.9,4.4,50.7`)).status,400);
+    const client=await (await fetch(`${address}/review.js`)).text();assert.match(client,/discovery-line/);assert.match(client,/refreshDiscoveries/);assert.match(client,/refreshSegments/);
+    assert.match(client,/return map\.getSource\(id\)/);assert.match(client,/segments=source\('segments'/);assert.match(client,/discoveries=source\('discoveries'/);
+  }finally{if(server)await new Promise(resolve=>server.close(resolve));try{store.close();}catch{}fs.rmSync(base,{recursive:true,force:true});}
 });
