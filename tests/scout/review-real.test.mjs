@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
 import { createRealReviewServer, queryRouteHintSupports } from '../../scripts/scout/review-real-server.mjs';
 import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
+import { spwRoadSourceDefinition } from '../../scripts/scout/spw-network.mjs';
 
 const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:'synthetic',organisation:'test',expected_formats:['gpx','pbf'],
   coverage:{countries:['BE'],regions:['BE']},jurisdiction_ids:['BE-country'],location:'synthetic fixture',adapter_version:'fixture-v1',licence:{name:'synthetic',version:'1'},
@@ -119,12 +120,27 @@ test('private reviewer can inspect an independent OSM discovery run without serv
       classification:'PROBABLE_OFFROAD',physical_state:'probable',motorcycle_access:'unknown',routability:'unknown',canonical_status:'NOT_COMPARED',access_tag_state:'OSM_TAGS_PRESENT',length_m:100,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]},tags:{highway:'track',tracktype:'grade3',motorcycle:'no'},
       provenance:{existence_basis:'OSM mapped geometry only; unverified'},sources:[{source_id:registered.source.source_id,relationship:'origin',source_reference:'w-555#part:0',evidence:{}}]}]);
+    const external=spwRoadSourceDefinition();store.registerSource(external);
+    const corridorId=`corr-${'a'.repeat(32)}`,corridorVersion='cv-spw-review-fixture';
+    store.db.prepare("INSERT INTO physical_corridors(corridor_id,identity_scheme,created_at,last_seen_at) VALUES(?,'fixture','2026-10-05','2026-10-05')").run(corridorId);
+    store.db.prepare(`INSERT INTO physical_corridor_versions(corridor_version_id,corridor_id,run_id,snapshot_id,algorithm_version,classification,physical_existence,motorcycle_access,routability,canonical_status,review_priority,length_m,node_sequence_hash,node_sequence_json,identity_state,geometry_json,evidence_json,created_at)
+      VALUES(?,?, 'be-osm-discovery','osm-discovery-v1','fixture','PROBABLE_OFFROAD','probable','unknown','unknown','NOT_COMPARED','CATALOG_ONLY',700,?,'[]','TOPOLOGY_BACKED',?,'{}','2026-10-05')`).run(corridorVersion,corridorId,'c'.repeat(64),JSON.stringify({type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]}));
+    store.db.prepare(`INSERT INTO physical_corridor_observations(corridor_version_id,candidate_id,relation) VALUES(?,'odc-fixture','OSM_WAY_PART_OBSERVATION')`).run(corridorVersion);
+    store.db.prepare(`INSERT INTO external_corridor_evidence(evidence_id,corridor_version_id,corridor_id,source_id,source_version,source_sha256,source_feature_id,relationship,geometry_json,attributes_json,evidence_json,retrieved_at)
+      VALUES('xev-review-fixture',?,?,?,'3.3.0',?,'spw:national_roads:55','PARALLEL',?,'{"route_number":"N90"}',?,'2026-10-05T12:00:00Z')`).run(corridorVersion,corridorId,external.source_id,'d'.repeat(64),
+        JSON.stringify({type:'LineString',coordinates:[[4.3001,50.8],[4.3101,50.81]]}),JSON.stringify({evidence_role:['PHYSICAL_EXISTENCE','NETWORK_IDENTITY'],identity_basis:['reciprocal line support'],motorcycle_access_effect:'NONE',routability_effect:'NONE'}));
     store.close();server=createRealReviewServer({runId:'be-osm-discovery',privateBase:base,databaseFile:path.join(root,'state','scout.sqlite')});await new Promise(resolve=>server.once('listening',resolve));
     const address=`http://127.0.0.1:${server.address().port}`;const html=await (await fetch(address)).text();assert.match(html,/Independent OSM discoveries/);assert.match(html,/Mapped OSM geometry is unverified/);
     const status=await (await fetch(`${address}/api/status`)).json();assert.equal(status.discovery_run,true);assert.equal(status.discovery_candidates,1);assert.equal(status.discovery_corroborated,0);
     const features=await (await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.7,4.4,50.9`)).json();assert.equal(features.features.length,1);
     const item=features.features[0];assert.equal(item.properties.origin,'OSM');assert.equal(item.properties.motorcycle_access,'unknown');assert.equal(item.properties.routability,'unknown');
     assert.equal(item.properties.canonical_status,'NOT_COMPARED');assert.equal(item.properties.tags.motorcycle,'no');assert.equal(item.properties.sources[0].source_id,registered.source.source_id);
+    const corridor=await (await fetch(`${address}/api/corridor/${corridorId}`)).json();
+    assert.equal(corridor.properties.external_network_evidence[0].source_id,external.source_id);
+    assert.equal(corridor.properties.external_network_evidence[0].relationship,'PARALLEL');
+    assert.equal(corridor.properties.external_network_evidence[0].source_sha256,'d'.repeat(64));
+    assert.equal(corridor.properties.external_network_evidence[0].attributes.route_number,'N90');
+    assert.equal(corridor.properties.motorcycle_access,'unknown');assert.equal(corridor.properties.routability,'unknown');
     assert.equal((await (await fetch(`${address}/api/source-routes`)).json()).features.length,0);assert.equal((await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.9,4.4,50.7`)).status,400);
     const client=await (await fetch(`${address}/review.js`)).text();assert.match(client,/discovery-line/);assert.match(client,/refreshDiscoveries/);assert.match(client,/refreshSegments/);
     assert.match(client,/return map\.getSource\(id\)/);assert.match(client,/segments=source\('segments'/);assert.match(client,/discoveries=source\('discoveries'/);

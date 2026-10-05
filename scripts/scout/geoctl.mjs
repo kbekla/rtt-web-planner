@@ -18,8 +18,11 @@ import { createRealReviewServer } from './review-real-server.mjs';
 import { prepareRegionPlan, approveRegionPlan, validateRegionPlanForProcess } from './region-operator.mjs';
 import { discoverOsmRun, discoveryStats, registerOsmDiscoverySource } from './osm-discovery.mjs';
 import { buildCorridorRun, corridorRunStats, listCorridorReview, recordCorridorReview } from './osm-topology.mjs';
+import { spwRoadSourceDefinition } from './spw-network.mjs';
+import { pollSpwServiceMetadata } from './spw-watchkeeper.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
+scout-geoctl source register-spw
 scout-geoctl source approve --source-id ID --by NAME --scope TEXT
 scout-geoctl import --source-id ID --file FILE [--name RELATIVE_NAME] [--language BCP47]
 scout-geoctl network acquire --source-id ID --snapshot-id ID
@@ -42,6 +45,7 @@ scout-geoctl review list [--run-id ID] [--decision UNREVIEWED|ACCEPT_FOR_RESEARC
 scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RESEARCH|NEEDS_MORE_EVIDENCE|REJECT_FALSE_POSITIVE|AMBIGUOUS|HOLD --reviewer NAME --reason TEXT
 scout-geoctl review serve --run-id ID [--port PORT]
 scout-geoctl notify retry
+scout-geoctl watchkeeper spw-poll
 scout-geoctl status`;
 export function parseGeoCtlArgs(args){const out={};for(let i=0;i<args.length;i++){if(!args[i].startsWith('--'))throw new Error(`unexpected argument '${args[i]}'`);const token=args[i].slice(2),equals=token.indexOf('='),key=(equals<0?token:token.slice(0,equals)).replaceAll('-','_');if(!key||out[key]!==undefined)throw new Error(`duplicate or invalid option '${args[i]}'`);if(equals>=0){out[key]=token.slice(equals+1);continue;}if(args[i+1]?.startsWith('--'))out[key]=true;else if(args[i+1]===undefined)out[key]=true;else out[key]=args[++i];}return out;}
 function required(opts,key){if(typeof opts[key]!=='string'||!opts[key])throw new Error(`--${key.replaceAll('_','-')} is required`);return opts[key];}
@@ -188,7 +192,7 @@ function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new E
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
   const sub=rest[0],operation=command==='corridor'&&sub==='review'?rest[1]:null;
-  const opts=parseGeoCtlArgs(rest.slice(operation?2:['source','network','run','review','notify','region','discover','corridor'].includes(command)?1:0));
+  const opts=parseGeoCtlArgs(rest.slice(operation?2:['source','network','run','review','notify','watchkeeper','region','discover','corridor'].includes(command)?1:0));
   if(command==='region'&&sub==='prepare'){
     const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
     const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),
@@ -245,7 +249,9 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   if(command==='corridor'&&sub==='review'&&operation==='list'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');console.log(JSON.stringify(listCorridorReview(store,{runId,state:opts.state??'UNREVIEWED',limit:Number(opts.limit??200)}),null,2));}finally{store.close();}return 0;}
   if(command==='corridor'&&sub==='review'&&operation==='decide'){const {store}=storeFor(env);try{console.log(JSON.stringify(recordCorridorReview(store,{corridorId:required(opts,'corridor_id'),decision:required(opts,'decision'),reviewer:required(opts,'reviewer'),reason:required(opts,'reason')}),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
+  if(command==='source'&&sub==='register-spw'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(spwRoadSourceDefinition()),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
+  if(command==='watchkeeper'&&sub==='spw-poll'){const {store}=storeFor(env);try{const result=await pollSpwServiceMetadata(store);console.log(JSON.stringify(result,null,2));return ['AMBER','RED'].includes(result.state)?75:0;}finally{store.close();}}
   if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}
   if(command==='network'&&sub==='status'){const {store}=storeFor(env);try{const describe=snapshot=>{const edge_count=store.networkEdgeCount(snapshot.snapshot_id),artifact=store.getNetworkArtifact(snapshot.snapshot_id),import_checkpoint=store.networkImportCheckpoint(snapshot.snapshot_id);return {...snapshot,edge_count,artifact,import_checkpoint,operator_state:import_checkpoint?.status??(edge_count?'EDGES_PRESENT_LEGACY_CHECKPOINT':'PINNED_NOT_IMPORTED')};};const rows=opts.snapshot_id?[store.getNetworkSnapshot(opts.snapshot_id)].filter(Boolean).map(describe):store.listSources().filter(s=>s.roles.routing_network).flatMap(source=>{
     const registered=store.db.prepare('SELECT snapshot_id FROM network_snapshots WHERE source_id=? ORDER BY imported_at DESC').all(source.source_id).map(r=>store.getNetworkSnapshot(r.snapshot_id));

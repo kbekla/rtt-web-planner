@@ -231,11 +231,17 @@ export function createRealReviewServer({runId,port=0,privateBase=DEFAULT_PRIVATE
           WHERE from_version_id=? OR to_version_id=? ORDER BY created_at DESC`).all(row.corridor_version_id,row.corridor_version_id)
           .map(item=>({...item,evidence:JSON.parse(item.evidence_json)}));
         const community=db.prepare(`SELECT count(DISTINCT independence_group) independent_claims,count(*) records FROM community_claims WHERE corridor_id=?`).get(id);
+        const hasExternalEvidence=Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_corridor_evidence'").get());
+        const externalNetworkEvidence=hasExternalEvidence?db.prepare(`SELECT source_id,source_version,source_sha256,source_feature_id,relationship,geometry_json,attributes_json,evidence_json,retrieved_at
+          FROM external_corridor_evidence WHERE corridor_id=? ORDER BY retrieved_at DESC,source_id,source_feature_id`).all(id).map(item=>({
+            source_id:item.source_id,source_version:item.source_version,source_sha256:item.source_sha256,source_feature_id:item.source_feature_id,relationship:item.relationship,
+            geometry:JSON.parse(item.geometry_json),attributes:JSON.parse(item.attributes_json),evidence:JSON.parse(item.evidence_json),retrieved_at:item.retrieved_at,
+          })):[];
         const latest=db.prepare('SELECT decision,reviewer,reason,decided_at FROM corridor_review_decisions WHERE corridor_id=? ORDER BY decided_at DESC LIMIT 1').get(id)??null;
         return reply(res,200,JSON.stringify({type:'Feature',id,geometry:JSON.parse(row.geometry_json),properties:{corridor_id:id,corridor_version_id:row.corridor_version_id,
           classification:row.classification,physical_existence:row.physical_existence,motorcycle_access:row.motorcycle_access,routability:row.routability,
           canonical_status:row.canonical_status,identity_state:row.identity_state,review_priority:row.queue_priority??row.review_priority,review_state:row.review_state??'CATALOGUED',review_reason:row.review_reason??null,length_m:row.length_m,
-          observation_count:parts.length,observations:parts,lineage,legal_status:legal,legal_access_evaluation:assessment.access,community_evidence:{independent_claims:Number(community.independent_claims??0),records:Number(community.records??0)},review:latest,evidence:JSON.parse(row.evidence_json),
+          observation_count:parts.length,observations:parts,lineage,legal_status:legal,legal_access_evaluation:assessment.access,community_evidence:{independent_claims:Number(community.independent_claims??0),records:Number(community.records??0)},external_network_evidence:externalNetworkEvidence,review:latest,evidence:JSON.parse(row.evidence_json),
           operational_state:assessment.operational_state,route_eligible:assessment.operational_state==='ROUTABLE'}}),MIME['.json']);
       }
       if(url.pathname==='/api/network'){

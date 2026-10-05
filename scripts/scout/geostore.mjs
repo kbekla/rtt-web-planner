@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 9;
+export const SCOUT_GEOSCHEMA_VERSION = 10;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -223,6 +223,15 @@ export class ScoutGeoStore {
         FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id),
         FOREIGN KEY(corridor_version_id) REFERENCES physical_corridor_versions(corridor_version_id)
       );
+      CREATE TABLE IF NOT EXISTS external_corridor_evidence (
+        evidence_id TEXT PRIMARY KEY, corridor_version_id TEXT NOT NULL, corridor_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        source_version TEXT NOT NULL, source_sha256 TEXT NOT NULL, source_feature_id TEXT NOT NULL, relationship TEXT NOT NULL,
+        geometry_json TEXT NOT NULL, attributes_json TEXT NOT NULL, evidence_json TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+        UNIQUE(corridor_version_id,source_id,source_version,source_sha256,source_feature_id),
+        FOREIGN KEY(corridor_version_id) REFERENCES physical_corridor_versions(corridor_version_id),
+        FOREIGN KEY(corridor_id) REFERENCES physical_corridors(corridor_id), FOREIGN KEY(source_id) REFERENCES source_registry(source_id)
+      );
+      CREATE INDEX IF NOT EXISTS external_corridor_evidence_corridor_idx ON external_corridor_evidence(corridor_id,retrieved_at);
       CREATE TABLE IF NOT EXISTS corridor_review_queue (
         corridor_version_id TEXT PRIMARY KEY, corridor_id TEXT NOT NULL, state TEXT NOT NULL,
         reason_code TEXT NOT NULL, priority TEXT NOT NULL, ranking_json TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -303,7 +312,7 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4||version===5||version===6||version===7||version===8)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===2||version===3||version===4||version===5||version===6||version===7||version===8||version===9)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -784,7 +793,7 @@ export function validateSourceDefinition(source) {
   if (!Array.isArray(source.expected_formats) || !source.expected_formats.length) throw new Error('source expected_formats must be a non-empty array');
   if (!Array.isArray(source.coverage.countries) || !Array.isArray(source.coverage.regions) || !Array.isArray(source.jurisdiction_ids)) throw new Error('source coverage must list countries, regions and jurisdictions');
   for (const role of ['discovery_only','physical_existence','legal_access','routing_network','public_reuse','jurisdiction_boundaries']) if (typeof source.roles[role] !== 'boolean') throw new Error(`source role '${role}' must be explicit`);
-  const claimRoles = new Set(['DISCOVERY_HINT','PHYSICAL_EXISTENCE','PHYSICAL_CHARACTER','LEGAL_ACCESS','TEMPORARY_RESTRICTION','PERMANENT_RESTRICTION','ROUTING_NETWORK','SURFACE','CLOSURE','CORROBORATION']);
+  const claimRoles = new Set(['DISCOVERY_HINT','PHYSICAL_EXISTENCE','PHYSICAL_CHARACTER','NETWORK_IDENTITY','NETWORK_CONTEXT','LEGAL_ACCESS','TEMPORARY_RESTRICTION','PERMANENT_RESTRICTION','ROUTING_NETWORK','SURFACE','CLOSURE','CORROBORATION']);
   if (source.evidence_roles !== undefined && (!Array.isArray(source.evidence_roles) || source.evidence_roles.some(role => !claimRoles.has(role)))) throw new Error('source evidence_roles must be a list of registered claim roles');
   for (const permission of ['private_processing','redistribution','derived_public_use']) if (typeof source.reuse[permission] !== 'boolean') throw new Error(`reuse permission '${permission}' must be explicit`);
   if (source.roles.legal_access && !source.reuse.private_processing) throw new Error('legal evidence source must authorize private processing');
