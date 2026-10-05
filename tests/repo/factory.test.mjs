@@ -5,12 +5,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import * as yaml from 'js-yaml';
 import { REPO } from '../../scripts/lib/common.mjs';
 import { AI_SELECTABLE, REMEDIATIONS, classify, decide } from '../../scripts/factory/rules.mjs';
+import { cleanupTrackedChildren, processGroupHasLiveMembers, spawnTracked as spawn, stopTrackedChild } from '../helpers/tracked-child-processes.mjs';
 
 const eval_ = JSON.parse(fs.readFileSync(path.join(REPO, 'tests/fixtures/ai-eval.json'), 'utf8'));
+const finalizerGroups = [];
 
 // --- rules (authoritative) ----------------------------------------------------
 test('rules classify every labelled failure as documented', () => {
@@ -112,8 +114,7 @@ test('an integrity failure stops the queue (RED) until cleared', async () => {
   assert.ok(fs.existsSync(path.join(factory, 'state', 'red.json')));
   const w = spawn('node', [path.join(REPO, 'scripts/factory/worker.mjs')], { env: env({ verify: [['true']] }) });
   await new Promise((r) => setTimeout(r, 1500));
-  w.kill('SIGTERM');
-  await new Promise((r) => w.on('close', r));
+  await stopTrackedChild(w);
   assert.equal(where(next).state, 'pending', 'nothing runs while RED');
   assert.match(ctl('status').stdout, /status: RED/);
   const blocked = runWorker({ verify: [['true']] });
@@ -178,7 +179,8 @@ test('SIGTERM interrupts the job, records it and requeues it for resume', async 
   assert.equal(where(id).state, 'running');
   await new Promise((r) => setTimeout(r, 300));
   w.kill('SIGTERM');
-  const code = await new Promise((r) => w.on('close', r));
+  await stopTrackedChild(w);
+  const code = w.exitCode;
   assert.equal(code, 0);
   const { state, job } = where(id);
   assert.equal(state, 'pending');
@@ -197,7 +199,7 @@ test('on SIGTERM the worker waits for the whole job process group to clean up', 
   for (let i = 0; i < 50 && where(id)?.state !== 'running'; i++) await new Promise((r) => setTimeout(r, 100));
   await new Promise((r) => setTimeout(r, 500));
   w.kill('SIGTERM');
-  await new Promise((r) => w.on('close', r));
+  await stopTrackedChild(w);
   assert.ok(fs.existsSync(mark), 'worker exited before the grandchild finished cleaning up');
   assert.equal(where(id).state, 'pending');
 });
@@ -243,8 +245,7 @@ test('a stale or reused worker lock never blocks startup; a live worker does', a
   const w = spawn('node', [path.join(REPO, 'scripts/factory/worker.mjs')], { env: env({ verify: [['true']] }) });
   for (let i = 0; i < 50 && !fs.readFileSync(lock, 'utf8').includes(`"pid": ${w.pid}`); i++) await new Promise((r) => setTimeout(r, 100));
   const second = runWorker({ verify: [['true']] });
-  w.kill('SIGTERM');
-  await new Promise((r) => w.on('close', r));
+  await stopTrackedChild(w);
   assert.equal(second.status, 1);
   assert.match(second.stdout, /another worker \(pid \d+\) is running/);
 });
@@ -292,14 +293,43 @@ test('dashboard shows region, queue, disk, thermals and last failure', () => {
   assert.ok(d.disk.free_bytes > 0);
 });
 
-test.after(() => fs.rmSync(factory, { recursive: true, force: true }));
+test('test child cleanup terminates and awaits the complete process group', async () => {
+  const marker = path.join(factory, 'cleanup-helper-started');
+  const child = spawn('sh', ['-c', `sleep 30 & echo $! > '${marker}'; wait`], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  for (let i = 0; i < 50 && !fs.existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(marker), 'helper process started');
+  const pgid = child.pid;
+  await stopTrackedChild(child);
+  assert.ok(child.exitCode !== null || child.signalCode !== null, 'direct test child was awaited');
+  assert.equal(processGroupHasLiveMembers(pgid), false, 'no process in the helper group survives cleanup');
+});
+
+test('test finalizer owns a child group left alive after a successful test', async () => {
+  const child = spawn('sh', ['-c', 'sleep 30 & wait'], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  finalizerGroups.push(child.pid);
+});
+
+test.after(async () => {
+  await cleanupTrackedChildren();
+  assert.deepEqual(finalizerGroups.filter(processGroupHasLiveMembers), [], 'test finalizer left no worker/helper process alive');
+  fs.rmSync(factory, { recursive: true, force: true });
+});
 
 test('AI helper falls back to rules-only when the model would not fit', async (t) => {
-  const { DEFAULTS, readiness, unload } = await import('../../scripts/factory/ai.mjs');
+  const { readiness } = await import('../../scripts/factory/ai.mjs');
+  // Do not disturb a model already serving another workload on the shared A17.
+  // readiness() can unload a partial GPU placement, so check placement first.
+  let loaded = false;
+  try {
+    const response = await fetch(`${process.env.RTT_OLLAMA_HOST || 'http://127.0.0.1:11434'}/api/ps`, { signal: AbortSignal.timeout(1500) });
+    if (response.ok) loaded = (await response.json()).models?.length > 0;
+  } catch { /* readiness below reports the ordinary unavailable case */ }
+  if (loaded) return t.skip('live Ollama model is serving; avoid changing shared AI state during regression tests');
   const live = await readiness({});
   if (/not reachable|not installed/.test(live.reason)) return t.skip(`local AI not available: ${live.reason}`);
-  // The VRAM gate applies before loading; a model already 100 % in VRAM is fine.
-  await unload(DEFAULTS.model);
+  // The VRAM gate applies before loading.
   const vram = await readiness({ vram_overhead_mb: 1e6 });
   assert.equal(vram.mode, 'rules-only');
   assert.match(vram.reason, /VRAM|was \d+ % in VRAM/);

@@ -4,11 +4,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { readHostSnapshot } from '../../scripts/scout/resources.mjs';
 import { openCanonicalMasterReadOnly } from '../../scripts/scout/canonical-readonly.mjs';
 import { parseNvidiaTelemetry, nvidiaQueryAllowed, parseSysfsTemperatureC } from '../../scripts/lib/telemetry.mjs';
 import { processIdentity, SharedResourceAdmission } from '../../scripts/lib/resource-admission.mjs';
+import { cleanupTrackedChildren, processGroupHasLiveMembers, spawnTracked as spawn, stopTrackedChild } from '../helpers/tracked-child-processes.mjs';
 import { zohoSmtpDefaults } from '../../scripts/scout/zoho-smtp.mjs';
 import { ScoutStore, FakeAdapter, collectAdapter, SourceScheduler, normalizeObservation, candidateFromObservation, matchMaster, clusterObservations, assessEvidence, consultAI, consultAIAndRecord, classifyHost, ThermalGovernor, ScoutResourceGovernor, HeavyWorkLease, ScoutHeavyWorkCoordinator, NotificationCenter, TestDeliveryProvider, workerLock } from '../../scripts/scout/core.mjs';
 
@@ -435,7 +436,7 @@ test('shared admission serializes factory priority, Scout yield and resume admis
   const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
   assert.equal(admission.bindWorkload('scout-bulk', factory.lease.nonce, { ...processIdentity(child.pid), pgid: child.pid }).ok, true);
-  process.kill(-child.pid, 'SIGTERM'); await new Promise((resolve) => child.once('close', resolve));
+  await stopTrackedChild(child);
   assert.equal(admission.workloadFinished('scout-bulk', factory.lease.nonce).ok, true);
   assert.equal(admission.release('scout-bulk', factory.lease.nonce).ok, true);
   assert.equal(admission.acquire('scout-ai').ok, true, 'Scout can resume after factory completion');
@@ -460,7 +461,7 @@ test('shared admission rejects uncertain workload ownership and recovers only pr
   const deadOwner = spawn('true');
   await new Promise((resolve, reject) => { deadOwner.once('spawn', resolve); deadOwner.once('error', reject); });
   const deadIdentity = processIdentity(deadOwner.pid);
-  await new Promise((resolve) => deadOwner.once('close', resolve));
+  await stopTrackedChild(deadOwner);
   const child = spawn(process.execPath, [path.resolve('scripts/factory/resource-admission-exec.mjs'), 'test-nonce', process.cwd(), '["true"]'],
     { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
@@ -471,7 +472,7 @@ test('shared admission rejects uncertain workload ownership and recovers only pr
   } }));
   assert.equal(admission.acquire('scout-after-crash').ok, false, 'a surviving workload group keeps admission closed after worker death');
   const state = JSON.parse(fs.readFileSync(file, 'utf8')); state.lease.phase = 'reserved'; state.lease.workload = null; fs.writeFileSync(file, JSON.stringify(state));
-  child.stdin.end(); await new Promise((resolve) => child.once('close', resolve));
+  child.stdin.end(); await stopTrackedChild(child);
   assert.equal(admission.acquire('scout-after-unbound-spawn-crash').ok, true,
     'an unbound wrapper exits on owner pipe closure before Scout reclaims the reserved lease');
   const rebootState = JSON.parse(fs.readFileSync(file, 'utf8')); rebootState.lease.boot_id = 'previous-boot'; fs.writeFileSync(file, JSON.stringify(rebootState));
@@ -490,8 +491,32 @@ test('concurrent shared admission grants at most one background worker', async (
   const results = workers.map((w) => w.result);
   assert.equal(results.filter((r) => r.ok).length, 1);
   assert.equal(results.filter((r) => !r.ok).length, 1);
-  for (const worker of workers) worker.child.kill('SIGTERM');
-  await Promise.all(workers.map(({ child }) => new Promise((resolve) => child.once('close', resolve))));
+  await Promise.all(workers.map(({ child }) => stopTrackedChild(child)));
+});
+test('test cancellation cleanup stops child helpers and awaits process-group exit', async () => {
+  const child = spawn(process.execPath, ['-e', "setInterval(() => {}, 1000); setTimeout(() => { const {spawnSync}=require('node:child_process'); spawnSync('sh',['-c','sleep 30 & wait']); }, 10)"],
+    { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const pgid = child.pid;
+  await stopTrackedChild(child);
+  assert.ok(child.exitCode !== null || child.signalCode !== null, 'child process was reaped');
+  assert.equal(processGroupHasLiveMembers(pgid), false, 'no helper in the child process group survives');
+});
+test('test SIGTERM handler cleans and awaits its own helper workers', async () => {
+  const marker = path.join(tmp, 'signal-helper-pgid');
+  const helperUrl = new URL('../helpers/tracked-child-processes.mjs', import.meta.url).href;
+  const script = `import fs from 'node:fs'; import { spawnTracked } from ${JSON.stringify(helperUrl)};
+const c=spawnTracked('sh',['-c','sleep 30 & wait'],{stdio:'ignore'});
+await new Promise((r,j)=>{c.once('spawn',r);c.once('error',j)}); fs.writeFileSync(process.argv[1],String(c.pid)); setInterval(()=>{},1000);`;
+  const worker = spawn(process.execPath, ['--input-type=module', '-e', script, marker], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { worker.once('spawn', resolve); worker.once('error', reject); });
+  for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(marker), 'signal fixture started its helper');
+  const helperPgid = Number(fs.readFileSync(marker, 'utf8'));
+  worker.kill('SIGTERM');
+  await stopTrackedChild(worker);
+  assert.equal(processGroupHasLiveMembers(helperPgid), false, 'SIGTERM waited until the nested helper group was gone');
 });
 test('worker lock ignores stale boot ownership', () => {
   const f = path.join(tmp, 'worker-lock', 'lock.json'); fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -594,4 +619,7 @@ test('canonical master integration requires explicit 14,315-feature input and on
   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'), before, 'matching must not mutate the supplied master');
 });
 
-test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+test.after(async () => {
+  await cleanupTrackedChildren();
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
