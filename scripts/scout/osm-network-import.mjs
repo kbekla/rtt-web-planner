@@ -31,8 +31,8 @@ export async function importOsmGeoJsonSeq(store, { stream, snapshotId, batchSize
     try { feature = JSON.parse(record); } catch { throw new Error(`invalid GeoJSON sequence record ${seen}`); }
     if (feature?.type !== 'Feature') throw new Error(`GeoJSON sequence record ${seen} is not a Feature`);
     const properties = feature.properties ?? {};
-    const prefixedId=typeof feature.id==='string'?feature.id.match(/^([nwr])([1-9]\d*)$/):null;
-    const inferredKind=prefixedId?({n:'node',w:'way',r:'relation'}[prefixedId[1]]):null;
+    const prefixedId=typeof feature.id==='string'?feature.id.match(/^([nwra])([1-9]\d*)$/):null;
+    const inferredKind=prefixedId?({n:'node',w:'way',r:'relation',a:'area'}[prefixedId[1]]):null;
     const kind = properties['@type'] ?? properties.type ?? inferredKind;
     const objectId = properties['@id'] ?? properties.id ?? (prefixedId?.[2] ?? feature.id);
     if (kind && kind !== 'way') continue;

@@ -43,9 +43,10 @@ test('osmium type_id feature IDs infer OSM object type and stable way identity',
   const {root,store}=setup();
   try{
     const input=`\u001e${JSON.stringify({type:'Feature',id:'n99',properties:{highway:'crossing'},geometry:{type:'Point',coordinates:[4.3,50.8]}})}\n`+
+      `\u001e${JSON.stringify({type:'Feature',id:'a77',properties:{amenity:'parking'},geometry:{type:'MultiPolygon',coordinates:[]}})}\n`+
       `\u001e${JSON.stringify({type:'Feature',id:'w123',properties:{highway:'track',surface:'ground'},geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]}})}\n`;
     const result=await importOsmGeoJsonSeq(store,{stream:Readable.from([input]),snapshotId:'belgium-test-v1'});
-    assert.deepEqual(result,{seen:2,written:1,yielded:false});
+    assert.deepEqual(result,{seen:3,written:1,yielded:false});
     assert.equal(store.db.prepare('SELECT edge_id FROM network_edges').get().edge_id,'osm:way:123');
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
