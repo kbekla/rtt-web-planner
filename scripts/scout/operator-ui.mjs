@@ -12,6 +12,7 @@ import { NotificationCenter } from './core.mjs';
 import { readHostSnapshot } from './resources.mjs';
 import { prepareRegionPlan, approveRegionPlan } from './region-operator.mjs';
 import { createRealReviewServer } from './review-real-server.mjs';
+import { deriveScoutProductState, deriveResearchWorkflow } from './product-model.mjs';
 
 const HERE=path.dirname(fileURLToPath(import.meta.url)),REPO=path.resolve(HERE,'../..'),DEFAULT_PORT=8770,MAX_UPLOAD=16*1024*1024;
 const safeId=value=>/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(value??'');
@@ -37,9 +38,16 @@ export function scoutJobEnvironment(baseEnv, { root, raw, factoryDir, notificati
 export function deriveOperatorHealth(host,notifications,runs){
   if(host.factory_coordination?.status==='RED')return 'RED';
   if(operatorBlockedReason(host))return 'BLOCKED';
-  if(notifications.active||runs.some(run=>run.status==='REVIEW_REQUIRED'))return 'AMBER';
+  if((notifications.actionable??notifications.active)||runs.some(run=>Number(run.product_summary?.human_escalation??run.human_escalation_count??0)>0))return 'AMBER';
   return 'GREEN';
 }
+function actionableNotification(key,runs){
+  if(!key.startsWith('scout-review:'))return true;
+  const matching=runs.filter(run=>run.run_id&&key.endsWith(run.run_id));
+  if(!matching.length)return true;
+  return matching.some(run=>run.product_summary==null&&run.human_escalation_count==null||Number(run.product_summary?.human_escalation??run.human_escalation_count??0)>0);
+}
+function actionableNotificationCount(active,runs){return Object.entries(active??{}).filter(([key,item])=>!item.resolved&&actionableNotification(key,runs)).length;}
 
 const HTML=(token)=>`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="scout-token" content="${token}"><title>RT&T Scout</title><style>
 :root{color-scheme:light;--ink:#17231d;--muted:#617168;--paper:#f3f6f2;--card:#fff;--line:#d7e1d8;--green:#187548;--amber:#9a6100;--red:#a32125;--blue:#205c83}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 system-ui,sans-serif}header{background:#173b2c;color:#fff;padding:20px max(22px,calc((100vw - 1120px)/2));display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:24px;margin:0}header p{margin:3px 0 0;color:#d0e3d5}.status-pill{border:1px solid #95baa0;border-radius:999px;padding:6px 12px;font-weight:700}.status-pill.AMBER,.status-pill.BLOCKED{background:#fff1ce;color:#6b4300;border-color:#d6a842}.status-pill.RED{background:#fde5e5;color:#762024;border-color:#ce777a}.status-pill.GREEN{background:#e4eee7;color:#124c31;border-color:#95baa0}main{max-width:1120px;margin:24px auto;padding:0 18px 40px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 2px 9px #163b2c0b}.wide{grid-column:1/-1}h2{font-size:18px;margin:0 0 14px}h3{margin:0 0 6px;font-size:16px}.muted{color:var(--muted)}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.field{display:grid;gap:5px;margin:10px 0}.field label{font-weight:650}.field input,.field select{padding:10px;border:1px solid #b7c6ba;border-radius:7px;background:#fff;color:var(--ink);font:inherit;max-width:100%}button,.button{border:0;border-radius:7px;padding:10px 14px;background:#176b45;color:#fff;font:650 14px system-ui;cursor:pointer;text-decoration:none;display:inline-block}button.secondary{background:#e4eee7;color:#1d4431}button.danger{background:#833a35}button:disabled{opacity:.45;cursor:not-allowed}.choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.choice{border:1px solid var(--line);border-radius:8px;padding:10px}.choice label{display:flex;gap:8px;align-items:center;font-weight:500}.badge{font-size:12px;font-weight:750;border-radius:999px;padding:3px 8px;background:#e4eee7;color:var(--green)}.badge.AMBER,.badge.BLOCKED,.badge.REVIEW_REQUIRED{background:#fff1ce;color:var(--amber)}.badge.RED,.badge.FAILED{background:#fde5e5;color:var(--red)}.badge.RUNNING{background:#e0f0fb;color:var(--blue)}.run{border-top:1px solid var(--line);padding:13px 0}.run:first-of-type{border:0;padding-top:0}.run p{margin:4px 0 10px}.message{min-height:24px;margin:12px 0;font-weight:650}.error{color:var(--red)}.good{color:var(--green)}.metric{display:inline-block;margin:0 15px 10px 0}.metric b{display:block;font-size:20px}.small{font-size:13px}table{border-collapse:collapse;width:100%}td{border-top:1px solid var(--line);padding:8px 4px;vertical-align:top}td:first-child{color:var(--muted);width:38%}@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.choices{grid-template-columns:1fr}header{padding:16px 20px}}
@@ -63,7 +71,7 @@ function badge(state){return '<span class="badge '+String(state).replace(/[^A-Z_
 function esc(value){const n=document.createElement('span');n.textContent=value??'';return n.innerHTML;}
 async function refresh(){try{const s=await api('/api/status');const healthText={GREEN:'GREEN — ready',AMBER:'AMBER — review/action needed',RED:'RED — stopped for safety/integrity',BLOCKED:'BLOCKED — '+(s.factory.blocked_reason||'see factory status')};el('health').textContent=healthText[s.health]||'AMBER — status unavailable';el('health').className='status-pill '+s.health;el('host').innerHTML='<p>'+badge(s.factory.status)+' Shared factory admission</p><p>'+esc(s.factory.blocked_reason||'Ready for heavy work')+'</p><p>Factory '+esc(s.factory.service)+' · Planetiler '+(s.factory.planetiler?'active':'idle')+' · Local AI '+(s.factory.local_ai?'active':'idle')+'</p><p>Lease '+esc(s.factory.lease_owner||'none')+' · RAM '+esc(s.factory.memory_mb)+' MB · CPU '+esc(s.factory.cpu_c??'unknown')+' °C · NVMe '+esc(s.factory.nvme_c??'unknown')+' °C</p>';
 el('notifications').textContent=s.notifications.pending+' pending · '+s.notifications.active+' active';
-el('runs').innerHTML=s.runs.length?s.runs.map(r=>'<div class="run"><div class="row" style="justify-content:space-between"><h3>'+esc(r.region||r.country_code)+' · '+esc(r.run_id)+'</h3>'+badge(r.status)+'</div><p class="muted">State: '+esc(r.store_label||'Scout')+' · '+(r.kind==='discovery'?r.candidate_count+' independent OSM way-part discoveries · '+r.corroborated_count+' route-supported · '+(r.corridor_review_count??0)+' corridor items awaiting review · '+Number(r.edges_examined||0).toLocaleString()+' edges checked':' '+r.observations_complete+'/'+r.observations_total+' source parts · '+r.candidate_count+' research candidates')+' · '+esc(r.canonical_status||'NOT_COMPARED')+(r.blocked_reason?' · '+esc(r.blocked_reason):'')+'</p><div class="row">'+(r.approvable?'<button class="approve" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Approve</button>':'')+(r.kind==='discovery'&&r.processable?'<button class="discovery-process" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Process OSM discovery</button>':'')+(r.kind!=='discovery'&&r.processable?'<button class="process" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Process approved region</button>':'')+(r.run_exists?'<button class="review" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Open Review'+(r.corridor_review_count?' ('+r.corridor_review_count+' corridors)':'')+'</button>':'')+'<button class="detail secondary" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Details</button></div></div>').join(''):'<p class="muted">No Scout runs registered yet.</p>';
+el('runs').innerHTML=s.runs.length?s.runs.map(r=>{const p=r.product_summary;const productText=p?' · '+p.green+' GREEN · '+p.orange+' ORANGE · '+p.red+' RED · '+p.temporarily_closed+' temporarily closed · '+p.scout_research_required+' Scout research · '+p.human_escalation+' human escalations':'';return '<div class="run"><div class="row" style="justify-content:space-between"><h3>'+esc(r.region||r.country_code)+' · '+esc(r.run_id)+'</h3>'+badge(r.display_status||r.status)+'</div><p class="muted">State: '+esc(r.store_label||'Scout')+' · '+(r.kind==='discovery'?r.candidate_count+' independent OSM way-part discoveries · '+r.corroborated_count+' route-supported · '+(r.corridor_review_count??0)+' Scout research/human escalation items'+productText+' · '+Number(r.edges_examined||0).toLocaleString()+' edges checked':' '+r.observations_complete+'/'+r.observations_total+' source parts · '+r.candidate_count+' research candidates')+' · '+esc(r.canonical_status||'NOT_COMPARED')+(r.blocked_reason?' · '+esc(r.blocked_reason):'')+'</p><div class="row">'+(r.approvable?'<button class="approve" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Approve</button>':'')+(r.kind==='discovery'&&r.processable?'<button class="discovery-process" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Process OSM discovery</button>':'')+(r.kind!=='discovery'&&r.processable?'<button class="process" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Process approved region</button>':'')+(r.run_exists?'<button class="review" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Open Review'+(r.corridor_review_count?' ('+r.corridor_review_count+' corridors)':'')+'</button>':'')+'<button class="detail secondary" data-id="'+esc(r.run_id)+'" data-store="'+esc(r.store_key)+'">Details</button></div></div>';}).join(''):'<p class="muted">No Scout runs registered yet.</p>';
 el('runs').querySelectorAll('.approve').forEach(b=>b.onclick=()=>approve(b.dataset.id,b.dataset.store));el('runs').querySelectorAll('.process').forEach(b=>b.onclick=()=>process(b.dataset.id,b.dataset.store));el('runs').querySelectorAll('.discovery-process').forEach(b=>b.onclick=()=>processDiscovery(b.dataset.id,b.dataset.store));el('runs').querySelectorAll('.review').forEach(b=>b.onclick=()=>openReview(b.dataset.id,b.dataset.store));el('runs').querySelectorAll('.detail').forEach(b=>b.onclick=()=>details(b.dataset.id,b.dataset.store));}catch(error){el('health').textContent='AMBER';el('host').textContent='Scout status unavailable: '+error.message;}}
 el('prepare').addEventListener('change',()=>{const yes=x=>document.querySelector('input[name="'+x+'"]:checked')?.value==='yes';el('license-fields').hidden=!(yes('redistribution')||yes('derived'));});
 el('prepare').onsubmit=async event=>{event.preventDefault();const button=el('prepare-button');button.disabled=true;say('prepare-message','Inspecting the selected file and resolving configured provider metadata…');el('prepared').replaceChildren();try{
@@ -97,6 +105,22 @@ function corridorQueueCount(db,runId){
   return Number(db.prepare(`SELECT count(*) n FROM corridor_review_queue q INDEXED BY corridor_review_queue_state_idx
     CROSS JOIN physical_corridor_versions v ON v.corridor_version_id=q.corridor_version_id
     WHERE q.state IN ('UNREVIEWED','AMBIGUOUS','NEEDS_MORE_EVIDENCE') AND v.run_id=?`).get(runId).n);
+}
+function corridorProductCounts(db,runId){
+  if(!hasTable(db,'physical_corridor_versions'))return null;
+  const result={ordinary_roads:0,green:0,orange:0,red:0,temporarily_closed:0,not_a_route:0,scout_research_required:0,human_escalation:0,qa_sample:0,auto_resolved:0};
+  // The run_id prefix of the existing UNIQUE(run_id,node_sequence_hash) index
+  // bounds this summary to the selected run; only scalar groups leave SQLite.
+  const rows=db.prepare(`SELECT v.classification,v.physical_existence,v.motorcycle_access,v.routability,v.identity_state,
+      coalesce(q.state,'CATALOGUED') review_state,count(*) n
+    FROM physical_corridor_versions v LEFT JOIN corridor_review_queue q USING(corridor_version_id)
+    WHERE v.run_id=? GROUP BY v.classification,v.physical_existence,v.motorcycle_access,v.routability,v.identity_state,review_state`).all(runId);
+  for(const row of rows){const product=deriveScoutProductState({physicalExistence:row.physical_existence,physicalCharacter:row.classification,
+    motorcycleAccess:row.motorcycle_access,routability:row.routability,credibleDiscovery:true}),workflow=deriveResearchWorkflow({reviewState:row.review_state,productState:product,geometryIdentity:row.identity_state});
+    const key={ORDINARY_ROAD:'ordinary_roads',GREEN:'green',ORANGE:'orange',RED:'red',TEMPORARILY_CLOSED:'temporarily_closed',NOT_A_ROUTE:'not_a_route'}[product];result[key]+=Number(row.n);
+    result[workflow.toLowerCase()]+=Number(row.n);
+  }
+  return result;
 }
 function stateStores({stateBase,defaultRoot}){
   if(!stateBase){const dbFile=path.join(defaultRoot,'scout.sqlite');return [{store_key:'default',root:defaultRoot,dbFile,store_updated_at:fs.statSync(dbFile).mtime.toISOString()}];}
@@ -135,13 +159,21 @@ function runSummaryForState({store_key,root,dbFile}){
       const plan=JSON.parse(p.plan_json);runs.push({store_key,store_label:store_key,run_id:p.run_id,region:plan.region_name,country_code:plan.country_code,status:p.state,observations_complete:0,
         observations_total:plan.route_file.observation_count,candidate_count:0,canonical_status:'NOT_COMPARED',run_exists:false,approvable:p.state==='PREPARED',processable:['APPROVED','BLOCKED','FAILED'].includes(p.state),blocked_reason:p.last_error,updated_at:p.updated_at});
     }
-    if(hasTable(db,'discovery_runs'))for(const r of db.prepare('SELECT run_id,country_code,region_id,config_json,status,edges_examined,checkpoint_edge_rowid,last_error,updated_at FROM discovery_runs ORDER BY updated_at DESC LIMIT 200').all()){
+    if(hasTable(db,'discovery_runs')){
+      const discoveryRows=db.prepare('SELECT run_id,country_code,region_id,config_json,status,edges_examined,checkpoint_edge_rowid,last_error,updated_at FROM discovery_runs ORDER BY updated_at DESC LIMIT 200').all();
+      const latestDiscoveryRunId=discoveryRows[0]?.run_id??null;
+      for(const r of discoveryRows){
       const count=hasTable(db,'discovery_candidates')?Number(db.prepare('SELECT count(*) n FROM discovery_candidates WHERE run_id=?').get(r.run_id).n):0;
       const corroborated=hasTable(db,'discovery_candidate_matches')&&hasTable(db,'discovery_candidates')?Number(db.prepare(`SELECT count(DISTINCT d.candidate_id) n FROM discovery_candidates d
         JOIN discovery_candidate_matches m ON m.candidate_id=d.candidate_id WHERE d.run_id=? AND m.relationship='same_osm_network_part_support'`).get(r.run_id).n):0;
+      // The full product projection is only needed for the current run shown at
+      // the top of the operator. Historical run listing stays index/count-only.
+      const productSummary=tableExists(db,'physical_corridor_versions')&&r.run_id===latestDiscoveryRunId?corridorProductCounts(db,r.run_id):null;
       runs.push({kind:'discovery',store_key,store_label:store_key,run_id:r.run_id,region:r.region_id,country_code:r.country_code,status:r.status,observations_complete:0,observations_total:0,
         candidate_count:count,corroborated_count:corroborated,corridor_review_count:corridorQueueCount(db,r.run_id),blocked_reason:r.last_error,edges_examined:r.edges_examined,checkpoint_edge_rowid:r.checkpoint_edge_rowid,
+        product_summary:productSummary,display_status:r.status==='REVIEW_REQUIRED'&&productSummary?.human_escalation===0?'COMPLETE':r.status,
         canonical_status:JSON.parse(r.config_json).canonical_status??'NOT_COMPARED',run_exists:true,approvable:false,processable:['PENDING','BLOCKED','FAILED','RUNNING'].includes(r.status),updated_at:r.updated_at});
+      }
     }
     return runs;
   }finally{db.close();}
@@ -168,7 +200,8 @@ export function createScoutOperatorServer({geoRoot=process.env.SCOUT_GEO_ROOT,ra
       if(req.method==='GET'&&req.url==='/api/status'){
         const host=readHost({factoryDir}),notifications=new NotificationCenter(path.join(root,'notifications','scout-notifications.json')).state();
         try{
-          const runs=runSummary(stores()),notificationState={pending:notifications.pending.length,active:Object.values(notifications.active).filter(item=>!item.resolved).length};
+          const runs=runSummary(stores()),notificationState={pending:notifications.pending.filter(item=>actionableNotification(item.key,runs)).length,
+            active:actionableNotificationCount(notifications.active,runs)};
           return json(res,200,{operator_store_registry:true,health:deriveOperatorHealth(host,notificationState,runs),factory:{status:host.factory_coordination?.status??'UNVERIFIED',blocked_reason:operatorBlockedReason(host),service:host.factory_service_state??'unknown',planetiler:Boolean(host.planetiler_active),local_ai:Boolean(host.local_ai_active),lease_owner:host.resource_lease_owner??null,memory_mb:host.mem_available_mb??null,cpu_c:host.cpu_temp_c??null,nvme_c:host.nvme_temp_c??null},notifications:notificationState,runs});
         }catch(error){throw error;}
       }

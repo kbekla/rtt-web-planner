@@ -176,10 +176,13 @@ export function evaluateMotorcycleAccess(records, { at = new Date().toISOString(
   if (current.some(r => r.legal_effect === 'REVOKE')) return { access: 'unknown', operational_state: 'VISIBLE_NOT_ROUTABLE', reason: 'authoritative access status was revoked; no current replacement permission is present' };
   const restrictions = current.filter(r => RESTRICTIONS.has(r.legal_effect));
   const permissions = current.filter(r => PERMISSIONS.has(r.legal_effect));
-  if (restrictions.length) return { access: restrictions.some(r => r.temporal_kind === 'TEMPORARY' || r.temporal_kind === 'EMERGENCY') ? 'temporarily_restricted' : 'prohibited',
-    operational_state: restrictions.some(r => r.temporal_kind === 'TEMPORARY' || r.temporal_kind === 'EMERGENCY') ? 'TEMPORARILY_CLOSED' : 'RESTRICTED_OR_REJECTED',
+  if (restrictions.length) {
+    const permanent = restrictions.some(r => r.temporal_kind === 'PERMANENT');
+    return { access: permanent ? 'prohibited' : 'temporarily_restricted',
+    operational_state: permanent ? 'RESTRICTED_OR_REJECTED' : 'TEMPORARILY_CLOSED',
     contradiction: permissions.length > 0, contradiction_state: permissions.length ? 'REVIEW_REQUIRED' : null,
     reason: 'current authoritative motorcycle restriction', evidence_ids: [...restrictions, ...permissions].map(r => r.status_record_id).sort() };
+  }
   if (permissions.length && !current.some(r => RESTRICTIONS.has(r.legal_effect))) return { access: 'confirmed', operational_state: 'VISIBLE_NOT_ROUTABLE', reason: 'current authoritative access evidence; routability has not been verified', evidence_ids: permissions.map(r => r.status_record_id).sort() };
   return { access: 'unknown', operational_state: 'VISIBLE_NOT_ROUTABLE', reason: 'no current authoritative motorcycle access evidence' };
 }

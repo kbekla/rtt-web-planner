@@ -139,10 +139,10 @@ test('private reviewer can inspect an independent OSM discovery run without serv
       VALUES('xev-review-fixture',?,?,?,'3.3.0',?,'spw:national_roads:55','PARALLEL',?,'{"route_number":"N90"}',?,'2026-10-05T12:00:00Z')`).run(corridorVersion,corridorId,external.source_id,'d'.repeat(64),
         JSON.stringify({type:'LineString',coordinates:[[4.3001,50.8],[4.3101,50.81]]}),JSON.stringify({evidence_role:['PHYSICAL_EXISTENCE','NETWORK_IDENTITY'],identity_basis:['reciprocal line support'],motorcycle_access_effect:'NONE',routability_effect:'NONE'}));
     store.close();server=createRealReviewServer({runId:'be-osm-discovery',privateBase:base,databaseFile:path.join(root,'state','scout.sqlite')});await new Promise(resolve=>server.once('listening',resolve));
-    const address=`http://127.0.0.1:${server.address().port}`;const html=await (await fetch(address)).text();assert.match(html,/Independent OSM discoveries/);assert.match(html,/Mapped OSM geometry is unverified/);
+    const address=`http://127.0.0.1:${server.address().port}`;const html=await (await fetch(address)).text();assert.match(html,/Independent OSM discoveries/);assert.match(html,/Source-route hints, OSM discoveries and candidate sections remain separate private evidence layers/);assert.match(html,/GREEN · Verified lane/);assert.match(html,/ORANGE · Unverified lane/);
     const status=await (await fetch(`${address}/api/status`)).json();assert.equal(status.discovery_run,true);assert.equal(status.discovery_candidates,1);assert.equal(status.discovery_corroborated,0);
     assert.equal(status.corridor_review_queue,150);
-    const queue=await (await fetch(`${address}/api/review-queue?state=UNREVIEWED&limit=200`)).json();assert.equal(queue.items.length,150);assert.equal(queue.count,150);assert.ok(queue.items.every(item=>item.properties.review_state==='UNREVIEWED'));
+    const queue=await (await fetch(`${address}/api/review-queue?state=UNREVIEWED&limit=200`)).json();assert.equal(queue.items.length,150);assert.equal(queue.count,150);assert.equal(queue.state,'SCOUT_RESEARCH_REQUIRED');assert.ok(queue.items.every(item=>item.properties.review_state==='UNREVIEWED'&&item.properties.research_state==='SCOUT_RESEARCH_REQUIRED'&&item.properties.product_state==='ORANGE'));
     const features=await (await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.7,4.4,50.9`)).json();assert.equal(features.features.length,1);
     const item=features.features[0];assert.equal(item.properties.origin,'OSM');assert.equal(item.properties.motorcycle_access,'unknown');assert.equal(item.properties.routability,'unknown');
     assert.equal(item.properties.canonical_status,'NOT_COMPARED');assert.equal(item.properties.tags.motorcycle,'no');assert.equal(item.properties.sources[0].source_id,registered.source.source_id);
@@ -152,8 +152,9 @@ test('private reviewer can inspect an independent OSM discovery run without serv
     assert.equal(corridor.properties.external_network_evidence[0].source_sha256,'d'.repeat(64));
     assert.equal(corridor.properties.external_network_evidence[0].attributes.route_number,'N90');
     assert.equal(corridor.properties.motorcycle_access,'unknown');assert.equal(corridor.properties.routability,'unknown');
+    assert.equal(corridor.properties.product_state,'ORANGE');assert.equal(corridor.properties.research_state,'SCOUT_RESEARCH_REQUIRED');assert.equal(corridor.properties.route_modes.automatic,false);assert.equal(corridor.properties.route_modes.manual,true);
     assert.equal((await (await fetch(`${address}/api/source-routes`)).json()).features.length,0);assert.equal((await fetch(`${address}/api/discovery-candidates?bbox=4.2,50.9,4.4,50.7`)).status,400);
-    const client=await (await fetch(`${address}/review.js`)).text();assert.match(client,/discovery-line/);assert.match(client,/refreshDiscoveries/);assert.match(client,/refreshSegments/);assert.match(client,/UNREVIEWED corridor items/);assert.match(client,/review-queue-list/);
+    const client=await (await fetch(`${address}/review.js`)).text();assert.match(client,/discovery-line/);assert.match(client,/refreshDiscoveries/);assert.match(client,/refreshSegments/);assert.match(client,/SCOUT_RESEARCH_REQUIRED/);assert.match(client,/product_state/);assert.match(client,/review-queue-list/);
     assert.match(client,/return map\.getSource\(id\)/);assert.match(client,/segments=source\('segments'/);assert.match(client,/discoveries=source\('discoveries'/);
   }finally{if(server)await new Promise(resolve=>server.close(resolve));try{store.close();}catch{}fs.rmSync(base,{recursive:true,force:true});}
 });

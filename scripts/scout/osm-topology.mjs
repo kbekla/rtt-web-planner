@@ -139,7 +139,9 @@ export function triageCorridorReviewQueue(store,{runId,shouldYield=()=>false,bat
       const state=row.identity_state!=='TOPOLOGY_BACKED'?'AMBIGUOUS':row.tet_supported?'UNREVIEWED':row.review_priority==='LOW_VALUE_FOR_MOTORCYCLE_DISCOVERY'?'LOW_VALUE':'CATALOGUED';
       const reason=state==='AMBIGUOUS'?'OSM_TOPOLOGY_ASSOCIATION_UNRESOLVED':state==='UNREVIEWED'?'INDEPENDENT_ROUTE_HINT_SUPPORT':state==='LOW_VALUE'?'LOW_VALUE_SOURCE_TAGS':'SINGLE_SOURCE_OSM_RESEARCH_CATALOG';
       const priority=state==='UNREVIEWED'?'CORROBORATED_DISCOVERY':state==='AMBIGUOUS'?'IDENTITY_REVIEW':state==='LOW_VALUE'?'LOW_VALUE_FOR_MOTORCYCLE_DISCOVERY':'CATALOG_ONLY';
-      update.run(state,reason,priority,JSON.stringify({source_count:row.tet_supported?2:1,tet_support:Boolean(row.tet_supported),human_review_required:['UNREVIEWED','AMBIGUOUS','NEEDS_MORE_EVIDENCE'].includes(state)}),at,row.corridor_version_id);
+      update.run(state,reason,priority,JSON.stringify({source_count:row.tet_supported?2:1,tet_support:Boolean(row.tet_supported),
+        research_state:state==='UNREVIEWED'?'SCOUT_RESEARCH_REQUIRED':state==='AMBIGUOUS'?'HUMAN_ESCALATION':'AUTO_RESOLVED',
+        human_review_required:state==='AMBIGUOUS'&&row.identity_state!=='TOPOLOGY_BACKED'}),at,row.corridor_version_id);
     }setStage(store.db,run.snapshot_id,runId,stage,'RUNNING',i+batch.length);store.db.exec('COMMIT');}
     catch(error){store.db.exec('ROLLBACK');throw error;}
     if(shouldYield()){setStage(store.db,run.snapshot_id,runId,stage,'BLOCKED',i+batch.length);return {status:'BLOCKED',processed:i+batch.length,resumable:true};}

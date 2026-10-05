@@ -14,7 +14,9 @@ const network={...route,source_id:'synthetic-ui-network',name:'Synthetic network
 test('operator health distinguishes ready, review, safety RED and fail-closed BLOCKED states',()=>{
   const clear={factory_coordination:{verified:true,status:'VERIFIED'},factory_job_active:false,planetiler_active:false,local_ai_active:false,other_heavy_workload_active:false};
   assert.equal(deriveOperatorHealth(clear,{active:0},[]),'GREEN');
-  assert.equal(deriveOperatorHealth(clear,{active:0},[{status:'REVIEW_REQUIRED'}]),'AMBER');
+  assert.equal(deriveOperatorHealth(clear,{active:0},[{status:'REVIEW_REQUIRED'}]),'GREEN');
+  assert.equal(deriveOperatorHealth(clear,{active:0},[{product_summary:{human_escalation:1}}]),'AMBER');
+  assert.equal(deriveOperatorHealth(clear,{active:1,actionable:0},[{run_id:'be-run',status:'REVIEW_REQUIRED',product_summary:{human_escalation:0}}]),'GREEN');
   assert.equal(deriveOperatorHealth(clear,{active:1},[]),'AMBER');
   assert.equal(deriveOperatorHealth({...clear,factory_coordination:{verified:false,status:'UNVERIFIED',reason:'heartbeat unavailable'}},{active:0},[]),'BLOCKED');
   assert.match(operatorBlockedReason({...clear,planetiler_active:true}),/Planetiler is active/);

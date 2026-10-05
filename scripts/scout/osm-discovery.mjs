@@ -111,9 +111,9 @@ export function discoverOsmRun(store,runId,{batchSize=500,shouldYield=()=>false,
     store.updateDiscoveryRun(runId,{checkpoint_edge_rowid:cursor,edges_examined:examined,candidates_created:candidatesCreated,corroborated_count:corroboratedCount});
     onProgress({run_id:runId,checkpoint_edge_rowid:cursor,edges_examined:examined,candidates_created:candidatesCreated});
   }
-  store.updateDiscoveryRun(runId,{status:'REVIEW_REQUIRED',checkpoint_edge_rowid:cursor,edges_examined:examined,
+  store.updateDiscoveryRun(runId,{status:'COMPLETE',checkpoint_edge_rowid:cursor,edges_examined:examined,
     candidates_created:candidatesCreated,corroborated_count:corroboratedCount,last_error:null});
-  return {...discoveryStats(store,runId),status:'REVIEW_REQUIRED'};
+  return {...discoveryStats(store,runId),status:'COMPLETE',research_state:'SCOUT_RESEARCH_REQUIRED'};
 }
 
 export function discoveryStats(store,runId){

@@ -82,9 +82,9 @@ function reviewFile(root){return path.join(root,'notifications','scout-notificat
 async function queueReviewNotice(root,runId,count,env){
   if(count<1)return {queued:false,reason:'no candidates'};
   const recipient=env.SCOUT_NOTIFICATION_EMAIL;let provider=null;
-  if(recipient){try{provider=createZohoSmtpProvider({recipient,subject:'RT&T Scout candidates need review'});}catch{/* persist event with provider unavailable; never block deterministic work */}}
+  if(recipient){try{provider=createZohoSmtpProvider({recipient,subject:'RT&T Scout needs an owner decision'});}catch{/* persist event with provider unavailable; never block deterministic work */}}
   const center=new NotificationCenter(reviewFile(root),{providers:provider?{EMAIL:provider}:{}});
-  const key=`scout-review:${runId}`,message=`RT&T Scout needs review. Run ${runId} has ${count} corridor items in the human research queue. Single-source OSM catalog entries remain available in Scout without individual review. Access and routability are unknown unless separately evidenced. Open the private Scout reviewer for this run.`;
+  const key=`scout-escalation:${runId}`,message=`RT&T Scout needs an owner decision. Run ${runId} has ${count} unresolved authoritative or corridor-identity conflicts. Ordinary unverified lanes remain visible as ORANGE and do not require Karl to determine local law. Open the private Scout reviewer for this run.`;
   const replaced=center.replacePending({key,severity:'AMBER',message});
   const result=replaced.updated?{sent:true,event:(await center.retryPending({key}))[0]}:await center.emit({key,severity:'AMBER',channels:['EMAIL'],message});
   return {queued:true,delivery:result.event?.delivery??{},dedupe_reason:result.reason??null};
@@ -120,9 +120,12 @@ async function processRun(store,root,run,env){
     if(incomplete.length){store.setRunStatus(run.run_id,'BLOCKED',{last_error:'run has observations not completed by current classifier'});return {status:'BLOCKED',reason:'OBSERVATIONS_INCOMPLETE'};}
     const candidateCount=Number(store.db.prepare(`SELECT count(*) n FROM candidates c JOIN route_segments s USING(segment_id)
       JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? AND ro.status='COMPLETE' AND s.pipeline_version=ro.pipeline_version`).get(run.run_id).n);
-    const status=candidateCount?'REVIEW_REQUIRED':'COMPLETE';store.setRunStatus(run.run_id,status);
-    const notice=await queueReviewNotice(root,run.run_id,candidateCount,env);
-    return {status,run_id:run.run_id,observation_count:observationRows.length,candidate_count:candidateCount,notification:notice};
+    const humanEscalations=Number(store.db.prepare(`SELECT count(*) n FROM candidates c JOIN route_segments s USING(segment_id)
+      JOIN scout_run_observations ro USING(observation_id) WHERE ro.run_id=? AND ro.status='COMPLETE' AND s.pipeline_version=ro.pipeline_version
+      AND (c.physical_state='contradictory' OR c.motorcycle_access='contradictory' OR c.routability='contradictory' OR c.master_match='AMBIGUOUS')`).get(run.run_id).n);
+    const status=humanEscalations?'REVIEW_REQUIRED':'COMPLETE';store.setRunStatus(run.run_id,status);
+    const notice=await queueReviewNotice(root,run.run_id,humanEscalations,env);
+    return {status,run_id:run.run_id,observation_count:observationRows.length,candidate_count:candidateCount,scout_research_required_count:candidateCount-humanEscalations,human_escalation_count:humanEscalations,notification:notice};
   }finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'Scout run stage completed, failed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
 }
 async function networkStage(store,root,{sub,sourceId,snapshotId,env,calculateChecksum=false}){
@@ -237,7 +240,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
       const yieldCheck=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce}),shouldYield=()=>interrupted||yieldCheck();
       try{
         const result=await buildCorridorRun(store,{runId,shouldYield});if(result.status==='BLOCKED'){console.log(JSON.stringify(result,null,2));return 75;}
-        const reviewCount=Number(result.review_queue?.UNREVIEWED??0)+Number(result.review_queue?.AMBIGUOUS??0);
+        const reviewCount=Number(result.review_queue?.AMBIGUOUS??0);
         const notification=await queueReviewNotice(root,`corridors:${runId}`,reviewCount,env);
         console.log(JSON.stringify({...result,notification},null,2));return 0;
       }finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);}

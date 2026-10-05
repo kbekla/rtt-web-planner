@@ -48,7 +48,7 @@ test('OSM discovery uses the registered country snapshot, keeps dimensions separ
       viewport:[2,49,7,52],approved_by:'Karl',approval_scope:'Belgium private discovery fixture',config:{discovery_version:'osm-way-discovery-1'}}).run_id,run.run_id);
     const yielded=discoverOsmRun(store,run.run_id,{batchSize:2,shouldYield:()=>true,yieldReason:()=> 'factory priority requested a shared-admission yield'});assert.equal(yielded.status,'BLOCKED');assert.equal(yielded.resumable,true);assert.equal(yielded.edges_examined,0);
     assert.equal(yielded.reason,'factory priority requested a shared-admission yield');assert.equal(store.getDiscoveryRun(run.run_id).last_error,yielded.reason);
-    const result=discoverOsmRun(store,run.run_id,{batchSize:2});assert.equal(result.status,'REVIEW_REQUIRED');assert.equal(result.candidate_count,4);
+    const result=discoverOsmRun(store,run.run_id,{batchSize:2});assert.equal(result.status,'COMPLETE');assert.equal(result.research_state,'SCOUT_RESEARCH_REQUIRED');assert.equal(result.candidate_count,4);
     assert.equal(result.independent_of_tet_count,3);assert.equal(result.matched_tet_candidate_count,1);assert.equal(result.explicit_restriction_tag_count,1);
     assert.equal(result.motorcycle_access_unknown,4);assert.equal(result.routability_unknown,4);assert.equal(result.canonical_status,'NOT_COMPARED');
     assert.equal(result.geometry_parallel_or_ambiguous_match_count,null,'unrun geometric ambiguity checks are not reported as zero');

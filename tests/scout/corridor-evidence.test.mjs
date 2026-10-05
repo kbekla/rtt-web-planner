@@ -97,6 +97,13 @@ test('parallel legal geometry aliases fail closed and access is independent from
   assert.equal(deriveOperationalState({ physical: 'confirmed', access: 'prohibited', routability: 'yes', accessEvaluation: { operational_state: 'RESTRICTED_OR_REJECTED' } }), 'RESTRICTED_OR_REJECTED');
 });
 
+test('permanent prohibition remains RED when an unrelated current temporary restriction also applies', () => {
+  const permanent=legal({status_record_id:'permanent',temporal_kind:'PERMANENT',effective_until:null});
+  const temporary=legal({status_record_id:'temporary',temporal_kind:'TEMPORARY',effective_until:'2026-10-06T00:00:00Z'});
+  const result=evaluateMotorcycleAccess([temporary,permanent],{at:'2026-10-05T12:00:00Z',geometryIdentity:'MATCHED',jurisdictionIdentity:'MATCHED'});
+  assert.equal(result.access,'prohibited');assert.equal(result.operational_state,'RESTRICTED_OR_REJECTED');
+});
+
 test('physical existence remains intact during closure, while community and OSM access labels cannot create legal permission', () => {
   const closed=evaluateMotorcycleAccess([legal()],{at:'2026-10-05T12:00:00Z',geometryIdentity:'MATCHED',jurisdictionIdentity:'MATCHED'});
   const physical={state:'probable',source:'osm-way:synthetic',access:closed.access,routability:'unknown'};
@@ -183,6 +190,10 @@ test('corridor triage checkpoints, queues corroboration/identity issues, suppres
     const resumed=triageCorridorReviewQueue(store,{runId:'triage-run',batchSize:100});assert.deepEqual(resumed,{status:'COMPLETE',processed:150});
     const states=store.db.prepare('SELECT state,count(*) n FROM corridor_review_queue GROUP BY state').all().map(r=>[r.state,Number(r.n)]).sort();
     assert.deepEqual(states,[['AMBIGUOUS',1],['CATALOGUED',110],['LOW_VALUE',1],['UNREVIEWED',38]].sort());
+    const research=JSON.parse(store.db.prepare("SELECT ranking_json FROM corridor_review_queue WHERE state='UNREVIEWED' LIMIT 1").get().ranking_json);
+    assert.equal(research.research_state,'SCOUT_RESEARCH_REQUIRED');assert.equal(research.human_review_required,false);
+    const escalation=JSON.parse(store.db.prepare("SELECT ranking_json FROM corridor_review_queue WHERE state='AMBIGUOUS' LIMIT 1").get().ranking_json);
+    assert.equal(escalation.research_state,'HUMAN_ESCALATION');assert.equal(escalation.human_review_required,true);
     recordCorridorReview(store,{corridorId:'corr-003',decision:'INTERESTING',reviewer:'Karl',reason:'Synthetic manual research review'});
     assert.deepEqual(triageCorridorReviewQueue(store,{runId:'triage-run'}),{status:'REUSED',processed:150});
     assert.equal(store.db.prepare("SELECT state FROM corridor_review_queue WHERE corridor_id='corr-003'").get().state,'INTERESTING');

@@ -16,6 +16,8 @@ The states are deliberately independent:
 
 Source evidence metadata and route hints are kept as descriptive observation data. They do not affect state until a separate evidence-review step marks an evidence record `qualified`. Contradictory qualified evidence is retained and marked `contradictory`; it queues review. Unknown access is never changed to permission by matching, routability, names, AI, or community-route use.
 
+Those private states project into RT&T's rider-facing GREEN / ORANGE / RED / TEMPORARILY_CLOSED model while ordinary roads remain ordinary roads. Automatic routing uses ordinary roads and verified GREEN lanes; deliberate manual, created and imported routes may include ORANGE where geometry is usable. RED and active temporary closures are blocked. Normal ORANGE uncertainty is a stable useful outcome, not a request for Karl to decide local law. See [SCOUT-PRODUCT-MODEL.md](SCOUT-PRODUCT-MODEL.md).
+
 ## Sources, matching and review
 
 Collectors implement `collect(cursor)` and return observations plus a cursor/check time. `FakeAdapter` is the only included adapter. A source observation can have or omit geometry, source ID, name, provenance, hints and evidence. Hints are discovery-only. `SourceScheduler` enforces a minimum interval, persists cursors/check times, applies bounded exponential retry times and holds a source in AMBER after its retry budget. Source failures are recorded per adapter and do not stop another adapter's queue.
