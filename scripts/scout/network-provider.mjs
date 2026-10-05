@@ -8,6 +8,9 @@ import { createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 
 const GEOFABRIK_HOST='download.geofabrik.de';
+const GEOFABRIK_MIRROR_HOST='ftp5.gwdg.de',GEOFABRIK_MIRROR_PREFIX='/pub/misc/openstreetmap/download.geofabrik.de/';
+const approvedNetworkTarget=(url)=>url.protocol==='https:'&&!url.username&&!url.password&&!url.search&&!url.hash&&url.pathname.endsWith('.osm.pbf')&&
+  (url.hostname===GEOFABRIK_HOST||(url.hostname===GEOFABRIK_MIRROR_HOST&&url.pathname.startsWith(GEOFABRIK_MIRROR_PREFIX)));
 export function resolveNetworkExtract(source,{allowChecksumCalculation=false}={}) {
   if(!source?.roles?.routing_network||source.reuse?.private_processing!==true)throw new Error('network source is not registered for private routing-network processing');
   const x=source.network_extract;
@@ -67,12 +70,12 @@ export async function acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot
   }
   let existing=0;if(fs.existsSync(part)){if(fs.lstatSync(part).isSymbolicLink()||!fs.statSync(part).isFile())throw new Error('partial network download is not a regular private file');existing=fs.statSync(part).size;}
   const headers={};if(existing)headers.Range=`bytes=${existing}-`;
-  const response=await fetchImpl(extract.url,{headers,redirect:'error'});
+  const response=await fetchImpl(extract.url,{headers,redirect:'follow'});
   if(existing&&response.status===200)existing=0;
   else if(existing&&response.status!==206)throw new Error(`network provider refused safe range resume (HTTP ${response.status})`);
   else if(!existing&&response.status!==200)throw new Error(`network provider returned HTTP ${response.status}`);
   if(existing){const contentRange=response.headers.get('content-range');if(!new RegExp(`^bytes ${existing}-\\d+/(?:\\d+|\\*)$`).test(contentRange??''))throw new Error('network provider returned an invalid Content-Range for resume');}
-  if(response.url){const final=new URL(response.url);if(final.protocol!=='https:'||final.hostname!==GEOFABRIK_HOST)throw new Error('network provider redirected outside its registered origin');}
+  if(response.url){const final=new URL(response.url);if(!approvedNetworkTarget(final))throw new Error('network provider redirected outside the approved Geofabrik provider/mirror set');}
   const received=await appendResponse(response,part,{start:existing,progress,shouldYield});
   if(received.yielded){const fd=fs.openSync(part,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}return {status:'YIELDED',snapshot_id:snapshotId,bytes:received.bytes,partial_path:part};}
   const checksum=await fileSha256(part);
