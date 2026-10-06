@@ -105,6 +105,7 @@ export function discoverOsmRun(store,runId,{batchSize=500,shouldYield=()=>false,
 
 export function discoveryStats(store,runId){
   const run=store.getDiscoveryRun(runId);if(!run)throw new Error(`unknown discovery run '${runId}'`);
+  const networkSource=store.getSource(store.getNetworkSnapshot(run.snapshot_id)?.source_id),provider=networkSource?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4'?'NVDB':'OSM';
   const countByClass=store.db.prepare('SELECT classification,count(*) count FROM discovery_candidates WHERE run_id=? GROUP BY classification').all(runId);
   const candidates=store.db.prepare('SELECT count(*) total,sum(physical_state=?) existence_probable,sum(access_tag_state=?) access_tags_present FROM discovery_candidates WHERE run_id=?').get('probable','OSM_TAGS_PRESENT',runId);
   const restrictionCount=Number(store.db.prepare(`SELECT count(*) n FROM discovery_candidates WHERE run_id=? AND EXISTS(SELECT 1 FROM json_each(tags_json) WHERE key IN ('access','vehicle','motor_vehicle','motorcycle') AND lower(value) IN ('no','private','destination','customers','agricultural','forestry','permit','use_sidepath'))`).get(runId).n);
@@ -115,5 +116,5 @@ export function discoveryStats(store,runId){
     access_tagged_count:Number(candidates.access_tags_present??0),no_explicit_access_tag_count:Number(candidates.total??0)-Number(candidates.access_tags_present??0),explicit_restriction_tag_count:restrictionCount,
     canonical_status:'NOT_COMPARED',matched_tet_candidate_count:null,multi_source_corroborated_count:corroborated,independent_of_tet_count:run.reference_run_id?null:Number(candidates.total??0),
     canonical_new_candidate_count:0,ambiguous_physical_character_count:Number(countByClass.find(x=>x.classification==='UNKNOWN')?.count??0),
-    geometry_parallel_or_ambiguous_match_count:null,geometry_identity_matching:'NOT_RUN; only exact OSM way-part support links are created; proximity alone is not identity'};
+    geometry_parallel_or_ambiguous_match_count:null,geometry_identity_matching:`NOT_RUN; current ${provider} benchmark links use exact registered network edge-part identity; proximity alone is not identity`};
 }

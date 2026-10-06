@@ -386,7 +386,9 @@ export class ScoutGeoStore {
     if(!source?.reuse?.private_processing||source.roles?.discovery_only!==true||source.roles?.legal_access===true)throw new Error('discovery source must be registered for private discovery and not legal-access evidence');
     if(!snapshot||snapshot.source_id!==source.parent_network_source_id||source.bound_snapshot_id&&snapshot_id!==source.bound_snapshot_id)throw new Error('discovery run requires the registered network snapshot named by its discovery source');
     const networkSource=snapshot&&this.getSource(snapshot.source_id);
-    if(!networkSource?.roles?.routing_network||networkSource.roles?.discovery_only===true||!String(networkSource.type??'').toLowerCase().includes('osm'))throw new Error('independent discovery requires a registered public OSM network source, never a route/discovery corpus');
+    const nvdbNetwork=networkSource?.source_id==='no-nvdb-vegkart'&&networkSource.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4';
+    const osmNetwork=String(networkSource?.type??'').toLowerCase().includes('osm');
+    if(!networkSource?.roles?.routing_network||networkSource.roles.discovery_only===true||(!osmNetwork&&!nvdbNetwork))throw new Error('independent discovery requires an explicitly supported authoritative or public network source, never a route/discovery corpus');
     if(!snapshot.checksum||this.networkEdgeCount(snapshot_id)<1)throw new Error('discovery run requires a checksum-pinned imported network snapshot');
     if(!/^[A-Z]{2}$/.test(country_code??'')||!source.coverage.countries.includes(country_code)||!snapshot.coverage.countries?.includes(country_code))throw new Error('discovery region is not covered by registered source and snapshot');
     if(typeof region_id!=='string'||!region_id.trim()||!Array.isArray(viewport)||viewport.length!==4||viewport.some(v=>!Number.isFinite(v)))throw new Error('discovery run requires region ID and four numeric viewport bounds');
@@ -426,7 +428,7 @@ export class ScoutGeoStore {
       for(const c of rows){
         if(!c.candidate_id||c.run_id&&c.run_id!==runId||c.source_id!==run.discovery_source_id||c.snapshot_id!==run.snapshot_id||!c.edge_id||!Number.isSafeInteger(c.part_index)||c.part_index<0||
           !['ROAD','UNSEALED_ROAD','PROBABLE_OFFROAD','OFFROAD_CONFIRMED','UNKNOWN'].includes(c.classification)||!['unknown','probable'].includes(c.physical_state)||
-          c.motorcycle_access!=='unknown'||c.routability!=='unknown'||c.canonical_status!=='NOT_COMPARED'||!['OSM_TAGS_PRESENT','NO_EXPLICIT_ACCESS_TAG'].includes(c.access_tag_state)||!Number.isFinite(c.length_m)||c.length_m<0)
+          c.motorcycle_access!=='unknown'||c.routability!=='unknown'||c.canonical_status!=='NOT_COMPARED'||!['OSM_TAGS_PRESENT','NO_EXPLICIT_ACCESS_TAG','NO_EXPLICIT_MOTORCYCLE_ACCESS_EVIDENCE'].includes(c.access_tag_state)||!Number.isFinite(c.length_m)||c.length_m<0)
           throw new Error('invalid discovery candidate or unsafe access/routability/canonical state');
         const coordinates=c.geometry?.type==='LineString'?c.geometry.coordinates:null;if(!coordinates||coordinates.length<2||coordinates.some(p=>!Array.isArray(p)||p.length<2||p.some(v=>!Number.isFinite(v))))throw new Error('discovery candidate requires one valid LineString part');
         const bounds=coordinates.reduce((b,p)=>[Math.min(b[0],p[0]),Math.max(b[1],p[0]),Math.min(b[2],p[1]),Math.max(b[3],p[1])],[Infinity,-Infinity,Infinity,-Infinity]);
@@ -501,6 +503,12 @@ export class ScoutGeoStore {
   getNetworkArtifact(snapshotId){return this.db.prepare('SELECT * FROM network_artifacts WHERE snapshot_id=?').get(snapshotId)??null;}
   networkImportCheckpoint(snapshotId){return this.db.prepare('SELECT * FROM network_import_checkpoints WHERE snapshot_id=?').get(snapshotId)??null;}
   networkEdgeCount(snapshotId){return this.db.prepare('SELECT count(*) count FROM network_edges WHERE snapshot_id=?').get(snapshotId).count;}
+  networkExtent(snapshotId){
+    if(!this.getNetworkSnapshot(snapshotId))throw new Error(`unknown network snapshot '${snapshotId}'`);
+    const row=this.db.prepare(`SELECT min(r.min_lon) west,min(r.min_lat) south,max(r.max_lon) east,max(r.max_lat) north
+      FROM network_edges e JOIN network_edges_rtree r USING(edge_rowid) WHERE e.snapshot_id=?`).get(snapshotId);
+    return row&&[row.west,row.south,row.east,row.north].every(Number.isFinite)?[row.west,row.south,row.east,row.north]:null;
+  }
   setNetworkImportCheckpoint(snapshotId,{source_url,records_seen,edges_written,status}){
     if(!this.getNetworkSnapshot(snapshotId)||!source_url||!Number.isSafeInteger(records_seen)||records_seen<0||!Number.isSafeInteger(edges_written)||edges_written<0||!['RUNNING','YIELDED','COMPLETE','FAILED'].includes(status))throw new Error('invalid network import checkpoint');
     this.db.prepare(`INSERT INTO network_import_checkpoints(snapshot_id,source_url,records_seen,edges_written,status,updated_at) VALUES(?,?,?,?,?,?)

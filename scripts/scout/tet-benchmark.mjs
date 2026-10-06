@@ -17,7 +17,8 @@ export function benchmarkTetAgainstIndependentDiscovery(store,{independentRunId,
   if(discovery.reference_run_id!==null)throw new Error('benchmark refuses a discovery run that used a reference run');
   if(discovery.edges_examined!==store.networkEdgeCount(discovery.snapshot_id))throw new Error('benchmark requires a full-snapshot independent discovery pass');
   const discoverySource=store.getSource(discovery.discovery_source_id),network=store.getNetworkSnapshot(discovery.snapshot_id),networkSource=network&&store.getSource(network.source_id);
-  if(!discoverySource||!network||!networkSource?.roles?.routing_network||!String(networkSource.type??'').toLowerCase().includes('osm')||
+  const supportedNetwork=String(networkSource?.type??'').toLowerCase().includes('osm')||networkSource?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4';
+  if(!discoverySource||!network||!networkSource?.roles?.routing_network||!supportedNetwork||
       discoverySource.roles?.legal_access===true||discoverySource.parent_network_source_id!==network.source_id)
     throw new Error('independent discovery source/snapshot provenance is invalid');
   const reference=store.getRun(referenceRunId);
@@ -85,11 +86,11 @@ export function benchmarkTetAgainstIndependentDiscovery(store,{independentRunId,
       reason:'The comparison source is discovery-only and cannot supply expected legal/product states. Compare against a separately approved authoritative/current RT&T state corpus.'},
     authoritative_upgrades_or_downgrades:null,
     extra_independent_candidate_way_parts:independentOnly.length,
-    match_method:'EXACT_OSM_WAY_PART_IDENTITY_ONLY',
+    match_method:'EXACT_SHARED_NETWORK_EDGE_PART_IDENTITY_ONLY',
     limitations:['Partial matches are only set-level partial support.','PARALLEL and AMBIGUOUS require a separately validated post-run geometry adjudicator and are intentionally null, not zero.',
       'Unmatched reasons are provisional and conservative; OTHER means reference evidence cites network parts that Scout did not select as candidate way-parts.',
       'No TET geometry, route, evidence, or metadata was read by the independent discovery pass. TET data is accessed only by this post-completion comparison.',
-      'No TET or OSM record is legal-access evidence.'],
+      'No TET, OSM, or NVDB road-network record is by itself legal-access evidence.'],
     human_approval_required_before_phase2:true,
   };
 }

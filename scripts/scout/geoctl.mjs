@@ -22,9 +22,10 @@ import { spwRoadSourceDefinition } from './spw-network.mjs';
 import { pollSpwServiceMetadata } from './spw-watchkeeper.mjs';
 import { listEuropeSourceCandidates, renderEuropeCoverageMatrix } from './europe-source-catalog.mjs';
 import { benchmarkTetAgainstIndependentDiscovery, writePrivateTetBenchmark } from './tet-benchmark.mjs';
+import { acquireNvdbSnapshot, importNvdbSnapshot, nvdbNorwaySourceDefinition, registerNvdbDiscoverySource, discoverNvdbRun } from './nvdb-network.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
-scout-geoctl source register-spw
+scout-geoctl source register-spw|register-nvdb-no
 scout-geoctl source approve --source-id ID --by NAME --scope TEXT
 scout-geoctl import --source-id ID --file FILE [--name RELATIVE_NAME] [--language BCP47]
 scout-geoctl network acquire --source-id ID --snapshot-id ID
@@ -138,7 +139,13 @@ async function networkStage(store,root,{sub,sourceId,snapshotId,env,calculateChe
   const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),grant=admission.acquireScout(owner);
   if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
   try{const shouldYield=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce});
-    const result=sub==='acquire'?await acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield,calculateChecksum}):await importNetworkArtifact(store,{snapshotId,shouldYield});
+    const source=sub==='acquire'?store.getSource(sourceId):store.getSource(store.getNetworkSnapshot(snapshotId)?.source_id);
+    let result;
+    if(source?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4')
+      result=sub==='acquire'?await acquireNvdbSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield,
+        onPage:progress=>{if(progress.pages_written%100===0)console.log(JSON.stringify({stage:'nvdb-acquire',snapshot_id:snapshotId,...progress}));}}):
+        await importNvdbSnapshot(store,{snapshotId,shouldYield,onBatch:progress=>{if(progress.pages_seen%100===0)console.log(JSON.stringify({stage:'nvdb-import',snapshot_id:snapshotId,...progress}));}});
+    else result=sub==='acquire'?await acquireNetworkSnapshot(store,{sourceId,snapshotId,dataRoot:path.join(root,'network'),shouldYield,calculateChecksum}):await importNetworkArtifact(store,{snapshotId,shouldYield});
     if(result.status==='YIELDED')result.yield_reason=shouldYield.reason()??'safe resource yield';return result;
   }finally{const released=releaseGeoAdmission(admission,owner,grant,'regional network acquire/import completed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}
 }
@@ -174,19 +181,27 @@ async function processRegionPlan(store,root,runId,env){
   }
 }
 async function processDiscoveryRun(store,root,runId,env){
-  const run=store.getDiscoveryRun(runId);if(!run)throw new Error(`unknown OSM discovery run '${runId}'`);
+  const run=store.getDiscoveryRun(runId);if(!run)throw new Error(`unknown discovery run '${runId}'`);
   const factoryDir=hostFactoryDir(env);assertGeoHostAdmission(readHostSnapshot({factoryDir}));
   const admission=new SharedResourceAdmission(resourceAdmissionStateFile(factoryDir)),owner=`scout-discovery:${runId}`,grant=admission.acquireScout(owner);
   if(!grant.ok)throw new Error(`BLOCKED_SHARED_ADMISSION: ${grant.reason??'lease unavailable'}`);
   let interrupted=false;const signal=()=>{interrupted=true;};process.once('SIGTERM',signal);process.once('SIGINT',signal);
   const yieldCheck=createGeoYieldCheck({factoryDir,owner,nonce:grant.lease.nonce}),shouldYield=()=>interrupted||yieldCheck();
   try{
-    const result=discoverOsmRun(store,runId,{shouldYield,yieldReason:()=>yieldCheck.reason()});
+    const snapshot=store.getNetworkSnapshot(run.snapshot_id),networkSource=snapshot&&store.getSource(snapshot.source_id);
+    let result;
+    if(networkSource?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4')
+      result=discoverNvdbRun(store,runId,{shouldYield,onProgress:progress=>{if(progress.edges_examined%50000===0)console.log(JSON.stringify({stage:'nvdb-discovery',...progress}));}});
+    else if(String(networkSource?.type??'').toLowerCase().includes('osm'))
+      result=discoverOsmRun(store,runId,{shouldYield,yieldReason:()=>yieldCheck.reason()});
+    else throw new Error('discovery refuses unsupported network provider; OSM is never used as an implicit fallback');
     if(result.status==='BLOCKED')return result;
+    if(networkSource?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4')
+      return {...result,notification:{queued:false,reason:'NVDB-only uncertainty is an ORANGE research outcome, not a human legal decision'}};
     const notice=await queueReviewNotice(root,runId,result.candidate_count,env);
     return {...result,notification:notice};
   }catch(error){store.updateDiscoveryRun(runId,{status:'FAILED',last_error:error.message});throw error;}
-  finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'OSM discovery completed, failed or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
+  finally{process.removeListener('SIGTERM',signal);process.removeListener('SIGINT',signal);const released=releaseGeoAdmission(admission,owner,grant,'regional discovery completed, failed or safely yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason??'lease not released'}`);}
 }
 function lineLength(geometry){const lines=geometry.type==='LineString'?[geometry.coordinates]:geometry.coordinates;return lines.reduce((sum,line)=>sum+line.slice(1).reduce((n,point,i)=>n+lengthMeters(line[i],point),0),0);}
 function unknownReason(evidence){const rs=[...new Set(evidence.flatMap(e=>e.rule==='interval-network-ambiguity'&&e.reason?[e.reason]:e.rule==='no-network-match-within-threshold'?['no_network_match']:[]))];return rs.length===1?rs[0]:rs.length?'multiple_unknown_reasons':'NONE';}
@@ -230,14 +245,24 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   if(command==='region'&&sub==='review'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getRegionPlan(runId))throw new Error(`unknown Scout region plan '${runId}'`);console.log(JSON.stringify(store.listRunReviewCandidates({runId,decision:opts.decision??'UNREVIEWED'}),null,2));}finally{store.close();}return 0;}
   if(command==='discover'&&sub==='create'){
     if(opts.reference_run_id!==undefined)throw new Error('discovery cannot accept a comparison/reference run; run the independent pass first, then use the post-run benchmark');
-    const {store}=storeFor(env);try{const snapshotId=required(opts,'snapshot_id'),snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot)throw new Error('discovery requires a registered pinned OSM snapshot');
-      const countryCode=required(opts,'country_code').toUpperCase(),sourceInfo=registerOsmDiscoverySource(store,snapshotId),source=sourceInfo.source,regionId=required(opts,'region_id');
+    const {store}=storeFor(env);try{const snapshotId=required(opts,'snapshot_id'),snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot)throw new Error('discovery requires a registered pinned network snapshot');
+      const countryCode=required(opts,'country_code').toUpperCase(),networkSource=store.getSource(snapshot.source_id),isNvdb=networkSource?.network_api?.provider==='statens-vegvesen-nvdb-api-les-v4';
+      const sourceInfo=isNvdb?registerNvdbDiscoverySource(store,snapshotId):registerOsmDiscoverySource(store,snapshotId),source=sourceInfo.source,regionId=required(opts,'region_id');
       const approvedBy=required(opts,'approved_by'),approvalScope=required(opts,'approval_scope');let approval=store.sourceApproval(source.source_id);
       if(approval&&(approval.approved_by!==approvedBy||approval.scope!==approvalScope))throw new Error('discovery source already has a different active approval; revoke/review it explicitly');
       if(!approval)approval=store.approveSource({source_id:source.source_id,approved_by:approvedBy,scope:approvalScope});
-      const area=jurisdictionViewport(store,source,countryCode),config={title:opts.title??`${regionId} independent OSM discovery`,viewport:area.viewport,
-        discovery_version:'osm-way-discovery-1',jurisdiction:{id:area.jurisdiction_id,version:area.jurisdiction_version,boundary_source:area.boundary_source},
-        source_filter:'registered OSM way parts selected by highway/surface/tracktype/smoothness/service context; excludes ordinary ROAD classifications',canonical_status:'NOT_COMPARED'};
+      let area;
+      if(isNvdb){
+        if(countryCode!=='NO')throw new Error('the NVDB adapter is approved for Norway only');
+        const extent=store.networkExtent(snapshotId);if(!extent)throw new Error('BLOCKED_NETWORK_NOT_IMPORTED: NVDB snapshot has no geometry extent');
+        const [west,south,east,north]=extent,dx=Math.max((east-west)*0.025,0.05),dy=Math.max((north-south)*0.025,0.05);
+        area={viewport:[Math.max(-180,west-dx),Math.max(-90,south-dy),Math.min(180,east+dx),Math.min(90,north+dy)],jurisdiction_id:'NO',jurisdiction_version:snapshot.version,boundary_source:'official full-country NVDB network extent; display viewport only'};
+      }else area=jurisdictionViewport(store,source,countryCode);
+      const discoveryVersion=isNvdb?'nvdb-road-link-discovery-1':'osm-way-discovery-1';
+      const config={title:opts.title??`${regionId} independent ${isNvdb?'NVDB':'OSM'} discovery`,viewport:area.viewport,
+        discovery_version:discoveryVersion,jurisdiction:{id:area.jurisdiction_id,version:area.jurisdiction_version,boundary_source:area.boundary_source},
+        source_filter:isNvdb?'all NVDB road links scanned countrywide; nonstandard/private network kinds selected as UNKNOWN research candidates; ordinary road links retained as context':
+          'registered OSM way parts selected by highway/surface/tracktype/smoothness/service context; excludes ordinary ROAD classifications',canonical_status:'NOT_COMPARED'};
       const run=store.createDiscoveryRun({run_id:required(opts,'run_id'),discovery_source_id:source.source_id,snapshot_id:snapshotId,country_code:countryCode,region_id:regionId,
         reference_run_id:null,title:config.title,viewport:area.viewport,approved_by:approvedBy,approval_scope:approvalScope,config});
       console.log(JSON.stringify({run_id:run.run_id,status:run.status,source_id:source.source_id,source_revision:source.revision,snapshot_id:snapshotId,snapshot_version:snapshot.version,
@@ -266,11 +291,12 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
       try{store.close();}finally{if(admission&&grant){const released=releaseGeoAdmission(admission,owner,grant,'Scout topology corridor run completed, failed or yielded');if(!released.ok)throw new Error(`BLOCKED_SHARED_ADMISSION_RELEASE: ${released.reason}`);}}
     }
   }
-  if(command==='corridor'&&sub==='status'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getDiscoveryRun(runId))throw new Error('unknown OSM discovery run');console.log(JSON.stringify(corridorRunStats(store,runId),null,2));}finally{store.close();}return 0;}
+  if(command==='corridor'&&sub==='status'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getDiscoveryRun(runId))throw new Error('unknown discovery run');console.log(JSON.stringify(corridorRunStats(store,runId),null,2));}finally{store.close();}return 0;}
   if(command==='corridor'&&sub==='review'&&operation==='list'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');console.log(JSON.stringify(listCorridorReview(store,{runId,state:opts.state??'UNREVIEWED',limit:Number(opts.limit??200)}),null,2));}finally{store.close();}return 0;}
   if(command==='corridor'&&sub==='review'&&operation==='decide'){const {store}=storeFor(env);try{console.log(JSON.stringify(recordCorridorReview(store,{corridorId:required(opts,'corridor_id'),decision:required(opts,'decision'),reviewer:required(opts,'reviewer'),reason:required(opts,'reason')}),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register'){const definition=JSON.parse(fs.readFileSync(required(opts,'manifest'),'utf8'));const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(definition),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='register-spw'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(spwRoadSourceDefinition()),null,2));}finally{store.close();}return 0;}
+  if(command==='source'&&sub==='register-nvdb-no'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.registerSource(nvdbNorwaySourceDefinition()),null,2));}finally{store.close();}return 0;}
   if(command==='source'&&sub==='approve'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.approveSource({source_id:required(opts,'source_id'),approved_by:required(opts,'by'),scope:required(opts,'scope')}),null,2));}finally{store.close();}return 0;}
   if(command==='watchkeeper'&&sub==='spw-poll'){const {store}=storeFor(env);try{const result=await pollSpwServiceMetadata(store);console.log(JSON.stringify(result,null,2));return ['AMBER','RED'].includes(result.state)?75:0;}finally{store.close();}}
   if(command==='import'){const sourceId=required(opts,'source_id'),inputFile=required(opts,'file'),rawRoot=configuredPath('SCOUT_RAW_ROOT'),{store}=storeFor(env);try{if(!store.sourceApproval(sourceId))throw new Error('route import requires an explicit active source approval');const result=ingestRouteFile(store,{inputFile,sourceId,relativeName:opts.name??path.basename(inputFile),rawRoot,sourceLanguage:opts.language??null});console.log(JSON.stringify({file_id:result.file_id,version:result.version,checksum:result.checksum,format:result.format,duplicate:result.duplicate,observation_count:result.observations.length,observation_ids:result.observations.map(x=>x.observation_id)},null,2));}finally{store.close();}return 0;}
@@ -279,7 +305,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
     return registered.length?registered.map(snapshot=>({source_id:source.source_id,network_extract:source.network_extract,...describe(snapshot)})):[{source_id:source.source_id,network_extract:source.network_extract,operator_state:'NOT_ACQUIRED'}];});
     console.log(JSON.stringify(rows,null,2));}finally{store.close();}return 0;}
   if(command==='network'&&(sub==='acquire'||sub==='import')){const {root,store}=storeFor(env);const snapshotId=required(opts,'snapshot_id'),sourceId=opts.source_id;try{
-    if(sub==='acquire'){if(!sourceId)throw new Error('--source-id is required for network acquire');const source=store.getSource(sourceId);if(!source)throw new Error(`unknown network source '${sourceId}'`);resolveNetworkExtract(source);}
+    if(sub==='acquire'){if(!sourceId)throw new Error('--source-id is required for network acquire');const source=store.getSource(sourceId);if(!source)throw new Error(`unknown network source '${sourceId}'`);if(source.network_api?.provider!=='statens-vegvesen-nvdb-api-les-v4')resolveNetworkExtract(source);}
     else{const snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot||!store.sourceApproval(snapshot.source_id))throw new Error('network import requires a registered snapshot with explicit active source approval');}
     const result=await networkStage(store,root,{sub,sourceId,snapshotId,env});
     console.log(JSON.stringify(result,null,2));return result.status==='YIELDED'?75:0;
