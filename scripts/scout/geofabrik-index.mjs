@@ -13,6 +13,13 @@ async function checkedFetch(fetchImpl,url,init){
     const location=response?.headers?.get?.('location');
     if([301,302,303,307,308].includes(response?.status)&&location){
       const next=new URL(location,current);
+      // Geofabrik currently sends its dated latest-file redirect as an HTTP
+      // Location even when the request arrived over HTTPS. Never follow that
+      // downgrade: accept only the same official host and upgrade the URL,
+      // then independently HEAD the dated HTTPS artifact before pinning it.
+      if(current.origin===BASE&&next.protocol==='http:'&&next.hostname===new URL(BASE).hostname&&!next.port&&!next.username&&!next.password&&!next.search&&!next.hash){
+        next.protocol='https:';
+      }
       const providerHop=current.origin===BASE&&isApprovedPbfTarget(next),mirrorHop=current.hostname===OFFICIAL_MIRROR_HOST&&next.hostname===OFFICIAL_MIRROR_HOST&&isApprovedPbfTarget(next);
       if(next.origin!==BASE&&!providerHop&&!mirrorHop)fail('Geofabrik redirected outside the approved provider/mirror set.');
       current=next;continue;
@@ -46,7 +53,8 @@ export async function resolveGeofabrikCountry({countryCode,regionName,fetchImpl=
   if(redirectedDated){
     const year=2000+Number(redirectedDated[1]),month=Number(redirectedDated[2]),day=Number(redirectedDated[3]),stamp=new Date(Date.UTC(year,month-1,day));
     if(stamp.getUTCFullYear()!==year||stamp.getUTCMonth()!==month-1||stamp.getUTCDate()!==day)fail('Geofabrik redirected to an invalid dated extract.');
-    date=`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;versioned=resolvedLatest;exactResponse=latestResponse;
+    date=`${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;versioned=resolvedLatest;
+    exactResponse=(await checkedFetch(fetchImpl,versioned.href,{method:'HEAD'})).response;
   }else{
     const modified=parseDate(latestResponse.headers.get('last-modified')),year=modified.getUTCFullYear();
     date=`${year}-${String(modified.getUTCMonth()+1).padStart(2,'0')}-${String(modified.getUTCDate()).padStart(2,'0')}`;
@@ -55,7 +63,8 @@ export async function resolveGeofabrikCountry({countryCode,regionName,fetchImpl=
     exactResponse=(await checkedFetch(fetchImpl,versioned.href,{method:'HEAD'})).response;
   }
   const latestBytes=Number(latestResponse.headers.get('content-length')),exactBytes=Number(exactResponse.headers.get('content-length'));
-  if(!(latestBytes>0&&exactBytes>0&&latestBytes===exactBytes))fail('Geofabrik dated extract could not be verified against its current country extract; no snapshot was selected.');
+  const redirectPinsExact=redirectedDated&&resolvedLatest.href===versioned.href&&exactResponse.status===200;
+  if(!(exactBytes>0&&(latestBytes>0?latestBytes===exactBytes:redirectPinsExact)))fail('Geofabrik dated extract could not be verified against its current country extract; no snapshot was selected.');
   const snapshotId=`geofabrik-${code.toLowerCase()}-${date.replaceAll('-','')}`;
   return {provider:'geofabrik',provider_index_url:INDEX_URL,provider_region_id:properties.id,region_name:name,country_code:code,
     version:date,snapshot_id:snapshotId,url:versioned.href,latest_metadata_url:latest.href,

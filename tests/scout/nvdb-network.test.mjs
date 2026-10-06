@@ -53,6 +53,33 @@ test('official NVDB page normalizes road links into private Scout network edges'
   assert.equal(edges[2].tags.highway, 'path');
 });
 
+test('NVDB source sequence positions and port node IDs survive normalization as topology, without proving access', () => {
+  const page={objekter:[{veglenkesekvensid:9010,porter:[
+    {id:1,relativPosisjon:0,tilkobling:{nodeid:7001}},{id:2,relativPosisjon:.5,tilkobling:{nodeid:7002}},{id:3,relativPosisjon:1,tilkobling:{nodeid:7003}},
+  ],veglenker:[
+    {...link(9010,1,'Enkel bilveg'),startposisjon:0,sluttposisjon:.5,startport:1,sluttport:2},
+    {...link(9010,2,'Enkel bilveg'),startposisjon:.5,sluttposisjon:1,startport:2,sluttport:3},
+  ]}]};
+  const [a,b]=normalizeNvdbPage(page),ta=a.evidence[0].topology,tb=b.evidence[0].topology;
+  assert.deepEqual({sequence:ta.sequence_id,link:ta.link_number,from:ta.start_node,to:ta.end_node,fromPosition:ta.start_position,toPosition:ta.end_position,state:ta.topology_state},
+    {sequence:'9010',link:1,from:'7001',to:'7002',fromPosition:0,toPosition:.5,state:'EXPLICIT_NVDB_NODE_IDS'});
+  assert.equal(tb.start_node,'7002');assert.equal(tb.end_node,'7003');
+  assert.equal(ta.end_node,tb.start_node,'shared node gives a source-topology continuation');
+  assert.equal(a.tags['nvdb:sequence_id'],'9010');assert.equal(a.tags['nvdb:topology_state'],'EXPLICIT_NVDB_NODE_IDS');
+  assert.equal(a.evidence[0].claim,'PHYSICAL_EXISTENCE','sequence topology does not create a legal-access claim');
+});
+
+test('missing NVDB positions remain unknown and date/version metadata stays provenance only',()=>{
+  const edge=normalizeNvdbRoadLink({...link(9011,1,'Skogsbilveg'),startposisjon:null,sluttposisjon:undefined,
+    startdato:'2020-01-01',sluttdato:'2025-01-01',oppdateringsdato:'2024-12-01'});
+  assert.equal(edge.evidence[0].topology.start_position,null);
+  assert.equal(edge.evidence[0].topology.end_position,null);
+  assert.equal(edge.tags['nvdb:start_date'],'2020-01-01');
+  assert.equal(edge.tags['nvdb:end_date'],'2025-01-01');
+  assert.equal(edge.tags['nvdb:source_update_date'],'2024-12-01');
+  assert.equal(edge.evidence[0].claim,'PHYSICAL_EXISTENCE','dates and network identity do not claim motorcycle access');
+});
+
 test('EPSG:5973 projection handles Norway-wide UTM zone 33 coordinates precisely', () => {
   const fixtures = [
     { e: -148432.253504365, n: 6481751.773865681, lon: 4, lat: 58 },

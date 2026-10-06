@@ -6,13 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
 import { derivePrivateViewport, resolveGeofabrikCountry } from '../../scripts/scout/geofabrik-index.mjs';
-import { approveRegionPlan, prepareRegionPlan } from '../../scripts/scout/region-operator.mjs';
+import { approveRegionPlan, geofabrikNetworkSourceDefinition, prepareRegionPlan } from '../../scripts/scout/region-operator.mjs';
+import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
 
 const root=()=>fs.mkdtempSync(path.join(os.tmpdir(),'scout-region-intent-'));
 const route=`<?xml version="1.0"?><gpx><trk><name>synthetic route</name><trkseg><trkpt lat="45.1" lon="15.2"/><trkpt lat="45.2" lon="15.3"/></trkseg></trk></gpx>`;
 const index={type:'FeatureCollection',features:[{type:'Feature',properties:{id:'europe/croatia',name:'Croatia','iso3166-1:alpha2':['HR'],urls:{pbf:'https://download.geofabrik.de/europe/croatia-latest.osm.pbf'}}}]};
-function fetchFixture({duplicate=false,mismatchBytes=false,redirectLatest=false}={}){const calls=[];return {calls,fetch:async(url,init={})=>{calls.push([url,init.method??'GET']);if(url==='https://download.geofabrik.de/index-v1-nogeom.json')return new Response(JSON.stringify(duplicate?{...index,features:[...index.features,...index.features]}:index),{status:200});
-  const latest=url.endsWith('croatia-latest.osm.pbf'),dated=url.endsWith('croatia-261004.osm.pbf');if(latest&&redirectLatest&&init.method==='HEAD')return new Response(null,{status:307,headers:{location:'https://download.geofabrik.de/europe/croatia-261004.osm.pbf'}});
+function fetchFixture({duplicate=false,mismatchBytes=false,redirectLatest=false,httpRedirect=false}={}){const calls=[];return {calls,fetch:async(url,init={})=>{calls.push([url,init.method??'GET']);if(url==='https://download.geofabrik.de/index-v1-nogeom.json')return new Response(JSON.stringify(duplicate?{...index,features:[...index.features,...index.features]}:index),{status:200});
+  const latest=url.endsWith('croatia-latest.osm.pbf'),dated=url.endsWith('croatia-261004.osm.pbf');if(latest&&redirectLatest&&init.method==='HEAD')return new Response(null,{status:307,headers:{location:`${httpRedirect?'http':'https'}://download.geofabrik.de/europe/croatia-261004.osm.pbf`}});
   if((latest||dated)&&init.method==='HEAD')return new Response(null,{status:200,headers:{'last-modified':'Sun, 04 Oct 2026 21:00:00 GMT','content-length':String(dated&&mismatchBytes?456:123)}});return new Response('unexpected',{status:404});}};}
 const intent={private_processing:true,redistribution:false,derived_public_use:false,legal_evidence:false};
 test('Geofabrik lookup resolves ISO country metadata to a verified dated URL, never a latest processing URL',async()=>{
@@ -21,10 +22,24 @@ test('Geofabrik lookup resolves ISO country metadata to a verified dated URL, ne
   assert.equal(region.url,'https://download.geofabrik.de/europe/croatia-261004.osm.pbf');assert.doesNotMatch(region.url,/latest/i);
   assert.deepEqual(fixture.calls.map(c=>c[1]),['GET','HEAD','HEAD']);assert.equal(region.licence.version,'1.0');assert.match(region.attribution,/OpenStreetMap contributors/);
 });
+test('Geofabrik source identity passes through the existing explicit OSM discovery adapter',async()=>{
+  const provider=await resolveGeofabrikCountry({countryCode:'NO',regionName:'Norway',fetchImpl:async(url,init={})=>{
+    if(url.endsWith('index-v1-nogeom.json'))return new Response(JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{id:'europe/norway',name:'Norway','iso3166-1:alpha2':['NO'],urls:{pbf:'https://download.geofabrik.de/europe/norway-latest.osm.pbf'}}}]}));
+    if(init.method==='HEAD')return new Response(null,{status:200,headers:{'last-modified':'Sun, 04 Oct 2026 21:00:00 GMT','content-length':'123'}});return new Response(null,{status:404});}});
+  const source=geofabrikNetworkSourceDefinition(provider),dir=root(),store=new ScoutGeoStore(path.join(dir,'state'));
+  try{assert.equal(source.type,'regional-osm-network');store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:provider.snapshot_id,source_id:source.source_id,version:provider.version,checksum:'a'.repeat(64),licence:provider.licence,coverage:provider.coverage});
+    assert.equal(registerOsmDiscoverySource(store,provider.snapshot_id).source.roles.discovery_only,true);
+  }finally{store.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
 test('Geofabrik same-origin latest redirects are followed and pinned to the dated target',async()=>{
   const fixture=fetchFixture({redirectLatest:true}),region=await resolveGeofabrikCountry({countryCode:'HR',regionName:'Croatia',fetchImpl:fixture.fetch});
   assert.equal(region.version,'2026-10-04');assert.equal(region.url,'https://download.geofabrik.de/europe/croatia-261004.osm.pbf');
-  assert.deepEqual(fixture.calls.map(c=>c[0]),['https://download.geofabrik.de/index-v1-nogeom.json','https://download.geofabrik.de/europe/croatia-latest.osm.pbf','https://download.geofabrik.de/europe/croatia-261004.osm.pbf']);
+  assert.deepEqual(fixture.calls.map(c=>c[0]),['https://download.geofabrik.de/index-v1-nogeom.json','https://download.geofabrik.de/europe/croatia-latest.osm.pbf','https://download.geofabrik.de/europe/croatia-261004.osm.pbf','https://download.geofabrik.de/europe/croatia-261004.osm.pbf']);
+});
+test('Geofabrik HTTP downgrade redirect is upgraded in place and dated bytes are independently checked',async()=>{
+  const fixture=fetchFixture({redirectLatest:true,httpRedirect:true}),region=await resolveGeofabrikCountry({countryCode:'HR',regionName:'Croatia',fetchImpl:fixture.fetch});
+  assert.equal(region.url,'https://download.geofabrik.de/europe/croatia-261004.osm.pbf');
+  assert.deepEqual(fixture.calls.map(c=>c[0]),['https://download.geofabrik.de/index-v1-nogeom.json','https://download.geofabrik.de/europe/croatia-latest.osm.pbf','https://download.geofabrik.de/europe/croatia-261004.osm.pbf','https://download.geofabrik.de/europe/croatia-261004.osm.pbf']);
 });
 test('ambiguous, mismatched, or unverifiable regional provider metadata fails closed',async()=>{
   await assert.rejects(resolveGeofabrikCountry({countryCode:'HR',regionName:'Croatia',fetchImpl:fetchFixture({duplicate:true}).fetch}),/multiple Geofabrik extracts/);

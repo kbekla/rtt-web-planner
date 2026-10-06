@@ -11,6 +11,7 @@
     "test:scout": "node --test tests/scout/*.test.mjs",
     "test:render": "playwright test",
     "scout:geo": "node scripts/scout/geoctl.mjs",
+    "scout:norway-phase2": "node scripts/scout/norway-phase2-ctl.mjs",
     "scout:operator": "node scripts/scout/operator-ui.mjs",
     "scout:review:synthetic": "node scripts/scout/review-server.mjs"
   },

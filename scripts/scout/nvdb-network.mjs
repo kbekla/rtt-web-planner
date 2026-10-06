@@ -9,7 +9,7 @@ import { lengthMeters } from './route-segmenter.mjs';
 
 export const NVDB_API_BASE = 'https://nvdbapiles.atlas.vegvesen.no';
 export const NVDB_API_VERSION = 'nvdb-api-les-v4';
-export const NVDB_ADAPTER_VERSION = 'nvdb-road-link-normalizer-2';
+export const NVDB_ADAPTER_VERSION = 'nvdb-road-link-normalizer-3';
 // The V4 collection endpoint returns paginated sequence records containing
 // their segment/link geometries. The documented next-page href uses the
 // official unversioned public facade path on the same API host.
@@ -98,6 +98,16 @@ export function normalizeNvdbRoadLink(link) {
     throw new Error('NVDB road link requires sequence and link identities');
   if (!geometry || geometry.srid !== 5973) throw new Error('NVDB road link must provide geometry with SRID 5973');
   const ref = link.vegsystemreferanse ?? {}, system = ref.vegsystem ?? {}, stretch = ref.strekning ?? {};
+  const topology = {
+    sequence_id: String(sequenceId), link_number: Number(linkNumber), segment_number: String(segmentNumber),
+    start_position: link.startposisjon == null ? null : Number(link.startposisjon),
+    end_position: link.sluttposisjon == null ? null : Number(link.sluttposisjon),
+    start_port: link.startport == null ? null : String(link.startport), end_port: link.sluttport == null ? null : String(link.sluttport),
+    start_node: link._scout_topology?.start_node == null ? null : String(link._scout_topology.start_node),
+    end_node: link._scout_topology?.end_node == null ? null : String(link._scout_topology.end_node),
+    sequence_page_index: link._scout_topology?.sequence_page_index ?? null,
+    topology_state: link._scout_topology?.start_node != null && link._scout_topology?.end_node != null ? 'EXPLICIT_NVDB_NODE_IDS' : 'PORT_NODE_MISSING',
+  };
   const tags = {
     ...(internalHighway(link.typeVeg, system.vegkategori) ? { highway: internalHighway(link.typeVeg, system.vegkategori) } : {}),
     'nvdb:type_veg': link.typeVeg ?? null,
@@ -116,7 +126,19 @@ export function normalizeNvdbRoadLink(link) {
     'nvdb:measurement_date': link.måledato ?? null,
     'nvdb:geometry_capture_date': geometry.datafangstdato ?? null,
     'nvdb:start_date': link.startdato ?? link.metadata?.startdato ?? null,
+    'nvdb:end_date': link.sluttdato ?? link.metadata?.sluttdato ?? null,
+    'nvdb:source_update_date': geometry.oppdateringsdato ?? link.oppdateringsdato ?? null,
     'nvdb:length_m': link.lengde ?? geometry.lengde ?? null,
+    'nvdb:sequence_id': topology.sequence_id,
+    'nvdb:link_number': topology.link_number,
+    'nvdb:segment_number': topology.segment_number,
+    'nvdb:start_position': Number.isFinite(topology.start_position) ? topology.start_position : null,
+    'nvdb:end_position': Number.isFinite(topology.end_position) ? topology.end_position : null,
+    'nvdb:start_port': topology.start_port,
+    'nvdb:end_port': topology.end_port,
+    'nvdb:start_node': topology.start_node,
+    'nvdb:end_node': topology.end_node,
+    'nvdb:topology_state': topology.topology_state,
   };
   for (const [key, value] of Object.entries(tags)) if (value === null || value === undefined) delete tags[key];
   const originalIdentity = String(link.kortform ?? link.referanse ?? `${sequenceId}-${linkNumber}-${segmentNumber}-${link.startposisjon}-${link.sluttposisjon}`);
@@ -126,6 +148,7 @@ export function normalizeNvdbRoadLink(link) {
     edge_id: edgeId, geometry: normalizedGeometry, tags,
     evidence: [{ source_id: 'no-nvdb-vegkart', source_authority: 'Statens vegvesen', claim: 'PHYSICAL_EXISTENCE',
       source_reference: originalIdentity, source_object_id: String(sequenceId), link_number: Number(linkNumber), segment_number: Number(segmentNumber),
+      topology,
       source_geometry_srid: geometry.srid, source_wkt: geometry.wkt, geometry_capture_date: geometry.datafangstdato ?? null,
       measurement_date: link.måledato ?? null, source_record: link }],
     jurisdiction_ids: ['NO'],
@@ -136,15 +159,20 @@ export function normalizeNvdbPage(page) {
   const rows = Array.isArray(page) ? page : page?.objekter ?? page?.veglenkesekvenser ?? page?.veglenkesegmenter;
   if (!Array.isArray(rows)) throw new Error('NVDB page has no recognized road-link array');
   const edges = [];
-  for (const row of rows) {
+  for (let sequencePageIndex = 0; sequencePageIndex < rows.length; sequencePageIndex++) {
+    const row = rows[sequencePageIndex];
     // The segmented link endpoint is the canonical acquisition target. Also
     // accept a sequence response fixture for compatibility with API V4.
-    if (row.geometri) edges.push(normalizeNvdbRoadLink(row));
-    else if (Array.isArray(row.veglenker)) for (const link of row.veglenker) {
-      edges.push(normalizeNvdbRoadLink({ ...link, veglenkesekvensid: row.veglenkesekvensid,
+    if (row.geometri) edges.push(normalizeNvdbRoadLink({ ...row, _scout_topology: {
+      sequence_page_index: sequencePageIndex, start_node: row.startnode ?? null, end_node: row.sluttnode ?? null,
+    } }));
+    else if (Array.isArray(row.veglenker)) {
+      const ports = new Map((row.porter ?? []).map(port => [String(port.id), port.tilkobling?.nodeid == null ? null : String(port.tilkobling.nodeid)]));
+      for (const link of row.veglenker) edges.push(normalizeNvdbRoadLink({ ...link, veglenkesekvensid: row.veglenkesekvensid,
         segmentnummer: link.segmentnummer ?? row.segmentnummer, vegsystemreferanse: link.vegsystemreferanse ?? row.vegsystemreferanse,
         fylke: link.fylke ?? row.fylke, kommune: link.kommune ?? row.kommune,
-        adresse: link.adresse ?? row.adresse, metadata: link.metadata ?? row.metadata }));
+        adresse: link.adresse ?? row.adresse, metadata: link.metadata ?? row.metadata,
+        _scout_topology: { sequence_page_index: sequencePageIndex, start_node: ports.get(String(link.startport)), end_node: ports.get(String(link.sluttport)) } }));
     }
   }
   return edges;

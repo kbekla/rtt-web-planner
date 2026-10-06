@@ -7,6 +7,20 @@ const hash=(value)=>crypto.createHash('sha256').update(value).digest('hex');
 const safeSlug=(value)=>value.normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40)||'source';
 const bool=(value,key)=>{if(typeof value!=='boolean')throw new Error(`region prepare requires an explicit yes/no choice for ${key}`);return value;};
 
+export function geofabrikNetworkSourceDefinition(provider){
+  if(provider?.provider!=='geofabrik'||!/^[A-Z]{2}$/.test(provider?.country_code??'')
+    ||!/^https:\/\/download\.geofabrik\.de\/.+-(?:\d{6})\.osm\.pbf$/.test(provider.url??'')||!provider.snapshot_id||!provider.version)
+    throw new Error('Geofabrik network source needs an official dated HTTPS extract and unambiguous region metadata');
+  return {source_id:`network-geofabrik-${provider.country_code.toLowerCase()}`,name:`Geofabrik ${provider.region_name} OpenStreetMap network extract`,type:'regional-osm-network',organisation:'Geofabrik GmbH / OpenStreetMap contributors',
+    expected_formats:['pbf'],coverage:{countries:[provider.country_code],regions:[provider.provider_region_id]},jurisdiction_ids:[`${provider.country_code.toLowerCase()}-country`],location:provider.url,
+    adapter_version:'geofabrik-index-v1+osmium-v1',licence:provider.licence,
+    reuse:{private_processing:true,redistribution:true,derived_public_use:false},
+    roles:{discovery_only:false,physical_existence:false,legal_access:false,routing_network:true,public_reuse:true,jurisdiction_boundaries:false},
+    update:{mechanism:'pinned Geofabrik dated country extract'},attribution:provider.attribution,rate_limits:{requests_per_minute:1},
+    network_extract:{provider:provider.provider,url:provider.url,version:provider.version,snapshot_id:provider.snapshot_id,checksum_policy:'calculate-after-download',country_code:provider.country_code,
+      provider_index_url:provider.provider_index_url,provider_region_id:provider.provider_region_id,latest_metadata_url:provider.latest_metadata_url,byte_size:provider.byte_size,last_modified:provider.last_modified}};
+}
+
 export async function prepareRegionPlan(store,{routeFile,countryCode,regionName,sourceName,sourceType,permissions,sourceLicence,attribution,fetchImpl=fetch,now=new Date()}={}){
   if(!routeFile||!sourceName?.trim()||!sourceType?.trim())throw new Error('region prepare needs the exact route file, source name and source type');
   const code=String(countryCode??'').toUpperCase();if(!/^[A-Z]{2}$/.test(code))throw new Error('country code must be ISO alpha-2');
@@ -29,15 +43,7 @@ export async function prepareRegionPlan(store,{routeFile,countryCode,regionName,
     roles:{discovery_only:true,physical_existence:false,legal_access:intent.legal_evidence,routing_network:false,public_reuse:intent.redistribution,jurisdiction_boundaries:false},
     update:{mechanism:'explicit operator-selected file import'},attribution:attribution?.trim()||'Private provenance retained in Scout; redistribution is not authorized.',
     rate_limits:{requests_per_minute:0},source_policy:{evidence_role:intent.legal_evidence?'owner-designated source role; no automatic legal conclusion':'discovery hint only'}};
-  const networkSourceId=`network-geofabrik-${code.toLowerCase()}`;
-  const networkSource={source_id:networkSourceId,name:`Geofabrik ${provider.region_name} OpenStreetMap network extract`,type:'regional-network',organisation:'Geofabrik GmbH / OpenStreetMap contributors',
-    expected_formats:['pbf'],coverage:{countries:[code],regions:[provider.provider_region_id]},jurisdiction_ids:[jurisdictionId],location:provider.url,
-    adapter_version:'geofabrik-index-v1+osmium-v1',licence:provider.licence,
-    reuse:{private_processing:true,redistribution:true,derived_public_use:false},
-    roles:{discovery_only:false,physical_existence:false,legal_access:false,routing_network:true,public_reuse:true,jurisdiction_boundaries:false},
-    update:{mechanism:'pinned Geofabrik dated country extract'},attribution:provider.attribution,rate_limits:{requests_per_minute:1},
-    network_extract:{provider:provider.provider,url:provider.url,version:provider.version,snapshot_id:provider.snapshot_id,checksum_policy:'calculate-after-download',country_code:code,
-      provider_index_url:provider.provider_index_url,provider_region_id:provider.provider_region_id,latest_metadata_url:provider.latest_metadata_url,byte_size:provider.byte_size,last_modified:provider.last_modified}};
+  const networkSource=geofabrikNetworkSourceDefinition(provider);
   const prior=store.getRegionPlan(runId);
   const runPlan={run_id:runId,prepared_at:prior?.plan.prepared_at??now.toISOString(),country_code:code,region_id:provider.provider_region_id,region_name:provider.region_name,route_format:inspected.format,jurisdiction_ids:[jurisdictionId],
     route_file:{path:path.resolve(routeFile),original_filename:path.basename(routeFile),format:inspected.format,byte_size:inspected.byte_size,sha256:inspected.checksum,
