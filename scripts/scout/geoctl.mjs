@@ -20,6 +20,7 @@ import { discoverOsmRun, discoveryStats, registerOsmDiscoverySource } from './os
 import { buildCorridorRun, corridorRunStats, listCorridorReview, recordCorridorReview } from './osm-topology.mjs';
 import { spwRoadSourceDefinition } from './spw-network.mjs';
 import { pollSpwServiceMetadata } from './spw-watchkeeper.mjs';
+import { listEuropeSourceCandidates, renderEuropeCoverageMatrix } from './europe-source-catalog.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
 scout-geoctl source register-spw
@@ -46,6 +47,8 @@ scout-geoctl review decide --candidate-id ID --decision UNREVIEWED|ACCEPT_FOR_RE
 scout-geoctl review serve --run-id ID [--port PORT]
 scout-geoctl notify retry
 scout-geoctl watchkeeper spw-poll
+scout-geoctl europe sources [--country-code CC]
+scout-geoctl europe matrix [--country-code CC]
 scout-geoctl status`;
 export function parseGeoCtlArgs(args){const out={};for(let i=0;i<args.length;i++){if(!args[i].startsWith('--'))throw new Error(`unexpected argument '${args[i]}'`);const token=args[i].slice(2),equals=token.indexOf('='),key=(equals<0?token:token.slice(0,equals)).replaceAll('-','_');if(!key||out[key]!==undefined)throw new Error(`duplicate or invalid option '${args[i]}'`);if(equals>=0){out[key]=token.slice(equals+1);continue;}if(args[i+1]?.startsWith('--'))out[key]=true;else if(args[i+1]===undefined)out[key]=true;else out[key]=args[++i];}return out;}
 function required(opts,key){if(typeof opts[key]!=='string'||!opts[key])throw new Error(`--${key.replaceAll('_','-')} is required`);return opts[key];}
@@ -195,7 +198,13 @@ function runStats(store,runId){const run=store.getRun(runId);if(!run)throw new E
 export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   const [command,...rest]=argv;if(!command||command==='help'||command==='--help'){console.log(HELP);return 0;}
   const sub=rest[0],operation=command==='corridor'&&sub==='review'?rest[1]:null;
-  const opts=parseGeoCtlArgs(rest.slice(operation?2:['source','network','run','review','notify','watchkeeper','region','discover','corridor'].includes(command)?1:0));
+  const opts=parseGeoCtlArgs(rest.slice(operation?2:['source','network','run','review','notify','watchkeeper','region','discover','corridor','europe'].includes(command)?1:0));
+  if(command==='europe'&&['sources','matrix'].includes(sub)){
+    const countryCode=opts.country_code===undefined?null:required(opts,'country_code');
+    if(sub==='matrix'){console.log(renderEuropeCoverageMatrix({countryCode}));return 0;}
+    console.log(JSON.stringify({catalog:'europe-authoritative-transport-leads',state:'REVIEW_REQUIRED',automatic_retrieval:false,
+      sources:listEuropeSourceCandidates({countryCode})},null,2));return 0;
+  }
   if(command==='region'&&sub==='prepare'){
     const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
     const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),

@@ -3,11 +3,31 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertGeoHostAdmission, createGeoYieldCheck, parseGeoCtlArgs, releaseGeoAdmission, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
+import { assertGeoHostAdmission, createGeoYieldCheck, parseGeoCtlArgs, releaseGeoAdmission, runGeoCtl, sharedFactoryYieldRequested } from '../../scripts/scout/geoctl.mjs';
 
 test('geoctl parses explicit kebab-case identifiers and rejects positional ambiguity',()=>{
   assert.deepEqual(parseGeoCtlArgs(['--observation-id','obs-1','--snapshot-id','osm-v1','--state=OPEN']),{'observation_id':'obs-1','snapshot_id':'osm-v1','state':'OPEN'});
   assert.throws(()=>parseGeoCtlArgs(['observation-1']),/unexpected argument/);
+});
+
+test('Europe matrix command prints the country coverage matrix without network or private store access',async()=>{
+  const prior=console.log,lines=[];console.log=(...args)=>lines.push(args.join(' '));
+  try{
+    assert.equal(await runGeoCtl(['europe','matrix','--country-code','BE'],{}),0);
+    const matrix=lines.join('\n');assert.match(matrix,/Country\/Jurisdiction \| Source \| Authority \| Role \| Licence state/);
+    assert.match(matrix,/BE-VLG/);assert.match(matrix,/BE-WAL/);assert.match(matrix,/DISABLED_REVIEW_REQUIRED/);
+    assert.doesNotMatch(matrix,/GB-ENG|GB-WLS|\| IM \|/);
+  }finally{console.log=prior;}
+});
+
+test('Europe source listing is read-only, jurisdiction-filterable, and never activates public-data leads',async()=>{
+  const prior=console.log,lines=[];console.log=(...args)=>lines.push(args.join(' '));
+  try{
+    assert.equal(await runGeoCtl(['europe','sources','--country-code','BE'],{}),0);
+    const result=JSON.parse(lines.join('\n'));
+    assert.equal(result.state,'REVIEW_REQUIRED');assert.equal(result.automatic_retrieval,false);assert.equal(result.sources.length,2);
+    assert.ok(result.sources.every(source=>source.assessment_state==='REVIEW_REQUIRED'&&source.permissions.private_processing===false));
+  }finally{console.log=prior;}
 });
 
 test('geoctl refuses unverified factory, heavy workload, memory, disk, load and thermal states',()=>{
