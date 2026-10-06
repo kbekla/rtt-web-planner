@@ -10,8 +10,10 @@ export const NVDB_API_BASE = 'https://nvdbapiles.atlas.vegvesen.no';
 export const NVDB_API_VERSION = 'nvdb-api-les-v4';
 export const NVDB_ADAPTER_VERSION = 'nvdb-road-link-normalizer-1';
 // The V4 collection endpoint returns paginated sequence records containing
-// their segment/link geometries. Its `metadata.neste.href` stays on this path.
+// their segment/link geometries. The documented next-page href uses the
+// official unversioned public facade path on the same API host.
 export const NVDB_LINKS_PATH = '/vegnett/api/v4/veglenkesekvenser';
+const NVDB_PAGINATION_PATH = '/vegnett/veglenkesekvenser';
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 
 export function nvdbNorwaySourceDefinition() {
@@ -165,7 +167,8 @@ export function nvdbDiscoverySelection(tags = {}) {
 
 function safeApiUrl(value) {
   let url; try { url = new URL(value); } catch { throw new Error('NVDB pagination URL is invalid'); }
-  if (url.protocol !== 'https:' || url.hostname !== 'nvdbapiles.atlas.vegvesen.no' || url.username || url.password || url.hash || url.pathname !== NVDB_LINKS_PATH)
+  if (url.protocol !== 'https:' || url.hostname !== 'nvdbapiles.atlas.vegvesen.no' || url.username || url.password || url.hash
+      || ![NVDB_LINKS_PATH, NVDB_PAGINATION_PATH].includes(url.pathname))
     throw new Error('NVDB pagination link escaped the approved official road-link endpoint');
   return url;
 }

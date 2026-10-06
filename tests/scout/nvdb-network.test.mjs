@@ -94,7 +94,7 @@ test('approved paginated NVDB fixture is checksummed, imported and resumes throu
     store.approveSource({ source_id: source.source_id, approved_by: 'fixture owner', scope: 'NVDB adapter fixture only' });
     const first = { objekter: [{ veglenkesekvensid: 9900, veglenker: [link(9900, 1, 'Enkel bilveg'), link(9900, 2, 'Skogsbilveg')] }] };
     const second = { objekter: [{ veglenkesekvensid: 9900, veglenker: [link(9900, 3, 'Sti')] }] };
-    const secondUrl = `${NVDB_API_BASE}${NVDB_LINKS_PATH}?antall=1000&start=next`;
+    const secondUrl = `${NVDB_API_BASE}/vegnett/veglenkesekvenser?antall=1000&start=next`;
     const pages = [first, second];
     const calls = [];
     const fetchImpl = async url => {
@@ -145,6 +145,24 @@ test('NVDB acquisition resumes safely after yielding before the first page', asy
     assert.equal(resumed.status, 'COMPLETE');
     assert.equal(calls, 1);
     assert.equal((await importNvdbSnapshot(store, { snapshotId: 'nvdb-yield-before-first-page' })).links_normalized, 1);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('NVDB pagination follows only the two documented official collection paths', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scout-nvdb-pagination-'));
+  const store = new ScoutGeoStore(root);
+  try {
+    const source = nvdbNorwaySourceDefinition();
+    store.registerSource(source);
+    store.approveSource({ source_id: source.source_id, approved_by: 'fixture owner', scope: 'pagination allowlist fixture' });
+    const body = { objekter: [], metadata: { neste: { href: 'https://example.invalid/steal' } } };
+    await assert.rejects(acquireNvdbSnapshot(store, { snapshotId: 'nvdb-bad-pagination-link', dataRoot: path.join(root, 'network'),
+      requestIntervalMs: 0, fetchImpl: async url => ({ ok: true, status: 200, url, headers: new Headers(), text: async () => JSON.stringify(body) }) }),
+    /escaped the approved official road-link endpoint/);
+    assert.equal(store.getNetworkSnapshot('nvdb-bad-pagination-link'), null);
   } finally {
     store.close();
     fs.rmSync(root, { recursive: true, force: true });
