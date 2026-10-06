@@ -39,13 +39,19 @@ test('independent OSM discovery completes without TET links; the separate final 
     store.registerSource(source('tet-hint',{discovery:true}));
     const file=store.recordFile({source_id:'tet-hint',relative_name:'hint.gpx',sha256:'b'.repeat(64),parser_version:'fixture',format:'gpx',raw_path:path.join(root,'private.gpx'),byte_size:1});
     store.completeFileImport(file.file_id,[{observation_id:'tet-observation',source_part:'part-1',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.301,50.801]]},geometry_sha256:'c'.repeat(64)}]);
+    const file2=store.recordFile({source_id:'tet-hint',relative_name:'hint-2.gpx',sha256:'d'.repeat(64),parser_version:'fixture',format:'gpx',raw_path:path.join(root,'private-2.gpx'),byte_size:1});
+    store.completeFileImport(file2.file_id,[{observation_id:'tet-observation-2',source_part:'part-2',geometry:{type:'LineString',coordinates:[[4.5,50.8],[4.501,50.801]]},geometry_sha256:'e'.repeat(64)}]);
     store.approveSource({source_id:'tet-hint',approved_by:'Karl',scope:'Belgium private discovery fixture'});
     store.saveSegment({segment_id:'tet-probable',observation_id:'tet-observation',ordinal:0,component_index:0,classification:'PROBABLE_OFFROAD',confidence:0.5,
       geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.301,50.801]]},evidence:[{rule:'interval-network-support',edge_id:'w-101',edge_part_id:'w-101#part:0'}],pipeline_version:'network-segmenter-2.2',jurisdiction_ids:[]});
     store.saveCandidate({segment_id:'tet-probable',observation_id:'tet-observation',classification:'PROBABLE_OFFROAD',geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.301,50.801]]},evidence:[],pipeline_version:'network-segmenter-2.2'},
       {candidate_id:'tet-candidate-1',network_snapshot_id:'be-fixture-v1'});
+    store.db.prepare('UPDATE route_segments SET evidence_json=? WHERE segment_id=?').run(JSON.stringify([{rule:'interval-network-support',edge_part_id:'w-101#part:0'}]),'tet-probable');
     const reference=store.createRun({run_id:'tet-reference',source_id:'tet-hint',snapshot_id:'be-fixture-v1',country_code:'BE',region_id:'BE',viewport:[2,49,7,52],approved_by:'Karl',approval_scope:'Belgium private discovery fixture'});
     store.setRunObservation(reference.run_id,'tet-observation','COMPLETE',{pipeline_version:'network-segmenter-2.2'});
+    store.saveSegment({segment_id:'tet-unknown',observation_id:'tet-observation-2',ordinal:0,component_index:0,classification:'UNKNOWN',geometry:{type:'LineString',coordinates:[[4.5,50.8],[4.501,50.801]]},
+      evidence:[{rule:'no-network-match-within-threshold',threshold_m:8}],pipeline_version:'network-segmenter-2.2',jurisdiction_ids:[]});
+    store.setRunObservation(reference.run_id,'tet-observation-2','COMPLETE',{pipeline_version:'network-segmenter-2.2'});
     assert.throws(()=>store.createDiscoveryRun({run_id:'be-discovery-invalid',discovery_source_id:d.source.source_id,snapshot_id:'be-fixture-v1',country_code:'BE',region_id:'BE',reference_run_id:'tet-reference',
       viewport:[2,49,7,52],approved_by:'Karl',approval_scope:'Belgium private discovery fixture',config:{discovery_version:'osm-way-discovery-1'}}),/post-completion benchmark/);
     const run=store.createDiscoveryRun({run_id:'be-discovery',discovery_source_id:d.source.source_id,snapshot_id:'be-fixture-v1',country_code:'BE',region_id:'BE',
@@ -76,8 +82,9 @@ test('independent OSM discovery completes without TET links; the separate final 
     assert.throws(()=>benchmarkTetAgainstIndependentDiscovery(store,{independentRunId:pendingRun.run_id,referenceRunId:'tet-reference'}),/gated until independent discovery is COMPLETE/);
     const report=benchmarkTetAgainstIndependentDiscovery(store,{independentRunId:run.run_id,referenceRunId:'tet-reference'});
     assert.equal(report.phase,'PHASE_1_BENCHMARK_ONLY');assert.equal(report.phase2_release,'NOT_APPROVED');
-    assert.equal(report.total_reference_corridors_or_features,1);assert.equal(report.independently_rediscovered,1);assert.equal(report.rediscovery_percent,100);
-    assert.deepEqual(report.matches,{exact:1,partial:0,parallel:null,ambiguous:null,unmatched:0});
+    assert.equal(report.total_reference_corridors_or_features,2);assert.equal(report.independently_rediscovered,1);assert.equal(report.rediscovery_percent,50);
+    assert.deepEqual(report.matches,{exact:1,partial:0,parallel:null,ambiguous:0,unmatched:1});
+    assert.deepEqual(report.miss_reasons,{SOURCE_COVERAGE_GAP:1});assert.equal(report.miss_details[0].feature_index,2);
     assert.equal(report.physical_classification_agreement.agreed,1);assert.equal(report.product_state_counts.ORANGE,4);
     assert.equal(report.authoritative_state_comparison.green,null);assert.equal(report.authoritative_upgrades_or_downgrades,null);
     const reportPath=writePrivateTetBenchmark(root,report);assert.equal(fs.statSync(reportPath).mode&0o777,0o600);assert.throws(()=>writePrivateTetBenchmark(root,report),/already exists/);

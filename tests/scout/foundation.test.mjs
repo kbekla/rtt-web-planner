@@ -481,17 +481,24 @@ test('shared admission rejects uncertain workload ownership and recovers only pr
 test('concurrent shared admission grants at most one background worker', async () => {
   const state = path.join(tmp, 'shared-admission-race', 'state.json');
   const code = `import { SharedResourceAdmission } from ${JSON.stringify(new URL('../../scripts/lib/resource-admission.mjs', import.meta.url).href)}; const hold = setInterval(() => {}, 1000); const r = new SharedResourceAdmission(process.argv[1]).acquire(process.argv[2]); console.log(JSON.stringify(r));`;
+  const workers = [];
   const run = (owner) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', code, state, owner], { stdio: ['ignore', 'pipe', 'pipe'] });
+    workers.push(child);
     let output = '', error = '', settled = false; child.stderr.on('data', (b) => error += b);
     child.stdout.on('data', (b) => { output += b; const line = output.split('\n')[0]; if (!settled && line) { settled = true; resolve({ child, result: JSON.parse(line) }); } });
     child.on('error', reject); child.on('close', (status) => { if (!settled) reject(new Error(`synthetic coordinator worker failed (${status}): ${error.slice(0, 200)}`)); });
+    const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error(`synthetic coordinator worker ${owner} timed out`)); } }, 10_000);
+    child.once('close', () => clearTimeout(timer));
   });
-  const workers = await Promise.all([run('worker-a'), run('worker-b')]);
-  const results = workers.map((w) => w.result);
-  assert.equal(results.filter((r) => r.ok).length, 1);
-  assert.equal(results.filter((r) => !r.ok).length, 1);
-  await Promise.all(workers.map(({ child }) => stopTrackedChild(child)));
+  try {
+    const results = (await Promise.all([run('worker-a'), run('worker-b')])).map((w) => w.result);
+    assert.equal(results.filter((r) => r.ok).length, 1);
+    assert.equal(results.filter((r) => !r.ok).length, 1);
+  } finally {
+    await Promise.all(workers.map((child) => stopTrackedChild(child)));
+    assert.ok(workers.every((child) => !processGroupHasLiveMembers(child.pid)), 'no shared-admission race worker survives the test');
+  }
 });
 test('test cancellation cleanup stops child helpers and awaits process-group exit', async () => {
   const child = spawn(process.execPath, ['-e', "setInterval(() => {}, 1000); setTimeout(() => { const {spawnSync}=require('node:child_process'); spawnSync('sh',['-c','sleep 30 & wait']); }, 10)"],
