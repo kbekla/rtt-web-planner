@@ -9,7 +9,7 @@ import { createRealReviewServer, queryRouteHintSupports } from '../../scripts/sc
 import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
 import { spwRoadSourceDefinition } from '../../scripts/scout/spw-network.mjs';
 
-const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:'synthetic',organisation:'test',expected_formats:['gpx','pbf'],
+const source=(source_id,{network=false}={})=>({source_id,name:source_id,type:network?'synthetic-osm-network':'synthetic',organisation:'test',expected_formats:['gpx','pbf'],
   coverage:{countries:['BE'],regions:['BE']},jurisdiction_ids:['BE-country'],location:'synthetic fixture',adapter_version:'fixture-v1',licence:{name:'synthetic',version:'1'},
   reuse:{private_processing:true,redistribution:false,derived_public_use:false},roles:{discovery_only:!network,physical_existence:false,legal_access:false,routing_network:network,public_reuse:false,jurisdiction_boundaries:network},
   update:{mechanism:'fixed fixture'},attribution:'synthetic; no external data',rate_limits:{requests_per_minute:0}});

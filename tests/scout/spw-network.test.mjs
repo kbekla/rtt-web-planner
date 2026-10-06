@@ -95,7 +95,7 @@ test('SPW matches persist as private, source-versioned evidence without changing
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scout-spw-store-')); fs.chmodSync(root, 0o700);
   const store = new ScoutGeoStore(root);
   try {
-    const network = { source_id: 'spw-test-osm', name: 'Synthetic OSM', type: 'regional-network', organisation: 'Synthetic', expected_formats: ['pbf'],
+    const network = { source_id: 'spw-test-osm', name: 'Synthetic OSM', type: 'regional-osm-network', organisation: 'Synthetic', expected_formats: ['pbf'],
       coverage: { countries: ['BE'], regions: ['BE-WAL'] }, jurisdiction_ids: [], location: 'fixture://osm', adapter_version: 'fixture-v1',
       licence: { name: 'ODbL', version: '1.0' }, attribution: '© OpenStreetMap contributors', reuse: { private_processing: true, redistribution: true, derived_public_use: false },
       roles: { discovery_only: false, physical_existence: false, legal_access: false, routing_network: true, public_reuse: true, jurisdiction_boundaries: false }, update: { mechanism: 'fixture' }, rate_limits: {} };

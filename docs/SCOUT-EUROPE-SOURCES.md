@@ -39,4 +39,6 @@ CLI matrix and lead listing do not access the network or private geostore and do
 
 Next, audit source leads country by country, then register only exact verified datasets in Scout's existing private source registry. Implement provider-specific adapters behind the existing pinned, checksum-aware, resumable job pipeline. Regional jobs must continue to use shared factory admission; ordinary road-network discovery and authoritative legal/status monitoring remain distinct evidence roles. No whole-Europe bulk acquisition should be attempted as one job.
 
+For the owner-approved TET-independent benchmark, see [SCOUT-EUROPE-BENCHMARK.md](SCOUT-EUROPE-BENCHMARK.md). TET is comparison-only after a complete, reference-free discovery run; benchmark completion does not release Phase 2.
+
 All source-to-corridor cross-references remain private on the SSD. Public map output can contain only permitted route/status material and general dataset acknowledgements required by licence; Scout discovery provenance is never attached to an individual lane. A separately licensed partner layer is handled independently and only under explicit display permissions. No entries in this catalogue have been downloaded or processed, no second country has been run, and no public output or canonical data has changed.

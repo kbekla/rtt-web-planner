@@ -380,10 +380,13 @@ export class ScoutGeoStore {
   }
   listRuns(){return this.db.prepare('SELECT run_id FROM scout_runs ORDER BY created_at,run_id').all().map(r=>this.getRun(r.run_id));}
   createDiscoveryRun({run_id,discovery_source_id,snapshot_id,country_code,region_id,reference_run_id=null,title,viewport,approved_by,approval_scope,config={}}) {
+    if(reference_run_id!==null&&reference_run_id!==undefined)throw new Error('discovery runs cannot reference comparison/source-route runs; attach them only in the post-completion benchmark');
     if(!/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(run_id??''))throw new Error('discovery run ID must be a stable safe identifier');
     const source=this.getSource(discovery_source_id),snapshot=this.getNetworkSnapshot(snapshot_id);
     if(!source?.reuse?.private_processing||source.roles?.discovery_only!==true||source.roles?.legal_access===true)throw new Error('discovery source must be registered for private discovery and not legal-access evidence');
     if(!snapshot||snapshot.source_id!==source.parent_network_source_id||source.bound_snapshot_id&&snapshot_id!==source.bound_snapshot_id)throw new Error('discovery run requires the registered network snapshot named by its discovery source');
+    const networkSource=snapshot&&this.getSource(snapshot.source_id);
+    if(!networkSource?.roles?.routing_network||networkSource.roles?.discovery_only===true||!String(networkSource.type??'').toLowerCase().includes('osm'))throw new Error('independent discovery requires a registered public OSM network source, never a route/discovery corpus');
     if(!snapshot.checksum||this.networkEdgeCount(snapshot_id)<1)throw new Error('discovery run requires a checksum-pinned imported network snapshot');
     if(!/^[A-Z]{2}$/.test(country_code??'')||!source.coverage.countries.includes(country_code)||!snapshot.coverage.countries?.includes(country_code))throw new Error('discovery region is not covered by registered source and snapshot');
     if(typeof region_id!=='string'||!region_id.trim()||!Array.isArray(viewport)||viewport.length!==4||viewport.some(v=>!Number.isFinite(v)))throw new Error('discovery run requires region ID and four numeric viewport bounds');

@@ -21,6 +21,7 @@ import { buildCorridorRun, corridorRunStats, listCorridorReview, recordCorridorR
 import { spwRoadSourceDefinition } from './spw-network.mjs';
 import { pollSpwServiceMetadata } from './spw-watchkeeper.mjs';
 import { listEuropeSourceCandidates, renderEuropeCoverageMatrix } from './europe-source-catalog.mjs';
+import { benchmarkTetAgainstIndependentDiscovery, writePrivateTetBenchmark } from './tet-benchmark.mjs';
 
 const HELP=`scout-geoctl source register --manifest FILE
 scout-geoctl source register-spw
@@ -35,7 +36,7 @@ scout-geoctl region prepare --route FILE --country-code CC --region NAME --sourc
 scout-geoctl region approve --run-id ID --by NAME --scope TEXT
 scout-geoctl region process|status --run-id ID
 scout-geoctl region list
-scout-geoctl discover create --run-id ID --snapshot-id ID --country-code CC --region-id ID [--reference-run-id TET_RUN] --approved-by NAME --approval-scope TEXT
+scout-geoctl discover create --run-id ID --snapshot-id ID --country-code CC --region-id ID --approved-by NAME --approval-scope TEXT
 scout-geoctl discover process|status --run-id ID
 scout-geoctl discover list
 scout-geoctl corridor process|status --run-id ID
@@ -49,6 +50,7 @@ scout-geoctl notify retry
 scout-geoctl watchkeeper spw-poll
 scout-geoctl europe sources [--country-code CC]
 scout-geoctl europe matrix [--country-code CC]
+scout-geoctl europe benchmark --independent-run-id ID --reference-run-id ID
 scout-geoctl status`;
 export function parseGeoCtlArgs(args){const out={};for(let i=0;i<args.length;i++){if(!args[i].startsWith('--'))throw new Error(`unexpected argument '${args[i]}'`);const token=args[i].slice(2),equals=token.indexOf('='),key=(equals<0?token:token.slice(0,equals)).replaceAll('-','_');if(!key||out[key]!==undefined)throw new Error(`duplicate or invalid option '${args[i]}'`);if(equals>=0){out[key]=token.slice(equals+1);continue;}if(args[i+1]?.startsWith('--'))out[key]=true;else if(args[i+1]===undefined)out[key]=true;else out[key]=args[++i];}return out;}
 function required(opts,key){if(typeof opts[key]!=='string'||!opts[key])throw new Error(`--${key.replaceAll('_','-')} is required`);return opts[key];}
@@ -205,6 +207,12 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
     console.log(JSON.stringify({catalog:'europe-authoritative-transport-leads',state:'REVIEW_REQUIRED',automatic_retrieval:false,
       sources:listEuropeSourceCandidates({countryCode})},null,2));return 0;
   }
+  if(command==='europe'&&sub==='benchmark'){
+    const {root,store}=storeFor(env);try{
+      const report=benchmarkTetAgainstIndependentDiscovery(store,{independentRunId:required(opts,'independent_run_id'),referenceRunId:required(opts,'reference_run_id')});
+      const reportFile=writePrivateTetBenchmark(root,report);console.log(JSON.stringify({...report,private_report_file:reportFile},null,2));return 0;
+    }finally{store.close();}
+  }
   if(command==='region'&&sub==='prepare'){
     const choice=(yes,no,label)=>{if(opts[yes]===true&&opts[no]===true)throw new Error(`${label} cannot be both YES and NO`);if(opts[yes]===true)return true;if(opts[no]===true)return false;throw new Error(`region prepare requires an explicit YES/NO choice for ${label}`);};
     const {store}=storeFor(env);try{const plan=await prepareRegionPlan(store,{routeFile:required(opts,'route'),countryCode:required(opts,'country_code'),regionName:required(opts,'region'),sourceName:required(opts,'source_name'),sourceType:required(opts,'source_type'),
@@ -221,6 +229,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
   if(command==='region'&&sub==='list'){const {store}=storeFor(env);try{console.log(JSON.stringify(store.listRegionPlans().map(p=>({run_id:p.run_id,state:p.state,country_code:p.plan.country_code,region:p.plan.region_name,source_name:p.plan.source_name,network_version:p.plan.provider.version,updated_at:p.updated_at})),null,2));}finally{store.close();}return 0;}
   if(command==='region'&&sub==='review'){const {store}=storeFor(env);try{const runId=required(opts,'run_id');if(!store.getRegionPlan(runId))throw new Error(`unknown Scout region plan '${runId}'`);console.log(JSON.stringify(store.listRunReviewCandidates({runId,decision:opts.decision??'UNREVIEWED'}),null,2));}finally{store.close();}return 0;}
   if(command==='discover'&&sub==='create'){
+    if(opts.reference_run_id!==undefined)throw new Error('discovery cannot accept a comparison/reference run; run the independent pass first, then use the post-run benchmark');
     const {store}=storeFor(env);try{const snapshotId=required(opts,'snapshot_id'),snapshot=store.getNetworkSnapshot(snapshotId);if(!snapshot)throw new Error('discovery requires a registered pinned OSM snapshot');
       const countryCode=required(opts,'country_code').toUpperCase(),sourceInfo=registerOsmDiscoverySource(store,snapshotId),source=sourceInfo.source,regionId=required(opts,'region_id');
       const approvedBy=required(opts,'approved_by'),approvalScope=required(opts,'approval_scope');let approval=store.sourceApproval(source.source_id);
@@ -230,7 +239,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
         discovery_version:'osm-way-discovery-1',jurisdiction:{id:area.jurisdiction_id,version:area.jurisdiction_version,boundary_source:area.boundary_source},
         source_filter:'registered OSM way parts selected by highway/surface/tracktype/smoothness/service context; excludes ordinary ROAD classifications',canonical_status:'NOT_COMPARED'};
       const run=store.createDiscoveryRun({run_id:required(opts,'run_id'),discovery_source_id:source.source_id,snapshot_id:snapshotId,country_code:countryCode,region_id:regionId,
-        reference_run_id:opts.reference_run_id??null,title:config.title,viewport:area.viewport,approved_by:approvedBy,approval_scope:approvalScope,config});
+        reference_run_id:null,title:config.title,viewport:area.viewport,approved_by:approvedBy,approval_scope:approvalScope,config});
       console.log(JSON.stringify({run_id:run.run_id,status:run.status,source_id:source.source_id,source_revision:source.revision,snapshot_id:snapshotId,snapshot_version:snapshot.version,
         snapshot_sha256:snapshot.checksum,country_code:countryCode,region_id:regionId,viewport:area.viewport,viewport_source:{jurisdiction_id:area.jurisdiction_id,version:area.jurisdiction_version},
         reference_run_id:run.reference_run_id,approved_by:approvedBy,approval_scope:approvalScope,redistribution_allowed:source.reuse.redistribution,derived_public_use_allowed:source.reuse.derived_public_use,

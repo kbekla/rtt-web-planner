@@ -30,6 +30,10 @@ test('Europe source listing is read-only, jurisdiction-filterable, and never act
   }finally{console.log=prior;}
 });
 
+test('discovery CLI rejects a TET/reference run before opening or mutating any Scout store',async()=>{
+  await assert.rejects(()=>runGeoCtl(['discover','create','--reference-run-id','tet-run'],{}),/post-run benchmark/);
+});
+
 test('geoctl refuses unverified factory, heavy workload, memory, disk, load and thermal states',()=>{
   const healthy={factory_coordination:{verified:true,factory_pending:false},factory_job_active:false,planetiler_active:false,
     local_ai_active:false,other_heavy_workload_active:false,mem_available_mb:8000,disk:{free_bytes:100e9},load1:1,
