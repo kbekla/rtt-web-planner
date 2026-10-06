@@ -108,6 +108,7 @@ test('approved paginated NVDB fixture is checksummed, imported and resumes throu
     assert.equal(acquired.status, 'COMPLETE');
     assert.equal(acquired.pages_written, 2);
     assert.equal(calls.length, 2);
+    assert.equal(new URL(calls[0]).searchParams.has('sortert'), false, 'current production API no longer accepts the legacy sortert parameter');
     const snapshot = store.getNetworkSnapshot('nvdb-no-fixture-v1');
     assert.equal(snapshot.coverage.point_in_time_consistent, false);
     assert.equal(snapshot.coverage.countries[0], 'NO');

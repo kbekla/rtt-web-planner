@@ -27,7 +27,7 @@ export function nvdbNorwaySourceDefinition() {
     adapter_version: NVDB_ADAPTER_VERSION,
     network_api: {
       provider: 'statens-vegvesen-nvdb-api-les-v4', base_url: NVDB_API_BASE,
-      endpoint: NVDB_LINKS_PATH, query: { antall: 1000, sortert: false, inkluderAntall: false },
+      endpoint: NVDB_LINKS_PATH, query: { antall: 1000, inkluderAntall: false },
       projection: 'EPSG:5973', coverage_country: 'NO', snapshot_policy: 'private-complete-paginated-response-bundle',
       consistency: 'live paginated API; retrieval interval and bundle checksum are recorded; provider does not promise a point-in-time transaction snapshot',
       client_header: 'X-Client: RT&T Scout', minimum_request_interval_seconds: 1,
@@ -206,7 +206,7 @@ export async function acquireNvdbSnapshot(store, { sourceId = 'no-nvdb-vegkart',
     cursor.next_url = safeApiUrl(cursor.next_url).href;
   }
   const startedAt = cursor?.started_at ?? new Date().toISOString();
-  let nextUrl = cursor?.next_url ?? new URL(`${NVDB_LINKS_PATH}?antall=${source.network_api.query.antall}&sortert=false&inkluderAntall=false`, NVDB_API_BASE).href;
+  let nextUrl = cursor?.next_url ?? new URL(`${NVDB_LINKS_PATH}?antall=${source.network_api.query.antall}&inkluderAntall=false`, NVDB_API_BASE).href;
   let pages = cursor?.pages_written ?? 0, first = !cursor;
   if (first && fs.existsSync(part)) throw new Error('untracked NVDB partial artifact exists; refusing to overwrite');
   while (nextUrl) {
