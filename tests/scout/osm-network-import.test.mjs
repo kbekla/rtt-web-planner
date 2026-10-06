@@ -51,12 +51,22 @@ test('osmium type_id feature IDs infer OSM object type and stable way identity',
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 
+test('OSM way identity accepts typed @id fields without losing the type_id identity',async()=>{
+  const {root,store}=setup();
+  try{
+    const input=`\u001e${JSON.stringify({type:'Feature',id:'w456',properties:{'@type':'way','@id':'way/456',highway:'track',surface:'gravel'},geometry:{type:'LineString',coordinates:[[4.3,50.8],[4.31,50.81]]}})}\n`;
+    const result=await importOsmGeoJsonSeq(store,{stream:Readable.from([input]),snapshotId:'belgium-test-v1'});
+    assert.equal(result.written,1);
+    assert.equal(store.db.prepare('SELECT edge_id FROM network_edges').get().edge_id,'osm:way:456');
+  }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
 test('OSM network importer fails closed for missing identity, bad geometry and unregistered provenance',async()=>{
   const {root,store}=setup();
   try {
     assert.equal((await importOsmGeoJsonSeq(store,{stream:Readable.from([]),snapshotId:'belgium-test-v1'})).written,0);
     const noId=`\u001e${JSON.stringify({type:'Feature',properties:{highway:'track'},geometry:{type:'LineString',coordinates:[[1,1],[2,2]]}})}\n`;
-    await assert.rejects(importOsmGeoJsonSeq(store,{stream:Readable.from([noId]),snapshotId:'belgium-test-v1'}),/stable OSM object ID/);
+    await assert.rejects(importOsmGeoJsonSeq(store,{stream:Readable.from([noId]),snapshotId:'belgium-test-v1'}),/stable OSM (?:object|way) ID/);
     const badGeometry=feature(103,'path','dirt',[[181,1],[182,2]]);
     await assert.rejects(importOsmGeoJsonSeq(store,{stream:Readable.from([badGeometry]),snapshotId:'belgium-test-v1'}),/valid WGS84/);
     await assert.rejects(importOsmGeoJsonSeq(store,{stream:Readable.from([]),snapshotId:'missing'}),/registered network snapshot/);

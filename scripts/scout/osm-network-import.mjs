@@ -34,13 +34,24 @@ export async function importOsmGeoJsonSeq(store, { stream, snapshotId, batchSize
     const prefixedId=typeof feature.id==='string'?feature.id.match(/^([nwra])([1-9]\d*)$/):null;
     const inferredKind=prefixedId?({n:'node',w:'way',r:'relation',a:'area'}[prefixedId[1]]):null;
     const kind = properties['@type'] ?? properties.type ?? inferredKind;
-    const objectId = properties['@id'] ?? properties.id ?? (prefixedId?.[2] ?? feature.id);
+    const explicitId = properties['@id'] ?? properties.id;
+    // osmium versions/exports represent a way identity as either the numeric
+    // @id, the typed string "way/123", or the GeoJSON type_id "w123". Prefer
+    // the typed GeoJSON ID when present; accept the documented typed form too.
+    const typedPropertyId = typeof explicitId === 'string'
+      ? explicitId.match(/^(?:way\/|w)([1-9]\d*)$/)?.[1]
+      : null;
+    const objectId = prefixedId?.[2] ?? typedPropertyId ?? explicitId ?? feature.id;
     if (kind && kind !== 'way') continue;
-    if (!/^[1-9]\d*$/.test(String(objectId ?? ''))) throw new Error(`GeoJSON sequence record ${seen} has no stable OSM object ID`);
+    const stableWayId = /^[1-9]\d*$/.test(String(objectId ?? '')) ? String(objectId) : null;
     const tags = Object.fromEntries(Object.entries(properties).filter(([key]) => !key.startsWith('@') && key !== 'id' && key !== 'type'));
     if (typeof tags.highway !== 'string' || !tags.highway) continue;
     if (!feature.geometry || !['LineString', 'MultiLineString'].includes(feature.geometry.type)) continue;
-    batch.push({ edge_id: `osm:way:${objectId}`, geometry: feature.geometry, tags,
+    if (!stableWayId) {
+      const safe = value => typeof value === 'string' ? value.slice(0, 48) : typeof value;
+      throw new Error(`GeoJSON sequence record ${seen} has no stable OSM way ID (feature.id=${safe(feature.id)}, @type=${safe(properties['@type'])}, type=${safe(properties.type)}, @id=${safe(properties['@id'])}, id=${safe(properties.id)})`);
+    }
+    batch.push({ edge_id: `osm:way:${stableWayId}`, geometry: feature.geometry, tags,
       evidence: [], jurisdiction_ids: [] });
     if (batch.length >= batchSize && await flush()) return { seen, written, yielded: true };
   }
