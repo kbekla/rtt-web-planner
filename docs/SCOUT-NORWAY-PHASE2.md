@@ -109,31 +109,45 @@ roads, and neither RED nor GREEN is manufactured.
 
 Official Norwegian material reviewed for the jurisdiction model includes the
 Road Act's distinction between public and private roads, the Outdoor
-Recreation Act's provision allowing private-road owners to prohibit motor
-vehicle access subject to applicable law, and the Motor Traffic Act's scope
-for motor traffic on uncultivated land (including roads not constructed for
-motor cars). The agency's API documentation describes the road graph's
-sequence/port/node and positional semantics and an event endpoint for changes
-to segmented sequences; that event endpoint could support future Watchkeeper
-refresh but is not activated in this calibration run. These statutes and API
-events are legal/data context, not a validated machine-readable, corridor-level
-motorcycle-access/status feed. They do not resolve access on a particular
-link. Relevant official references:
+Recreation Act's rule that a private-road owner may prohibit motor-vehicle
+traffic (including by signs or a barrier), and the Motor Traffic Act's scope
+for motor traffic on uncultivated land. The latter includes roads not built
+for ordinary cars and roads not cleared for car traffic in winter; motor
+traffic off-road is generally prohibited except for specified purposes and
+permissions. A mapped gravel or forest road is therefore not, by itself,
+enough to decide motorcycle access. The agency's API documentation describes
+the road graph's sequence/port/node and positional semantics and an event
+endpoint for changes to segmented sequences; that endpoint could support
+future Watchkeeper refresh but is not activated in this calibration run.
+These laws and API events are jurisdiction/data context, not a validated
+machine-readable, corridor-level motorcycle-access/status feed. They do not
+resolve access on a particular link. Relevant official references:
 
 - [Road Act, chapter VII](https://lovdata.no/dokument/NL/lov/1963-06-21-23/kapvii)
 - [Outdoor Recreation Act, English text](https://www.regjeringen.no/en/documents/outdoor-recreation-act/id172932/)
 - [Motor traffic in uncultivated land and watercourses Act](https://lovdata.no/dokument/NLE/lov/1977-06-10-82)
 - [NVDB dataset catalogue](https://dataut.vegvesen.no/nb/dataset/nasjonal-vegdatabank)
+- [Static traffic information in NVDB](https://dataut.vegvesen.no/en/dataset/trafikkinformasjon-i-nvdb)
 - [NVDB Les V4 road-network documentation](https://nvdb-docs.atlas.vegvesen.no/nvdbapil/v4/Vegnett/)
 - [NVDB Les V4 road-network change events](https://nvdb-docs.atlas.vegvesen.no/nvdbapil/v4/Endringer/)
+- [Miljødirektoratet: driving on bare ground and roads classified as uncultivated land](https://www.miljodirektoratet.no/ansvarsomrader/friluftsliv/motorferdsel-i-utmark/regler-for-motorferdsel-i-utmark/kjore-pa-barmark/)
+- [Miljødirektoratet: motor traffic on private roads](https://www.miljodirektoratet.no/ansvarsomrader/friluftsliv/friluftsliv-og-allemannsretten/ofte-stilte-sporsmal-om-allemannsretten/)
 
 NVDB is an authoritative road-network source under NLOD 1.0. Its presence or
 private/public road category is not treated as permission for motorcycles.
-No suitable corridor-level, current, machine-readable Norwegian motorcycle
-access/restriction feed with validated automation/reuse terms is activated by
-this milestone. Therefore Norway access remains unknown wherever no separately
-qualified evidence exists. Research for such feeds remains open; no legal
-conclusion is delegated to Scout or AI.
+Statens vegvesen also publishes “Static traffic information in NVDB” under
+NLOD, with public API resources and a continuously updated catalogue entry;
+its listed contents include traffic signs, regulations and diversion routes.
+This is a promising authoritative restriction-source family, but this run
+does not ingest it: the catalogue entry alone does not establish the specific
+sign/object semantics, direction and extent of effect, vehicle applicability,
+effective dates, or reliable corridor linkage needed for deterministic RED
+or temporary-closure decisions. Those fields must be validated against the
+NVDB data catalogue and product specification per object type before an
+adapter is enabled. Consequently no machine-read restriction is activated
+here, and motorcycle access remains UNKNOWN absent separately qualified
+corridor evidence. Source automation/reuse is not inferred solely from a
+catalogue listing; the source is held for adapter-level semantic validation.
 
 ## Frozen Phase 1 baseline
 
