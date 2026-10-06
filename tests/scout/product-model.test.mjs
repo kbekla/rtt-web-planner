@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveScoutProductState, deriveResearchWorkflow, publicScoutStatus, routeUseDecision } from '../../scripts/scout/product-model.mjs';
+import { deriveScoutProductState, deriveResearchWorkflow, projectDataAcknowledgements, projectPartnerLayerFeature, publicScoutStatus, routeUseDecision } from '../../scripts/scout/product-model.mjs';
 import { PUBLIC_TILE_FIELDS } from '../../scripts/rtt/publish-check.mjs';
 
 const lane = (overrides={}) => ({routeKind:'LANE',physicalExistence:'probable',physicalCharacter:'PROBABLE_OFFROAD',credibleDiscovery:true,...overrides});
@@ -87,13 +87,39 @@ test('public status projection suppresses private discovery provenance and canon
   const view=publicScoutStatus({productState:'ORANGE'});
   assert.equal(view.label,'Unverified lane');
   assert.match(view.detail,/has not verified access/i);
-  assert.deepEqual(Object.keys(view).sort(),['detail','label','notice','status','status_source'].sort());
+  assert.deepEqual(Object.keys(view).sort(),['detail','label','notice','status'].sort());
   assert.match(view.notice,/check local signs, restrictions and conditions/i);
   assert.equal(JSON.stringify(view).includes('TET'),false);
   assert.equal(JSON.stringify(view).includes('source_id'),false);
   assert.deepEqual(PUBLIC_TILE_FIELDS,['rtt_id','name','kind','access']);
   const official=publicScoutStatus({productState:'TEMPORARILY_CLOSED',authorityName:'Example Highway Authority',authorityDirectlySupportsStatus:true,restrictionUntil:'2026-10-31'});
-  assert.equal(official.status_source,'Example Highway Authority');
+  assert.equal('status_source' in official,false);
   assert.match(official.detail,/2026-10-31/);
-  assert.equal(publicScoutStatus({productState:'TEMPORARILY_CLOSED',authorityName:'Private GPX',authorityDirectlySupportsStatus:false}).status_source,null);
+  assert.equal(JSON.stringify(publicScoutStatus({productState:'TEMPORARILY_CLOSED',authorityName:'Private GPX',authorityDirectlySupportsStatus:true,restrictionUntil:'2026-10-31'})).includes('Private GPX'),false);
+});
+
+test('licensed partner layer projects only partner-authorized status and notes, separately from Scout cross-references', () => {
+  const feature=projectPartnerLayerFeature({agreement:{partner_id:'licensed-partner',permission_reference:'agreement-1',public_geometry_display:true,public_status_display:true,public_notes_display:true},
+    geometry:{type:'LineString',coordinates:[[1,2],[1.1,2.1]]},
+    partnerContent:{status:'Partner verified',note:'Partner supplied route note',source_feature_id:'private-feature-44',scout_matches:['osm:way/44'],source_ids:['private-source']},
+    });
+  assert.deepEqual(Object.keys(feature),['type','properties','geometry']);
+  assert.deepEqual(feature.properties,{status:'Partner verified',note:'Partner supplied route note'});
+  assert.equal(JSON.stringify(feature).includes('private-feature-44'),false);
+  assert.equal(JSON.stringify(feature).includes('osm:way/44'),false);
+  assert.equal(JSON.stringify(feature).includes('private-source'),false);
+  assert.throws(()=>projectPartnerLayerFeature({agreement:{partner_id:'p',permission_reference:'agreement-1',public_geometry_display:true},geometry:{type:'LineString',coordinates:[[0,0],[1,1]]},partnerContent:{status:'OK'}}),/does not authorize/);
+  const noNotes=projectPartnerLayerFeature({agreement:{partner_id:'p',permission_reference:'agreement-1',public_geometry_display:true,public_status_display:true,public_notes_display:false},geometry:{type:'LineString',coordinates:[[0,0],[1,1]]},partnerContent:{status:'OK',note:'private note'}});
+  assert.deepEqual(noNotes.properties,{status:'OK'});
+});
+
+test('source acknowledgements are map-wide credits, never attached to route features', () => {
+  const credits=projectDataAcknowledgements([
+    {public_credit:true,attribution:'© Example Authority'},
+    {public_credit:true,attribution:'© Example Authority'},
+    {public_credit:false,attribution:'Private discovery source'},
+  ]);
+  assert.deepEqual(credits,[{text:'© Example Authority'}]);
+  assert.equal(JSON.stringify(credits).includes('private-feature'),false);
+  assert.throws(()=>projectDataAcknowledgements([{public_credit:true,attribution:''}]),/needs a dataset-level credit/);
 });

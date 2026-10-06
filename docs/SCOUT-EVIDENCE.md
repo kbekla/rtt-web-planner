@@ -34,7 +34,7 @@ The dedicated SPW adapter (`spw-network.mjs`, `external-network-evidence.mjs`) r
 
 Community claims have typed effects (`TRAVERSED`, `BLOCKED`, `GATE_PRESENT`, `SURFACE_CHANGED`, `SIGN_SEEN`, `LEGAL_SIGNAGE_REPORTED`, `CLOSED`, `REOPENED`, `GEOMETRY_DIFFERENT`), observation time, provenance, optional media reference, independence grouping and freshness. Current traversal/condition claims can corroborate physical existence or character only. They never change legal access. Stale claims remain in history with stale status.
 
-Partner sources are a separate storage/access layer, not baked into RT&T-owned geometry. Registration requires an explicit permission reference, owner, audience, attribution and storage boundary; the layer remains inactive by default. TET, ACT, TRF/GRM, TrailVidz and other community/commercial material is not assumed to grant redistribution, derivative publication or commercial rights.
+Partner sources are a separate storage/access layer, not baked into RT&T-owned geometry. Registration requires an explicit permission reference, owner, audience, attribution and storage boundary; the layer remains inactive by default. TET, ACT, TRF/GRM, TrailVidz and other community/commercial material is not assumed to grant redistribution, derivative publication or commercial rights. If an agreement explicitly permits it, partner-authored route status and notes can be served through a separate partner layer. Scout's cross-source matches, source-to-corridor links, internal evidence and feature identifiers remain private and are never exposed by that layer. Contributor credits are map-wide acknowledgements, not feature-level provenance.
 
 ## Belgium source review
 
