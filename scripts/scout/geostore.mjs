@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { REPO } from '../lib/common.mjs';
 
-export const SCOUT_GEOSCHEMA_VERSION = 10;
+export const SCOUT_GEOSCHEMA_VERSION = 11;
 const json = (value) => JSON.stringify(value);
 
 export class ScoutGeoStore {
@@ -286,6 +286,7 @@ export class ScoutGeoStore {
       CREATE TABLE IF NOT EXISTS network_import_checkpoints (
         snapshot_id TEXT PRIMARY KEY, source_url TEXT NOT NULL, records_seen INTEGER NOT NULL DEFAULT 0,
         edges_written INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, updated_at TEXT NOT NULL,
+        normalizer_version TEXT NOT NULL DEFAULT '',
         FOREIGN KEY(snapshot_id) REFERENCES network_snapshots(snapshot_id)
       );
       CREATE TABLE IF NOT EXISTS review_decisions (
@@ -312,7 +313,9 @@ export class ScoutGeoStore {
         ALTER TABLE candidates ADD COLUMN network_snapshot_id TEXT;
         ALTER TABLE candidates ADD COLUMN jurisdiction_ids_json TEXT NOT NULL DEFAULT '[]';
         UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
-    } else if(version===2||version===3||version===4||version===5||version===6||version===7||version===8||version===9)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    } else if(version===10)this.db.exec(`ALTER TABLE network_import_checkpoints ADD COLUMN normalizer_version TEXT NOT NULL DEFAULT '';
+      UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
+    else if(version===2||version===3||version===4||version===5||version===6||version===7||version===8||version===9)this.db.exec(`UPDATE schema_version SET version=${SCOUT_GEOSCHEMA_VERSION};`);
     else if(version!==SCOUT_GEOSCHEMA_VERSION)throw new Error(`unsupported Scout geostore schema version ${version}`);
   }
   registerSource(definition) {
@@ -509,11 +512,12 @@ export class ScoutGeoStore {
       FROM network_edges e JOIN network_edges_rtree r USING(edge_rowid) WHERE e.snapshot_id=?`).get(snapshotId);
     return row&&[row.west,row.south,row.east,row.north].every(Number.isFinite)?[row.west,row.south,row.east,row.north]:null;
   }
-  setNetworkImportCheckpoint(snapshotId,{source_url,records_seen,edges_written,status}){
+  setNetworkImportCheckpoint(snapshotId,{source_url,records_seen,edges_written,status,normalizer_version=''}){
     if(!this.getNetworkSnapshot(snapshotId)||!source_url||!Number.isSafeInteger(records_seen)||records_seen<0||!Number.isSafeInteger(edges_written)||edges_written<0||!['RUNNING','YIELDED','COMPLETE','FAILED'].includes(status))throw new Error('invalid network import checkpoint');
-    this.db.prepare(`INSERT INTO network_import_checkpoints(snapshot_id,source_url,records_seen,edges_written,status,updated_at) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(snapshot_id) DO UPDATE SET source_url=excluded.source_url,records_seen=excluded.records_seen,edges_written=excluded.edges_written,status=excluded.status,updated_at=excluded.updated_at`)
-      .run(snapshotId,source_url,records_seen,edges_written,status,new Date().toISOString());
+    if(typeof normalizer_version!=='string')throw new Error('invalid network normalizer version');
+    this.db.prepare(`INSERT INTO network_import_checkpoints(snapshot_id,source_url,records_seen,edges_written,status,updated_at,normalizer_version) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(snapshot_id) DO UPDATE SET source_url=excluded.source_url,records_seen=excluded.records_seen,edges_written=excluded.edges_written,status=excluded.status,updated_at=excluded.updated_at,normalizer_version=excluded.normalizer_version`)
+      .run(snapshotId,source_url,records_seen,edges_written,status,new Date().toISOString(),normalizer_version);
   }
   recordReviewDecision({candidate_id,decision,reviewer,reason,decided_at=new Date().toISOString()}){
     const states=['UNREVIEWED','ACCEPT_FOR_RESEARCH','NEEDS_MORE_EVIDENCE','REJECT_FALSE_POSITIVE','AMBIGUOUS','HOLD'];

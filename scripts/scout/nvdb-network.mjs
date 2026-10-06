@@ -4,17 +4,25 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import proj4 from 'proj4';
 import { lengthMeters } from './route-segmenter.mjs';
 
 export const NVDB_API_BASE = 'https://nvdbapiles.atlas.vegvesen.no';
 export const NVDB_API_VERSION = 'nvdb-api-les-v4';
-export const NVDB_ADAPTER_VERSION = 'nvdb-road-link-normalizer-1';
+export const NVDB_ADAPTER_VERSION = 'nvdb-road-link-normalizer-2';
 // The V4 collection endpoint returns paginated sequence records containing
 // their segment/link geometries. The documented next-page href uses the
 // official unversioned public facade path on the same API host.
 export const NVDB_LINKS_PATH = '/vegnett/api/v4/veglenkesekvenser';
 const NVDB_PAGINATION_PATH = '/vegnett/veglenkesekvenser';
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+// NVDB uses UTM zone 33 coordinates across Norway, including far beyond the
+// nominal 12-18 degree area of EPSG:5973. Proj4js uses extended transverse
+// Mercator for this transform; do not substitute a narrow-zone polynomial.
+const nvdbToGeographic = proj4(
+  '+proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs',
+  '+proj=longlat +ellps=GRS80 +no_defs',
+);
 
 export function nvdbNorwaySourceDefinition() {
   return {
@@ -47,25 +55,15 @@ export function nvdbNorwaySourceDefinition() {
 }
 
 function inverseUtm33(easting, northing) {
-  if (!Number.isFinite(easting) || !Number.isFinite(northing) || easting < 0 || easting > 1000000 || northing < 0 || northing > 10000000)
+  if (!Number.isFinite(easting) || !Number.isFinite(northing) || easting < -2000000 || easting > 2000000 || northing < 0 || northing > 10000000)
     throw new Error('NVDB EPSG:5973 coordinate is outside valid UTM bounds');
-  // EPSG:5973 is ETRS89 / UTM zone 33N. The ETRS89/WGS84 difference is
-  // immaterial for Scout's candidate identity tolerances. GRS80 ellipsoid.
-  const a = 6378137, f = 1 / 298.257222101, k0 = 0.9996;
-  const e2 = f * (2 - f), ep2 = e2 / (1 - e2), e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
-  const x = easting - 500000, m = northing / k0;
-  const mu = m / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256));
-  const phi1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * Math.sin(2 * mu)
-    + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * Math.sin(4 * mu)
-    + (151 * e1 ** 3 / 96) * Math.sin(6 * mu) + (1097 * e1 ** 4 / 512) * Math.sin(8 * mu);
-  const sin = Math.sin(phi1), cos = Math.cos(phi1), tan = Math.tan(phi1);
-  const n1 = a / Math.sqrt(1 - e2 * sin ** 2), t1 = tan ** 2, c1 = ep2 * cos ** 2;
-  const r1 = a * (1 - e2) / (1 - e2 * sin ** 2) ** 1.5, d = x / (n1 * k0);
-  const lat = phi1 - (n1 * tan / r1) * (d ** 2 / 2 - (5 + 3 * t1 + 10 * c1 - 4 * c1 ** 2 - 9 * ep2) * d ** 4 / 24
-    + (61 + 90 * t1 + 298 * c1 + 45 * t1 ** 2 - 252 * ep2 - 3 * c1 ** 2) * d ** 6 / 720);
-  const lon = (15 * Math.PI / 180) + (d - (1 + 2 * t1 + c1) * d ** 3 / 6
-    + (5 - 2 * c1 + 28 * t1 - 3 * c1 ** 2 + 8 * ep2 + 24 * t1 ** 2) * d ** 5 / 120) / cos;
-  return [lon * 180 / Math.PI, lat * 180 / Math.PI];
+  const coordinate = nvdbToGeographic.forward([easting, northing]);
+  const [longitude, latitude] = coordinate;
+  // Broad Norway envelope includes mainland, Svalbard and Jan Mayen. It is a
+  // post-transform sanity check, not a dataset-derived or route-derived extent.
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude) || longitude < -12 || longitude > 35 || latitude < 56 || latitude > 82)
+    throw new Error('NVDB EPSG:5973 coordinate transforms outside the configured Norway geographic envelope');
+  return [longitude, latitude];
 }
 
 function parseLineStringZ(wkt, srid) {
@@ -261,8 +259,16 @@ export async function importNvdbSnapshot(store, { snapshotId, batchSize = 500, s
   const file = path.resolve(artifact.local_path), root = fs.realpathSync(store.root);
   if (fs.lstatSync(file).isSymbolicLink() || fs.realpathSync(file) !== file || !file.startsWith(root + path.sep)) throw new Error('NVDB page artifact must be a private regular file');
   if (await hashFile(file) !== snapshot.checksum || snapshot.checksum !== artifact.sha256) throw new Error('NVDB page artifact failed checksum validation');
-  const checkpoint = store.networkImportCheckpoint(snapshotId), skippedPages = checkpoint?.status === 'COMPLETE' ? 0 : checkpoint?.records_seen ?? 0;
-  if (checkpoint?.status === 'COMPLETE' && checkpoint.edges_written === store.networkEdgeCount(snapshotId))
+  let checkpoint = store.networkImportCheckpoint(snapshotId);
+  if (checkpoint && checkpoint.normalizer_version !== NVDB_ADAPTER_VERSION) {
+    const linkedRuns = store.db.prepare('SELECT count(*) n FROM discovery_runs WHERE snapshot_id=?').get(snapshotId).n;
+    if (linkedRuns) throw new Error('NVDB normalization version changed after discovery began; create a separately pinned normalized snapshot for review');
+    store.setNetworkImportCheckpoint(snapshotId, { source_url: artifact.source_url, records_seen: 0,
+      edges_written: store.networkEdgeCount(snapshotId), status: 'RUNNING', normalizer_version: NVDB_ADAPTER_VERSION });
+    checkpoint = store.networkImportCheckpoint(snapshotId);
+  }
+  const skippedPages = checkpoint?.records_seen ?? 0;
+  if (checkpoint?.normalizer_version === NVDB_ADAPTER_VERSION && checkpoint?.status === 'COMPLETE' && checkpoint.edges_written === store.networkEdgeCount(snapshotId))
     return { status: 'REUSED', pages_seen: checkpoint.records_seen, links_normalized: 0, edges_total: checkpoint.edges_written };
   const input = fs.createReadStream(file, { encoding: 'utf8' });
   const reader = createInterface({ input, crlfDelay: Infinity });
@@ -281,14 +287,14 @@ export async function importNvdbSnapshot(store, { snapshotId, batchSize = 500, s
     }
     flush();
     store.setNetworkImportCheckpoint(snapshotId, { source_url: artifact.source_url, records_seen: pagesSeen,
-      edges_written: store.networkEdgeCount(snapshotId), status: 'RUNNING' });
+      edges_written: store.networkEdgeCount(snapshotId), status: 'RUNNING', normalizer_version: NVDB_ADAPTER_VERSION });
     onBatch({ pages_seen: pagesSeen, links_normalized: normalized });
     if (shouldYield()) { yielded = true; break; }
   }
   if (!yielded) {
     const count = store.networkEdgeCount(snapshotId);
     store.setNetworkImportCheckpoint(snapshotId, { source_url: artifact.source_url, records_seen: pagesSeen,
-      edges_written: count, status: 'COMPLETE' });
+      edges_written: count, status: 'COMPLETE', normalizer_version: NVDB_ADAPTER_VERSION });
   }
   return { status: yielded ? 'YIELDED' : 'COMPLETE', pages_seen: pagesSeen, links_normalized: normalized,
     edges_total: store.networkEdgeCount(snapshotId), yielded };

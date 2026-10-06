@@ -19,7 +19,7 @@ npm run scout:geo -- network acquire --source-id no-nvdb-vegkart --snapshot-id <
 npm run scout:geo -- network import --snapshot-id <pinned-Norway-NVDB-snapshot>
 ```
 
-The V4 adapter stores the exact paginated API response bundle, retrieval timestamps, and SHA-256. NVDB is live and does not promise a transactionally consistent point-in-time snapshot; the bundle is identified as a live retrieval window. It normalizes official link geometry into Scout's private network-edge store. Required NLOD attribution is retained at dataset acknowledgement level, separate from per-lane provenance. This adapter does not enable NVDB restrictions.
+The V4 adapter stores the exact paginated API response bundle, retrieval timestamps, and SHA-256. NVDB is live and does not promise a transactionally consistent point-in-time snapshot; the bundle is identified as a live retrieval window. It normalizes official link geometry into Scout's private network-edge store. NVDB publishes compound EPSG:5973 coordinates (ETRS89 / UTM 33N with NN2000 height); the adapter transforms horizontal coordinates with pinned Proj4js extended Transverse Mercator parameters and retains the original WKT privately. It omits source height from 2D navigation geometry rather than mislabelling NN2000 as ellipsoidal height. The numerical projection tests cover western/eastern/high-latitude Norway coordinates to centimetre-level transform tolerance; this is not a claim of centimetre-level datum accuracy. Required NLOD attribution is retained at dataset acknowledgement level, separate from per-lane provenance. This adapter does not enable NVDB restrictions.
 
 ```sh
 npm run scout:geo -- discover create \

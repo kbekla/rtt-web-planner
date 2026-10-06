@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
 import {
-  NVDB_API_BASE, NVDB_LINKS_PATH, acquireNvdbSnapshot, importNvdbSnapshot,
+  NVDB_ADAPTER_VERSION, NVDB_API_BASE, NVDB_LINKS_PATH, acquireNvdbSnapshot, importNvdbSnapshot,
   discoverNvdbRun, nvdbDiscoverySelection, nvdbNorwaySourceDefinition, normalizeNvdbPage,
   normalizeNvdbRoadLink, registerNvdbDiscoverySource,
 } from '../../scripts/scout/nvdb-network.mjs';
@@ -51,6 +51,23 @@ test('official NVDB page normalizes road links into private Scout network edges'
   assert.equal(edges[0].tags['nvdb:road_name'], 'Synthetic fixture road');
   assert.equal(edges[1].tags.highway, 'track');
   assert.equal(edges[2].tags.highway, 'path');
+});
+
+test('EPSG:5973 projection handles Norway-wide UTM zone 33 coordinates precisely', () => {
+  const fixtures = [
+    { e: -148432.253504365, n: 6481751.773865681, lon: 4, lat: 58 },
+    { e: 500000.000000001, n: 6651411.190239697, lon: 15, lat: 60 },
+    { e: 1104629.435645437, n: 7845845.077572139, lon: 31, lat: 70 },
+    { e: 393619.930827458, n: 8774533.543207480, lon: 10, lat: 79 },
+  ];
+  for (const [index, fixture] of fixtures.entries()) {
+    const geometry = { wkt: `LINESTRING Z (${fixture.e} ${fixture.n} 10,${fixture.e + 1} ${fixture.n + 1} 11)`, srid: 5973 };
+    const first = normalizeNvdbRoadLink({ ...link(8000, index + 1, 'Skogsbilveg'), geometri: geometry }).geometry.coordinates[0];
+    const errorMeters = Math.hypot((first[0] - fixture.lon) * 111320 * Math.cos(fixture.lat * Math.PI / 180), (first[1] - fixture.lat) * 111132);
+    assert.ok(errorMeters <= 0.01, `fixture ${index + 1} inverse projection error ${errorMeters}m`);
+  }
+  assert.throws(() => normalizeNvdbRoadLink({ ...link(8001, 1, 'Skogsbilveg'),
+    geometri: { wkt: 'LINESTRING Z (500000 9500000 0,500001 9500001 0)', srid: 5973 } }), /Norway geographic envelope/);
 });
 
 test('NVDB source policy is private and does not claim legal access, restrictions or public reuse', () => {
@@ -116,7 +133,14 @@ test('approved paginated NVDB fixture is checksummed, imported and resumes throu
     assert.equal(imported.status, 'COMPLETE');
     assert.equal(imported.links_normalized, 3);
     assert.equal(store.networkEdgeCount('nvdb-no-fixture-v1'), 3);
+    assert.equal(store.networkImportCheckpoint('nvdb-no-fixture-v1').normalizer_version, NVDB_ADAPTER_VERSION);
     assert.equal((await importNvdbSnapshot(store, { snapshotId: 'nvdb-no-fixture-v1' })).status, 'REUSED');
+    store.setNetworkImportCheckpoint('nvdb-no-fixture-v1', { source_url: store.getNetworkArtifact('nvdb-no-fixture-v1').source_url,
+      records_seen: 2, edges_written: 3, status: 'COMPLETE', normalizer_version: 'nvdb-road-link-normalizer-1' });
+    const reprojection = await importNvdbSnapshot(store, { snapshotId: 'nvdb-no-fixture-v1', batchSize: 2 });
+    assert.equal(reprojection.status, 'COMPLETE');
+    assert.equal(reprojection.links_normalized, 3, 'a new normalizer reprojects prior network rows from raw pinned pages');
+    assert.equal(store.networkImportCheckpoint('nvdb-no-fixture-v1').normalizer_version, NVDB_ADAPTER_VERSION);
     assert.equal(fs.statSync(store.getNetworkArtifact('nvdb-no-fixture-v1').local_path).mode & 0o777, 0o600);
   } finally {
     store.close();
