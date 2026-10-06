@@ -107,3 +107,17 @@ test('private NVDB sequence grouping checkpoints by sequence and resumes without
     assert.equal(buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'}).status,'REUSED');
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('NVDB corridor transaction batches roll back completely on a mid-batch factory yield',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-no-phase2-batch-yield-')),store=new ScoutGeoStore(root);
+  try{
+    const source=nvdbNorwaySourceDefinition();store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:'no-nvdb-phase1-20261006',source_id:source.source_id,version:'fixture',checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',licence:source.licence,coverage:{countries:['NO'],regions:['NO']}});
+    const edge=(sequenceId,id,offset)=>({edge_id:`nvdb:${sequenceId}:${id}`,geometry:{type:'LineString',coordinates:[[10+offset,60],[10.001+offset,60]]},tags:{'nvdb:type_veg':'Skogsbilveg'},evidence:[{topology:{sequence_id:sequenceId,link_number:1,segment_number:'1',start_position:0,end_position:1,start_node:`${sequenceId}-a`,end_node:`${sequenceId}-b`}}]});
+    store.saveNetworkEdges('no-nvdb-phase1-20261006',[edge('seq-a','1',0),edge('seq-b','1',.01)]);
+    let checks=0;const yielded=buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2,shouldYield:()=>++checks===2});
+    assert.equal(yielded.status,'BLOCKED');assert.equal(yielded.link_count,0);
+    assert.equal(store.db.prepare("SELECT records_seen FROM phase2_stage_state WHERE stage='NVDB_SEQUENCE_CORRIDORS'").get().records_seen,0);
+    const resumed=buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2});
+    assert.equal(resumed.status,'COMPLETE');assert.equal(resumed.link_count,2);assert.equal(resumed.corridor_count,2);
+  }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
+});

@@ -96,19 +96,21 @@ export function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1-20261
   for(;;){
     if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
     const batch=seqs.all(snapshotId,cursor,cursor,batchSequences);if(!batch.length)break;
-    for(const sequence of batch){const rows=links.all(snapshotId,sequence.sequence_id).map(row=>({edge_id:row.edge_id,geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json),evidence:JSON.parse(row.evidence_json)}));
-      const groups=buildNvdbSequenceCorridors(rows);
-      store.db.exec('BEGIN IMMEDIATE');try{for(const group of groups){const memberIds=new Set(group.member_edge_ids),members=rows.filter(row=>memberIds.has(row.edge_id)),physical=new Set(members.map(row=>classifyPhysicalRoad(row.tags,'NVDB').physical_character));
+    let batchCursor=cursor,batchRecords=records;store.db.exec('BEGIN IMMEDIATE');try{
+      for(const sequence of batch){const rows=links.all(snapshotId,sequence.sequence_id).map(row=>({edge_id:row.edge_id,geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json),evidence:JSON.parse(row.evidence_json)}));
+        const groups=buildNvdbSequenceCorridors(rows);for(const group of groups){const memberIds=new Set(group.member_edge_ids),members=rows.filter(row=>memberIds.has(row.edge_id)),physical=new Set(members.map(row=>classifyPhysicalRoad(row.tags,'NVDB').physical_character));
           const physicalCharacter=physical.size===1?[...physical][0]:'MIXED_PHYSICAL_CHARACTER',networkRole=members.every(row=>classifyPhysicalRoad(row.tags,'NVDB').ordinary_navigation)?'ORDINARY_ROAD':'POTENTIAL_SPECIAL_ROUTE';
           const attributes={name:[...new Set(members.map(row=>row.tags['nvdb:road_name']).filter(Boolean))],ref:[...new Set(members.map(row=>row.tags['nvdb:road_reference']??row.tags['nvdb:vegnummer']).filter(Boolean))],type_veg:[...new Set(members.map(row=>row.tags['nvdb:type_veg']).filter(Boolean))]};
           save.run(group.corridor_id,snapshotId,'no-nvdb-vegkart',group.source_sequence_id,group.member_edge_ids.length,group.identity_state,physicalCharacter,networkRole,JSON.stringify(group.geometry),JSON.stringify(attributes),JSON.stringify(group.member_edge_ids),JSON.stringify(group.support));
           for(const edgeId of group.member_edge_ids)saveMember.run(group.corridor_id,edgeId);
           const rid=rowId.get(group.corridor_id).rowid;let west=180,east=-180,south=90,north=-90;for(const line of group.geometry.coordinates)for(const [lon,lat] of line){west=Math.min(west,lon);east=Math.max(east,lon);south=Math.min(south,lat);north=Math.max(north,lat);}if(west<=east&&south<=north)saveBox.run(rid,west,east,south,north);}
-        records+=rows.length;cursor=sequence.sequence_id;putStage.run(stage,'RUNNING',cursor,records,new Date().toISOString());store.db.exec('COMMIT');
-      }catch(error){store.db.exec('ROLLBACK');throw error;}
-      onProgress({sequence_id:cursor,links_processed:records,sequence_corridor_count:groups.length});
-      if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
-    }
+        batchRecords+=rows.length;batchCursor=sequence.sequence_id;
+        if(shouldYield())throw Object.assign(new Error('Norway NVDB corridor batch yielded safely'),{code:'SCOUT_YIELD_REQUESTED'});
+      }
+      putStage.run(stage,'RUNNING',batchCursor,batchRecords,new Date().toISOString());store.db.exec('COMMIT');
+    }catch(error){store.db.exec('ROLLBACK');if(error.code==='SCOUT_YIELD_REQUESTED'){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}throw error;}
+    cursor=batchCursor;records=batchRecords;onProgress({sequence_id:cursor,links_processed:records,sequence_count:batch.length});
+    if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
   }
   putStage.run(stage,'COMPLETE',cursor,records,new Date().toISOString());return phase2NvdbCorridorStats(store,snapshotId,'COMPLETE');
 }
