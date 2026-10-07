@@ -24,6 +24,14 @@ function setStage(db, snapshotId, runId, stage, status, recordsSeen) {
     ON CONFLICT(snapshot_id,run_id,stage) DO UPDATE SET status=excluded.status,records_seen=excluded.records_seen,updated_at=excluded.updated_at`)
     .run(snapshotId, runId, stage, status, recordsSeen, new Date().toISOString());
 }
+/** Keep blind first-run lineage bounded: without a prior run there is nothing
+ * to match, so avoid materializing all current node sequences in memory. */
+export function inferRunCorridorLineage({ readPriorLineage, loadPrevious, loadCurrent }) {
+  if (!readPriorLineage) return [];
+  const previous = loadPrevious();
+  if (!previous.length) return [];
+  return inferCorridorLineage(previous, loadCurrent());
+}
 async function scanWays({ db, file, snapshotId, runId, stage, selectedWayIds = null, endpointIds = null, osmium, spawnImpl, shouldYield, batchSize }) {
   const prior = stageRow(db, snapshotId, runId, stage); if (prior?.status === 'COMPLETE') return { status: 'REUSED', records_seen: prior.records_seen };
   let cursor = prior?.records_seen ?? 0, scanned = 0, stopped = false, stderr = '';
@@ -200,13 +208,13 @@ export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnI
   }
   const lineageStage = stageRow(store.db, run.snapshot_id, runId, 'CORRIDOR_LINEAGE');
   if (lineageStage?.status !== 'COMPLETE') {
-    const previous = readDiscoveryHints?store.db.prepare(`SELECT * FROM (SELECT v.corridor_version_id,v.corridor_id,v.node_sequence_json,dr.snapshot_id,
+    const loadPrevious=()=>store.db.prepare(`SELECT * FROM (SELECT v.corridor_version_id,v.corridor_id,v.node_sequence_json,dr.snapshot_id,
       row_number() OVER(PARTITION BY v.corridor_id ORDER BY v.created_at DESC,v.corridor_version_id DESC) rank
       FROM physical_corridor_versions v JOIN discovery_runs dr USING(run_id) WHERE dr.run_id<>? AND dr.country_code=? AND dr.region_id=? AND dr.status='REVIEW_REQUIRED')
-      WHERE rank=1`).all(runId, run.country_code, run.region_id).map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)})):[];
-    const current = store.db.prepare(`SELECT corridor_version_id,corridor_id,node_sequence_json FROM physical_corridor_versions WHERE run_id=?`).all(runId)
+      WHERE rank=1`).all(runId, run.country_code, run.region_id).map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)}));
+    const loadCurrent=()=>store.db.prepare(`SELECT corridor_version_id,corridor_id,node_sequence_json FROM physical_corridor_versions WHERE run_id=?`).all(runId)
       .map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)}));
-    const pairs = inferCorridorLineage(previous,current), add=store.db.prepare(`INSERT OR IGNORE INTO physical_corridor_lineage(lineage_id,from_version_id,to_version_id,relation,match_state,evidence_json,created_at)
+    const pairs = inferRunCorridorLineage({readPriorLineage:readDiscoveryHints,loadPrevious,loadCurrent}), add=store.db.prepare(`INSERT OR IGNORE INTO physical_corridor_lineage(lineage_id,from_version_id,to_version_id,relation,match_state,evidence_json,created_at)
       VALUES(?,?,?,?,?,?,?)`),at=new Date().toISOString();
     store.db.exec('BEGIN IMMEDIATE');
     try {

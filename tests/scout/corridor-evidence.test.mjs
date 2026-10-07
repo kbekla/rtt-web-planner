@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTopologyCorridors, deriveOperationalState, evaluateMotorcycleAccess, inferCorridorLineage, sourceAutomationDecision, validateLegalStatusRecord, communityClaimEffect } from '../../scripts/scout/corridor-evidence.mjs';
-import { parseOsmiumOplWay, recordCorridorReview, triageCorridorReviewQueue } from '../../scripts/scout/osm-topology.mjs';
+import { inferRunCorridorLineage, parseOsmiumOplWay, recordCorridorReview, triageCorridorReviewQueue } from '../../scripts/scout/osm-topology.mjs';
 import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
 import { sourcePollDecision, saveLegalStatusRecord, saveCommunityClaim, refreshCommunityFreshness, registerPartnerLayer, recordSourceFetch, recordSourceFailure } from '../../scripts/scout/watchkeeper.mjs';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
@@ -43,6 +43,17 @@ test('cross-snapshot corridor identity follows only unique continuous node linea
   const split=inferCorridorLineage(prior,[{corridor_id:'new-a',corridor_version_id:'new-v1',node_sequence:['1','2','3']},{corridor_id:'new-b',corridor_version_id:'new-v2',node_sequence:['3','4','5']}]);
   assert.equal(split.length,2);assert.ok(split.every(pair=>pair.relation==='SPLIT'&&pair.match_state==='REVIEW_REQUIRED'));
   assert.deepEqual(inferCorridorLineage(prior,[{corridor_id:'new-unknown',corridor_version_id:'v',node_sequence:['a','b','c','d']}]),[]);
+});
+
+test('blind first-run corridor lineage does not load current node sequences or any prior reference',()=>{
+  let previousReads=0,currentReads=0;
+  assert.deepEqual(inferRunCorridorLineage({readPriorLineage:false,loadPrevious:()=>{previousReads++;return [];},loadCurrent:()=>{currentReads++;return [];}}),[]);
+  assert.equal(previousReads,0);assert.equal(currentReads,0);
+  assert.deepEqual(inferRunCorridorLineage({readPriorLineage:true,loadPrevious:()=>[],loadCurrent:()=>{currentReads++;return [];}}),[]);
+  assert.equal(currentReads,0);
+  const prior=[{corridor_id:'old-a',corridor_version_id:'old-v',node_sequence:['1','2','3']}];
+  const found=inferRunCorridorLineage({readPriorLineage:true,loadPrevious:()=>prior,loadCurrent:()=>[{corridor_id:'new-a',corridor_version_id:'new-v',node_sequence:['1','2','3']}]});
+  assert.equal(found[0].relation,'CONTINUES');
 });
 
 test('shared node chains stop at a branch and never fill ambiguous/missing topology gaps', () => {

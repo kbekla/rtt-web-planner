@@ -129,7 +129,7 @@ export function phase2NvdbCorridorStats(store,snapshotId='no-nvdb-phase1-2026100
 }
 
 /** Reconcile OSM lane-corridor hypotheses against topology-built NVDB corridors. */
-export function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='no-nvdb-phase1-20261006',shouldYield=()=>false,batchSize=100,onProgress=()=>{}}={}){
+export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='no-nvdb-phase1-20261006',shouldYield=()=>false,batchSize=100,onProgress=()=>{}}={}){
   if(!Number.isInteger(batchSize)||batchSize<1||batchSize>1000)throw new Error('Norway cross-source batch size must be 1-1000 corridors');
   const osmRun=store.getDiscoveryRun(osmRunId);if(!osmRun||osmRun.status!=='COMPLETE'||osmRun.reference_run_id!==null)throw new Error('Norway reconciliation requires a complete independent OSM discovery pass');
   if(store.db.prepare('SELECT status FROM osm_topology_stage_state WHERE snapshot_id=? AND run_id=? AND stage=?').get(osmRun.snapshot_id,osmRunId,'CORRIDOR_REVIEW_TRIAGE')?.status!=='COMPLETE')throw new Error('Norway reconciliation requires OSM candidate corridor topology to be complete');
@@ -156,7 +156,9 @@ export function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='no-nvdb
         motorcycle_access_effect:'NONE',routability_effect:'NONE',proximity_only_identity:false}));
       cursor=corridor.corridor_version_id;processed++;
     }checkpoint.run(stage,'RUNNING',cursor,processed,new Date().toISOString());store.db.exec('COMMIT');}catch(error){store.db.exec('ROLLBACK');throw error;}
-    onProgress({processed,total:osmFeatureCount,cursor,cross_source_match_count:store.db.prepare('SELECT count(*) n FROM phase2_cross_source_support').get().n});
+    await new Promise(resolve=>setImmediate(resolve));
+    if(shouldYield()){checkpoint.run(stage,'BLOCKED',cursor,processed,new Date().toISOString());return {...norwayReconciliationStats(store,osmRunId,'BLOCKED'),resumable:true};}
+    if(processed%5000===0)onProgress({processed,total:osmFeatureCount,cursor,cross_source_match_count:store.db.prepare('SELECT count(*) n FROM phase2_cross_source_support').get().n});
   }
   checkpoint.run(stage,'COMPLETE',cursor,processed,new Date().toISOString());return norwayReconciliationStats(store,osmRunId,'COMPLETE');
 }
