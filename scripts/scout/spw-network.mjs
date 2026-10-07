@@ -97,13 +97,16 @@ function edgesInEnvelope(edges,envelope){return edges.filter(edge=>{
   return maxLon>=envelope.minLon&&minLon<=envelope.maxLon&&maxLat>=envelope.minLat&&minLat<=envelope.maxLat;
 });}
 function edgeLength(edge) { return distance(edge.a, edge.b); }
-function sampleEdges(edges, step = 15) {
-  const result = [];
+function sampleEdges(edges, step = 15, retainEnvelope = null) {
+  const result = [];let totalSampleCount=0;
   for (const edge of edges) {
     const length = edgeLength(edge), count = Math.max(1, Math.ceil(length / step));
-    for (let i = 0; i < count; i++) { const t = (i + .5) / count; result.push({ edge, point: [edge.a[0] + (edge.b[0] - edge.a[0]) * t, edge.a[1] + (edge.b[1] - edge.a[1]) * t] }); }
+    totalSampleCount+=count;
+    for (let i = 0; i < count; i++) { const t = (i + .5) / count,point=[edge.a[0] + (edge.b[0] - edge.a[0]) * t, edge.a[1] + (edge.b[1] - edge.a[1]) * t];
+      if(retainEnvelope&&(point[0]<retainEnvelope.minLon||point[0]>retainEnvelope.maxLon||point[1]<retainEnvelope.minLat||point[1]>retainEnvelope.maxLat))continue;
+      result.push({ edge, point }); }
   }
-  return result;
+  return {samples:result,total_sample_count:totalSampleCount};
 }
 function bearing(edge) { return Math.atan2((edge.b[0] - edge.a[0]) * Math.cos(rad((edge.a[1] + edge.b[1]) / 2)), edge.b[1] - edge.a[1]) * 180 / Math.PI; }
 function bearingDelta(a, b) { let d = Math.abs(bearing(a) - bearing(b)) % 180; return Math.min(d, 180 - d); }
@@ -117,9 +120,9 @@ function nearest(sample, edges, maxAngle) {
   }
   return result;
 }
-function support(samples, edges, maxDistance, maxAngle) {
+function support(samples, edges, maxDistance, maxAngle, totalSampleCount=samples.length) {
   const hits = samples.map(sample => nearest(sample, edges, maxAngle)).filter(hit => hit.distance <= maxDistance);
-  return { ratio: hits.length / (samples.length || 1), hits };
+  return { ratio: hits.length / (totalSampleCount || 1), hits };
 }
 function percentile(values, fraction) { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))] : Infinity; }
 function endpoints(geometry) { return geometryLines(geometry).filter(line => line.length > 1).flatMap(line => [line[0], line.at(-1)]); }
@@ -144,14 +147,14 @@ export function compareSpwCorridor(corridor, spw, { competitors = [] } = {}) {
  * per nearby source edge repeated all competitor geometry work quadratically. */
 export function compareSpwCorridors(corridor, spws, { competitors = [] } = {}) {
   if(!Array.isArray(spws)||!Array.isArray(competitors))throw new Error('corridor comparison inputs must be arrays');
-  const a=edgeRecords(corridor?.geometry),as=sampleEdges(a),envelope=corridorEnvelope(a),all=[...new Set([...spws,...competitors])],metrics=new Map();
+  const a=edgeRecords(corridor?.geometry),as=sampleEdges(a).samples,envelope=corridorEnvelope(a),all=[...new Set([...spws,...competitors])],metrics=new Map();
   for(const spw of all){
     const b=edgeRecords(spw?.geometry);if(!a.length||!b.length){metrics.set(spw,{empty:true});continue;}
     // For corridor-to-network support, segments outside the corridor's
     // 12 m envelope cannot contribute a hit. Keep the full edge list and its
     // samples for reciprocal coverage so long source geometry is never
     // artificially made to look like a full match.
-    const localB=edgesInEnvelope(b,envelope),bs=sampleEdges(b),sa=support(as,localB,12,20),sb=support(bs,a,12,20),da=sa.hits.map(x=>x.distance);
+    const localB=edgesInEnvelope(b,envelope),bs=sampleEdges(b,15,envelope),sa=support(as,localB,12,20),sb=support(bs.samples,a,12,20,bs.total_sample_count),da=sa.hits.map(x=>x.distance);
     metrics.set(spw,{b,sa,sb,p50:percentile(da,.5),p95:percentile(da,.95),bestAngle:percentile([...sa.hits,...sb.hits].map(hit=>hit.angle),.1),endpointMax:endpointGap(corridor.geometry,spw.geometry),identity:routeIdentity(corridor,spw)});
   }
   return spws.map(spw=>{
