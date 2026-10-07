@@ -86,6 +86,16 @@ function geometryLines(geometry) {
   return [];
 }
 function edgeRecords(geometry) { return geometryLines(geometry).flatMap((line, part) => line.slice(1).map((point, i) => ({ a: line[i], b: point, part }))); }
+function corridorEnvelope(edges,paddingM=12){
+  let minLon=Infinity,maxLon=-Infinity,minLat=Infinity,maxLat=-Infinity;
+  for(const edge of edges)for(const point of [edge.a,edge.b]){minLon=Math.min(minLon,point[0]);maxLon=Math.max(maxLon,point[0]);minLat=Math.min(minLat,point[1]);maxLat=Math.max(maxLat,point[1]);}
+  const lonPadding=paddingM/(111320*Math.max(.1,Math.cos(Math.max(Math.abs(minLat),Math.abs(maxLat))*Math.PI/180))),latPadding=paddingM/110574;
+  return {minLon:minLon-lonPadding,maxLon:maxLon+lonPadding,minLat:minLat-latPadding,maxLat:maxLat+latPadding};
+}
+function edgesInEnvelope(edges,envelope){return edges.filter(edge=>{
+  const minLon=Math.min(edge.a[0],edge.b[0]),maxLon=Math.max(edge.a[0],edge.b[0]),minLat=Math.min(edge.a[1],edge.b[1]),maxLat=Math.max(edge.a[1],edge.b[1]);
+  return maxLon>=envelope.minLon&&minLon<=envelope.maxLon&&maxLat>=envelope.minLat&&minLat<=envelope.maxLat;
+});}
 function edgeLength(edge) { return distance(edge.a, edge.b); }
 function sampleEdges(edges, step = 15) {
   const result = [];
@@ -134,10 +144,14 @@ export function compareSpwCorridor(corridor, spw, { competitors = [] } = {}) {
  * per nearby source edge repeated all competitor geometry work quadratically. */
 export function compareSpwCorridors(corridor, spws, { competitors = [] } = {}) {
   if(!Array.isArray(spws)||!Array.isArray(competitors))throw new Error('corridor comparison inputs must be arrays');
-  const a=edgeRecords(corridor?.geometry),as=sampleEdges(a),all=[...new Set([...spws,...competitors])],metrics=new Map();
+  const a=edgeRecords(corridor?.geometry),as=sampleEdges(a),envelope=corridorEnvelope(a),all=[...new Set([...spws,...competitors])],metrics=new Map();
   for(const spw of all){
     const b=edgeRecords(spw?.geometry);if(!a.length||!b.length){metrics.set(spw,{empty:true});continue;}
-    const bs=sampleEdges(b),sa=support(as,b,12,20),sb=support(bs,a,12,20),da=sa.hits.map(x=>x.distance);
+    // For corridor-to-network support, segments outside the corridor's
+    // 12 m envelope cannot contribute a hit. Keep the full edge list and its
+    // samples for reciprocal coverage so long source geometry is never
+    // artificially made to look like a full match.
+    const localB=edgesInEnvelope(b,envelope),bs=sampleEdges(b),sa=support(as,localB,12,20),sb=support(bs,a,12,20),da=sa.hits.map(x=>x.distance);
     metrics.set(spw,{b,sa,sb,p50:percentile(da,.5),p95:percentile(da,.95),bestAngle:percentile([...sa.hits,...sb.hits].map(hit=>hit.angle),.1),endpointMax:endpointGap(corridor.geometry,spw.geometry),identity:routeIdentity(corridor,spw)});
   }
   return spws.map(spw=>{

@@ -76,6 +76,14 @@ test('batched corridor comparison preserves competing-alignment ambiguity withou
   ]);
 });
 
+test('local edge pruning keeps a disconnected remote segment in reciprocal coverage denominator',()=>{
+  const a=corridor(line(4,50),{route_number:'N90'}),candidate={...spw({type:'MultiLineString',coordinates:[line(4,50).coordinates,line(5,51).coordinates]},{route_number:'N90'}),source_feature_id:'spw:multipart'};
+  const result=compareSpwCorridors(a,[candidate])[0].match;
+  assert.equal(result.support_ratio_corridor,1);
+  assert.ok(result.support_ratio_spw<1);
+  assert.notEqual(result.relationship,'EXACT');
+});
+
 test('partial overlap is distinguished from whole-corridor identity', () => {
   const result = compareSpwCorridor(corridor(line(4, 50, .02)), spw(line(4, 50, .01)));
   assert.equal(result.relationship, 'PARTIAL');

@@ -143,8 +143,9 @@ export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='n
     candidates=store.db.prepare(`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json FROM phase2_network_corridors_rtree r JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid WHERE c.snapshot_id=? AND r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=?`),
     upsert=store.db.prepare(`INSERT OR IGNORE INTO phase2_cross_source_support(osm_corridor_version_id,nvdb_corridor_id,relationship,evidence_json) VALUES(?,?,?,?)`);
   const osmFeatureCount=Number(store.db.prepare('SELECT count(*) n FROM physical_corridor_versions WHERE run_id=?').get(osmRunId).n),nvdbSource=store.getSource(nvdb.source_id),osmSource=store.getSource(osm.source_id);let processed=Number(prior?.records_seen??0);
+  checkpoint.run(stage,'RUNNING',cursor,processed,new Date().toISOString());
   while(true){if(shouldYield()){checkpoint.run(stage,'BLOCKED',cursor,processed,new Date().toISOString());return {...norwayReconciliationStats(store,osmRunId,'BLOCKED'),resumable:true};}
-    const batch=corridors.all(osmRunId,cursorRowid,batchSize);if(!batch.length)break;
+    const batch=corridors.all(osmRunId,cursorRowid,batchSize);if(!batch.length)break;const batchStarted=Date.now();
     store.db.exec('BEGIN IMMEDIATE');try{for(const corridor of batch){
       const geometry=JSON.parse(corridor.geometry_json),box=lineParts(geometry).flat().reduce((b,p)=>({west:Math.min(b.west,p[0]),east:Math.max(b.east,p[0]),south:Math.min(b.south,p[1]),north:Math.max(b.north,p[1])}),{west:180,east:-180,south:90,north:-90});
       const latPad=30/110574,lonPad=30/(111320*Math.max(.1,Math.cos((box.south+box.north)*Math.PI/360))),near=candidates.all(nvdbSnapshotId,box.east+lonPad,box.west-lonPad,box.north+latPad,box.south-latPad);
@@ -156,6 +157,7 @@ export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='n
         nvdb:{source_id:nvdbSource.source_id,snapshot_id:nvdb.snapshot_id,sha256:nvdb.checksum,sequence_id:feature.attributes.source_sequence_id??null},
         motorcycle_access_effect:'NONE',routability_effect:'NONE',proximity_only_identity:false}));}
       cursor=corridor.corridor_version_id;cursorRowid=Number(corridor.corridor_version_rowid);processed++;
+      if(Date.now()-batchStarted>=750)break;
     }checkpoint.run(stage,'RUNNING',cursor,processed,new Date().toISOString());store.db.exec('COMMIT');}catch(error){store.db.exec('ROLLBACK');throw error;}
     await new Promise(resolve=>setImmediate(resolve));
     if(shouldYield()){checkpoint.run(stage,'BLOCKED',cursor,processed,new Date().toISOString());return {...norwayReconciliationStats(store,osmRunId,'BLOCKED'),resumable:true};}
