@@ -10,6 +10,11 @@ import { lengthMeters } from './route-segmenter.mjs';
 import { compareSpwCorridors } from './spw-network.mjs';
 
 export const NORWAY_PHASE1_BASELINE=Object.freeze({run_id:'no-phase1-nvdb-20261006',nvdb_checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',edges_examined:3104901,candidate_pieces:514859,reference_features:17,exact:0,partial:0,all_features_ambiguous:true,ambiguous_candidate_edge_support:17,independent_candidate_pieces_outside_ambiguous_comparisons:505228,route_processing:Object.freeze({road_km:7137.013,unknown_km:1695.940,unknown_reasons_km:Object.freeze({no_network_match:988.746,competing_network_classes:469.111,insufficient_tags:126.684,interval_support_uncertainty:111.398})})});
+// RTree must drive this query. A normal JOIN let SQLite choose the selective
+// snapshot index first and then scan the full RTree once per NVDB corridor.
+export const NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL=`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json
+  FROM phase2_network_corridors_rtree r CROSS JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid
+  WHERE r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=? AND c.snapshot_id=?`;
 const shaFile=async file=>{const hash=crypto.createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);return hash.digest('hex');};
 const safeId=value=>typeof value==='string'&&/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(value);
 
@@ -140,7 +145,7 @@ export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='n
   const checkpoint=store.db.prepare(`INSERT INTO phase2_stage_state(stage,status,cursor,records_seen,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(stage) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,records_seen=excluded.records_seen,updated_at=excluded.updated_at`);
   const corridors=store.db.prepare(`SELECT corridor_version_rowid,corridor_version_id,corridor_id,geometry_json FROM physical_corridor_versions WHERE run_id=? AND corridor_version_rowid>? ORDER BY corridor_version_rowid LIMIT ?`),
     observations=store.db.prepare(`SELECT d.tags_json FROM physical_corridor_observations o JOIN discovery_candidates d USING(candidate_id) WHERE o.corridor_version_id=?`),
-    candidates=store.db.prepare(`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json FROM phase2_network_corridors_rtree r JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid WHERE c.snapshot_id=? AND r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=?`),
+    candidates=store.db.prepare(NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL),
     upsert=store.db.prepare(`INSERT OR IGNORE INTO phase2_cross_source_support(osm_corridor_version_id,nvdb_corridor_id,relationship,evidence_json) VALUES(?,?,?,?)`);
   const osmFeatureCount=Number(store.db.prepare('SELECT count(*) n FROM physical_corridor_versions WHERE run_id=?').get(osmRunId).n),nvdbSource=store.getSource(nvdb.source_id),osmSource=store.getSource(osm.source_id);let processed=Number(prior?.records_seen??0);
   checkpoint.run(stage,'RUNNING',cursor,processed,new Date().toISOString());
@@ -148,7 +153,7 @@ export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='n
     const batch=corridors.all(osmRunId,cursorRowid,batchSize);if(!batch.length)break;const batchStarted=Date.now();
     store.db.exec('BEGIN IMMEDIATE');try{for(const corridor of batch){
       const geometry=JSON.parse(corridor.geometry_json),box=lineParts(geometry).flat().reduce((b,p)=>({west:Math.min(b.west,p[0]),east:Math.max(b.east,p[0]),south:Math.min(b.south,p[1]),north:Math.max(b.north,p[1])}),{west:180,east:-180,south:90,north:-90});
-      const latPad=30/110574,lonPad=30/(111320*Math.max(.1,Math.cos((box.south+box.north)*Math.PI/360))),near=candidates.all(nvdbSnapshotId,box.east+lonPad,box.west-lonPad,box.north+latPad,box.south-latPad);
+      const latPad=30/110574,lonPad=30/(111320*Math.max(.1,Math.cos((box.south+box.north)*Math.PI/360))),near=candidates.all(box.east+lonPad,box.west-lonPad,box.north+latPad,box.south-latPad,nvdbSnapshotId);
       const osmTags=observations.all(corridor.corridor_version_id).map(row=>JSON.parse(row.tags_json)),attributes={ref:[...new Set(osmTags.map(t=>t.ref).filter(Boolean))].join('|'),name:[...new Set(osmTags.map(t=>t.name).filter(Boolean))].join('|')};
       const featureList=near.map(row=>({source_feature_id:row.corridor_id,geometry:JSON.parse(row.geometry_json),attributes:{...JSON.parse(row.attributes_json),source_sequence_id:row.source_identity}}));
       const mapped=compareSpwCorridors({geometry,attributes},featureList);

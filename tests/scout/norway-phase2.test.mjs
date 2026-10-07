@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { benchmarkFrozenNorwayAgainstTet, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { benchmarkFrozenNorwayAgainstTet, NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
 
 const route={type:'LineString',coordinates:[[10,60],[10.002,60]]};
 const edge=(id,source,geometry,tags={})=>({edge_id:id,source,geometry,tags});
@@ -63,4 +64,19 @@ test('Phase 1 benchmark figures are a frozen, immutable baseline independent fro
   assert.equal(NORWAY_PHASE1_BASELINE.route_processing.road_km,7137.013);
   assert.equal(NORWAY_PHASE1_BASELINE.route_processing.unknown_reasons_km.no_network_match,988.746);
   assert.ok(Object.isFrozen(NORWAY_PHASE1_BASELINE));
+});
+
+test('Norway cross-source matching drives bounded candidate lookup from the RTree',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    db.exec(`CREATE TABLE phase2_network_corridors(corridor_id TEXT,snapshot_id TEXT,source_identity TEXT,geometry_json TEXT,attributes_json TEXT,evidence_json TEXT);
+      CREATE INDEX phase2_network_corridor_snapshot_idx ON phase2_network_corridors(snapshot_id);
+      CREATE VIRTUAL TABLE phase2_network_corridors_rtree USING rtree(corridor_rowid,min_lon,max_lon,min_lat,max_lat);
+      INSERT INTO phase2_network_corridors VALUES('near','nvdb','seq:1','{}','{}','{}'),('far','nvdb','seq:2','{}','{}','{}'),('other-snapshot','other','seq:3','{}','{}','{}');
+      INSERT INTO phase2_network_corridors_rtree VALUES(1,10,10.001,60,60.001),(2,20,20.001,60,60.001),(3,10,10.001,60,60.001);`);
+    const plan=db.prepare(`EXPLAIN QUERY PLAN ${NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL}`).all(10.01,9.99,60.01,59.99,'nvdb').map(row=>row.detail);
+    assert.match(plan[0],/SCAN r VIRTUAL TABLE INDEX/);
+    assert.match(plan[1],/SEARCH c USING INTEGER PRIMARY KEY \(rowid=\?\)/);
+    assert.deepEqual(db.prepare(NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL).all(10.01,9.99,60.01,59.99,'nvdb').map(row=>row.corridor_id),['near']);
+  }finally{db.close();}
 });
