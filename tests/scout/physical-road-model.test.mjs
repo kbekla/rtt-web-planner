@@ -133,6 +133,8 @@ test('NVDB corridor builder yields to queued process signals between atomic sequ
     assert.equal(stopped.status,'BLOCKED');assert.equal(stopped.link_count,1);
     const checkpoint=store.db.prepare("SELECT status,cursor,records_seen FROM phase2_stage_state WHERE stage='NVDB_SEQUENCE_CORRIDORS'").get();
     assert.equal(checkpoint.status,'BLOCKED');assert.equal(checkpoint.cursor,'seq-a');assert.equal(checkpoint.records_seen,1);
+    const seekPlan=store.db.prepare(`EXPLAIN QUERY PLAN SELECT DISTINCT json_extract(evidence_json,'$[0].topology.sequence_id') AS sequence_id FROM network_edges WHERE snapshot_id=? AND json_extract(evidence_json,'$[0].topology.sequence_id') IS NOT NULL AND json_extract(evidence_json,'$[0].topology.sequence_id')>? ORDER BY sequence_id LIMIT ?`).all('no-nvdb-phase1-20261006','seq-a',1).map(row=>row.detail).join(' ');
+    assert.match(seekPlan,/phase2_nvdb_sequence_order_idx/);assert.match(seekPlan,/<expr>>\?/);
     const resumed=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:1});
     assert.equal(resumed.status,'COMPLETE');assert.equal(resumed.link_count,3);assert.equal(resumed.corridor_count,3);
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}

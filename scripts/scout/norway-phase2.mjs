@@ -87,7 +87,8 @@ export async function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1
   if(prior?.status==='COMPLETE')return phase2NvdbCorridorStats(store,snapshotId,'REUSED');
   let cursor=prior?.cursor??null,records=Number(prior?.records_seen??0);
   const putStage=store.db.prepare(`INSERT INTO phase2_stage_state(stage,status,cursor,records_seen,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(stage) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,records_seen=excluded.records_seen,updated_at=excluded.updated_at`);
-  const seqs=store.db.prepare(`SELECT DISTINCT json_extract(evidence_json,'$[0].topology.sequence_id') sequence_id FROM network_edges WHERE snapshot_id=? AND json_extract(evidence_json,'$[0].topology.sequence_id') IS NOT NULL AND (? IS NULL OR json_extract(evidence_json,'$[0].topology.sequence_id')>?) ORDER BY sequence_id LIMIT ?`);
+  const firstSeqs=store.db.prepare(`SELECT DISTINCT json_extract(evidence_json,'$[0].topology.sequence_id') sequence_id FROM network_edges WHERE snapshot_id=? AND json_extract(evidence_json,'$[0].topology.sequence_id') IS NOT NULL ORDER BY sequence_id LIMIT ?`),
+    nextSeqs=store.db.prepare(`SELECT DISTINCT json_extract(evidence_json,'$[0].topology.sequence_id') sequence_id FROM network_edges WHERE snapshot_id=? AND json_extract(evidence_json,'$[0].topology.sequence_id') IS NOT NULL AND json_extract(evidence_json,'$[0].topology.sequence_id')>? ORDER BY sequence_id LIMIT ?`);
   const links=store.db.prepare(`SELECT edge_id,geometry_json,tags_json,evidence_json FROM network_edges WHERE snapshot_id=? AND json_extract(evidence_json,'$[0].topology.sequence_id')=? ORDER BY json_extract(evidence_json,'$[0].topology.start_position'),edge_id`);
   const save=store.db.prepare(`INSERT OR IGNORE INTO phase2_network_corridors(corridor_id,snapshot_id,source_id,source_identity,member_count,identity_state,physical_character,network_role,geometry_json,attributes_json,edge_ids_json,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`),
     saveMember=store.db.prepare('INSERT OR IGNORE INTO phase2_network_corridor_members(corridor_id,edge_id) VALUES(?,?)'),
@@ -96,7 +97,7 @@ export async function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1
   for(;;){
     if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
     const batchStarted=process.hrtime.bigint();let sequencePageMs=0,sourceRowsMs=0,parseMs=0,deriveAndWriteMs=0,commitMs=0;
-    const pageStarted=process.hrtime.bigint(),batch=seqs.all(snapshotId,cursor,cursor,batchSequences);sequencePageMs=Number(process.hrtime.bigint()-pageStarted)/1e6;if(!batch.length)break;
+    const pageStarted=process.hrtime.bigint(),batch=cursor===null?firstSeqs.all(snapshotId,batchSequences):nextSeqs.all(snapshotId,cursor,batchSequences);sequencePageMs=Number(process.hrtime.bigint()-pageStarted)/1e6;if(!batch.length)break;
     let batchCursor=cursor,batchRecords=records;store.db.exec('BEGIN IMMEDIATE');try{
       for(const sequence of batch){const readStarted=process.hrtime.bigint(),sourceRows=links.all(snapshotId,sequence.sequence_id),readDone=process.hrtime.bigint();
         const parseStarted=process.hrtime.bigint(),rows=sourceRows.map(row=>({edge_id:row.edge_id,geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json),evidence:JSON.parse(row.evidence_json)}));sourceRowsMs+=Number(readDone-readStarted)/1e6;parseMs+=Number(process.hrtime.bigint()-parseStarted)/1e6;

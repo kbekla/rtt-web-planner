@@ -45,7 +45,9 @@ committed batches so process signals and factory-priority requests can be
 observed. Progress output includes coarse timings for sequence-page lookup,
 source-row reads, JSON parsing, derivation/writes, and commits; these timings
 help distinguish query overhead from the deterministic topology work without
-changing identity rules. After an unclean process exit, restart only after
+changing identity rules. Cursor pagination uses a separate range-seek query
+after the first page; an optional-cursor `OR` in the indexed `DISTINCT` query
+can force repeated scans from the beginning. After an unclean process exit, restart only after
 SQLite WAL recovery and the shared admission layer have established that the
 old owner is stale; the stage resumes from its last committed sequence.
 
