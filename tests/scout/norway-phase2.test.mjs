@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { benchmarkFrozenNorwayAgainstTet, NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
+import { benchmarkFrozenNorwayAgainstTet, NORWAY_FREEZE_REQUIRED_STAGES, NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, validateNorwayFreezePreconditions, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
 
 const route={type:'LineString',coordinates:[[10,60],[10.002,60]]};
 const edge=(id,source,geometry,tags={})=>({edge_id:id,source,geometry,tags});
@@ -79,4 +79,10 @@ test('Norway cross-source matching drives bounded candidate lookup from the RTre
     assert.match(plan[1],/SEARCH c USING INTEGER PRIMARY KEY \(rowid=\?\)/);
     assert.deepEqual(db.prepare(NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL).all(10.01,9.99,60.01,59.99,'nvdb').map(row=>row.corridor_id),['near']);
   }finally{db.close();}
+});
+
+test('Norway freeze accepts only the named complete independent stages and a pinned code commit',()=>{
+  assert.equal(validateNorwayFreezePreconditions({codeCommit:'a'.repeat(40),completedStages:[...NORWAY_FREEZE_REQUIRED_STAGES]}),true);
+  assert.throws(()=>validateNorwayFreezePreconditions({codeCommit:'a'.repeat(40),completedStages:[...NORWAY_FREEZE_REQUIRED_STAGES.filter(stage=>stage!=='CROSS_SOURCE_RECONCILIATION'),'NVDB_OSM_CORRIDOR_RECONCILIATION']}),/required independent stages/);
+  assert.throws(()=>validateNorwayFreezePreconditions({codeCommit:'not-pinned',completedStages:[...NORWAY_FREEZE_REQUIRED_STAGES]}),/code commit is pinned/);
 });

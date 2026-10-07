@@ -15,6 +15,12 @@ export const NORWAY_PHASE1_BASELINE=Object.freeze({run_id:'no-phase1-nvdb-202610
 export const NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL=`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json
   FROM phase2_network_corridors_rtree r CROSS JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid
   WHERE r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=? AND c.snapshot_id=?`;
+export const NORWAY_FREEZE_REQUIRED_STAGES=Object.freeze(['NVDB_IMPORT','OSM_IMPORT','NVDB_DISCOVERY','OSM_DISCOVERY','CROSS_SOURCE_RECONCILIATION']);
+export function validateNorwayFreezePreconditions({codeCommit,completedStages}={}){
+  if(!/^[a-f0-9]{40}$/i.test(codeCommit??'')||!Array.isArray(completedStages)||NORWAY_FREEZE_REQUIRED_STAGES.some(stage=>!completedStages.includes(stage)))
+    throw new Error('Phase 2 cannot freeze until all required independent stages are completed and the code commit is pinned');
+  return true;
+}
 const shaFile=async file=>{const hash=crypto.createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);return hash.digest('hex');};
 const safeId=value=>typeof value==='string'&&/^[a-z0-9][a-z0-9._-]{1,63}$/i.test(value);
 
@@ -56,7 +62,7 @@ export function validateNorwayPhase2State(db,{runIds,snapshotIds,nvdbChecksum,os
 export async function freezeNorwayPhase2({root,databaseFile=path.join(root,'scout.sqlite'),runIds,snapshotIds,nvdbChecksum,osmChecksum,codeCommit,productProjection,completedStages,shouldYield=()=>false}={}){
   const base=path.resolve(root),dbPath=path.resolve(databaseFile);if(!dbPath.startsWith(base+path.sep)||!safeId(path.basename(base)))throw new Error('Phase 2 freeze paths must stay inside the private run root');
   if(fs.existsSync(path.join(base,'phase2-frozen.json')))throw new Error('Phase 2 freeze manifest already exists; frozen results cannot be overwritten');
-  if(!/^[a-f0-9]{40}$/i.test(codeCommit??'')||!Array.isArray(completedStages)||!completedStages.includes('NVDB_IMPORT')||!completedStages.includes('OSM_IMPORT')||!completedStages.includes('NVDB_DISCOVERY')||!completedStages.includes('OSM_DISCOVERY')||!completedStages.includes('CROSS_SOURCE_RECONCILIATION'))throw new Error('Phase 2 cannot freeze until all required independent stages are completed and the code commit is pinned');
+  validateNorwayFreezePreconditions({codeCommit,completedStages});
   if(!/^[a-f0-9]{64}$/i.test(osmChecksum??''))throw new Error('Phase 2 freeze needs the verified OSM snapshot checksum');
   const db=new DatabaseSync(dbPath);let validated;
   try{validated=validateNorwayPhase2State(db,{runIds,snapshotIds,nvdbChecksum,osmChecksum});db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;');}
