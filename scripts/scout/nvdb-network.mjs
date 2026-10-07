@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import proj4 from 'proj4';
 import { lengthMeters } from './route-segmenter.mjs';
+import { classifyNvdbNetworkRole } from './physical-road-model.mjs';
 
 export const NVDB_API_BASE = 'https://nvdbapiles.atlas.vegvesen.no';
 export const NVDB_API_VERSION = 'nvdb-api-les-v4';
@@ -79,17 +80,6 @@ function parseLineStringZ(wkt, srid) {
   return { type: 'LineString', coordinates: points };
 }
 
-function internalHighway(typeVeg, category) {
-  const label = String(typeVeg ?? '').normalize('NFKC').toLowerCase();
-  if (/sti|gangveg|gang- og sykkel|sykkelveg|gågate|fortau/.test(label)) return 'path';
-  if (/traktorveg|kjerreveg|skogsbilveg|skogveg|terrengveg/.test(label)) return 'track';
-  // Private-road category is preserved as context only. It is not proof of
-  // surface, physical character, or motorcycle access.
-  if (String(category ?? '').toUpperCase() === 'P') return 'unclassified';
-  if (/bilveg|rampe|rundkjøring|kjøreveg/.test(label)) return 'unclassified';
-  return null;
-}
-
 export function normalizeNvdbRoadLink(link) {
   const geometry = link?.geometri;
   const sequenceId = link?.veglenkesekvensid, linkNumber = link?.veglenkenummer;
@@ -109,7 +99,6 @@ export function normalizeNvdbRoadLink(link) {
     topology_state: link._scout_topology?.start_node != null && link._scout_topology?.end_node != null ? 'EXPLICIT_NVDB_NODE_IDS' : 'PORT_NODE_MISSING',
   };
   const tags = {
-    ...(internalHighway(link.typeVeg, system.vegkategori) ? { highway: internalHighway(link.typeVeg, system.vegkategori) } : {}),
     'nvdb:type_veg': link.typeVeg ?? null,
     'nvdb:type_veg_sosi': link.typeVeg_sosi ?? null,
     'nvdb:vegkategori': system.vegkategori ?? null,
@@ -179,14 +168,13 @@ export function normalizeNvdbPage(page) {
 }
 
 export function nvdbDiscoverySelection(tags = {}) {
-  const type = String(tags['nvdb:type_veg'] ?? '').normalize('NFKC').toLowerCase();
-  const category = String(tags['nvdb:vegkategori'] ?? '').toUpperCase();
-  const trailNetworkType = /sti|gangveg|gang- og sykkel|sykkelveg|gågate|fortau|traktorveg|kjerreveg|skogsbilveg|skogveg|terrengveg/.test(type);
-  const privateRoad = category === 'P';
-  if (!trailNetworkType && !privateRoad) return null;
-  // NVDB road-link classification identifies network kind but does not supply
-  // adequate surface/physical-character or motorcycle-access proof.
-  return { classification: 'UNKNOWN', selection_rule: trailNetworkType ? 'official-nvdb-nonstandard-road-link' : 'official-nvdb-private-road-link-review-lead',
+  const role = classifyNvdbNetworkRole(tags['nvdb:type_veg']);
+  if (role !== 'ENGINEERED_ROAD_RESEARCH_CONTEXT') return null;
+  // Candidate rows are research leads, not rider-facing ORANGE lanes. The
+  // skeleton snapshot has no surface or motorcycle-access proof. Pedestrian,
+  // cycle, and ordinary-road links remain available as private network context.
+  return { classification: 'UNKNOWN', product_projection: 'NOT_PROJECTED', research_state: 'SCOUT_RESEARCH_REQUIRED',
+    network_role: role, selection_rule: 'nvdb-explicit-engineered-nonstandard-road-type-context',
     physical_state: 'probable', motorcycle_access: 'unknown', routability: 'unknown', canonical_status: 'NOT_COMPARED',
     access_tag_state: 'NO_EXPLICIT_MOTORCYCLE_ACCESS_EVIDENCE', relevant_tags: tags };
 }
@@ -396,7 +384,8 @@ export function discoverNvdbRun(store, runId, { batchSize = 500, shouldYield = (
             tags, provenance: { source_id: source.source_id, source_revision: source.revision, network_source_id: parent.source_id,
               snapshot_id: snapshot.snapshot_id, snapshot_version: snapshot.version, snapshot_sha256: snapshot.checksum,
               nvdb_segment_id: row.edge_id, adapter_version: NVDB_ADAPTER_VERSION, selection_rule: selection.selection_rule,
-              existence_basis: 'official NVDB road-link geometry; physical character remains uncertain where the record does not establish it',
+              network_role: selection.network_role, research_state: selection.research_state, product_projection: selection.product_projection,
+              existence_basis: 'official NVDB road-link geometry and explicit engineered non-standard typeVeg; this is a private research lead, not rider-facing lane status',
               access_interpretation: 'NVDB road-network presence is not motorcycle permission; motorcycle_access remains unknown',
               canonical_interpretation: 'no canonical dataset supplied; NOT_COMPARED is not NEW', private_network_evidence: sourceEvidence },
             sources: [{ source_id: source.source_id, relationship: 'origin', source_reference: edgePartId,

@@ -261,7 +261,7 @@ export async function runGeoCtl(argv=process.argv.slice(2),env=process.env){
       const discoveryVersion=isNvdb?'nvdb-road-link-discovery-1':'osm-way-discovery-1';
       const config={title:opts.title??`${regionId} independent ${isNvdb?'NVDB':'OSM'} discovery`,viewport:area.viewport,
         discovery_version:discoveryVersion,jurisdiction:{id:area.jurisdiction_id,version:area.jurisdiction_version,boundary_source:area.boundary_source},
-        source_filter:isNvdb?'all NVDB road links scanned countrywide; nonstandard/private network kinds selected as UNKNOWN research candidates; ordinary road links retained as context':
+        source_filter:isNvdb?'all NVDB road links scanned countrywide; observed Traktorveg links may create private research leads (not rider-facing GREEN/ORANGE); pedestrian/cycle and ordinary road links remain network context':
           'registered OSM way parts selected by highway/surface/tracktype/smoothness/service context; excludes ordinary ROAD classifications',canonical_status:'NOT_COMPARED'};
       const run=store.createDiscoveryRun({run_id:required(opts,'run_id'),discovery_source_id:source.source_id,snapshot_id:snapshotId,country_code:countryCode,region_id:regionId,
         reference_run_id:null,title:config.title,viewport:area.viewport,approved_by:approvedBy,approval_scope:approvalScope,config});

@@ -103,6 +103,101 @@ corridors group only ordered sequence continuations with matching topology;
 the original link geometries remain separate. OSM way/node IDs, tags, version,
 geometry, licence and snapshot checksum are preserved independently.
 
+### Phase 1 NVDB scope correction (2026-10-07)
+
+The pinned `vegnett/api/v4/veglenkesekvenser` artifact is a road-network
+skeleton, not the NVDB road-object/property catalogue. Direct inspection of
+the frozen 3,104,901-link artifact found approximately 326,281.5 km of network,
+but zero populated `vegkategori`, `trafikantgruppe`, road reference, road name,
+or surface attributes in the normalized links. Its raw `typeVeg` class and
+official geometry/topology can support network identity and physical network
+presence; they do not establish asphalt/gravel, road ownership, or motorcycle
+access. Missing fields remain missing. Do not infer a gravel road from a
+`Traktorveg`/forest-road label, and do not infer motorcycle permission from
+any road-link class.
+
+The Phase 1 `514,859 candidate pieces` count is an adapter-selection count, not
+a lane count. Its reported type breakdown was 209,682 `Gang- og sykkelveg`
+pieces (~12,576.8 km), 149,366 `Fortau` (~7,312.1 km), 139,755 `Gangveg`
+(~4,945.4 km), 5,553 `Sti` (~1,485.9 km), 5,691 `Traktorveg` (~1,273.5 km),
+3,999 `Sykkelveg` (~255.1 km), and 813 `Gågate` (~28.2 km). The full-link
+snapshot separately reports 2,259,612 `Enkel bilveg` links (~284,627.2 km),
+5,691 `Traktorveg` links (~1,286.9 km), and 5,553 `Sti` links (~1,511.4 km).
+The route/candidate-piece and full-link lengths are distinct measurements and
+must not be mixed. Pedestrian/cycle/footway objects remain private network
+context/catalogue evidence and must not inflate rider-facing lane counts.
+Ordinary `Enkel bilveg` remains ordinary navigation context, including when
+the road-system category is private. Explicit tractor/forest/other engineered
+non-standard road types may become `SCOUT_RESEARCH_REQUIRED` private leads;
+they are `NOT_PROJECTED` to GREEN or ORANGE until separate evidence supports
+that product decision. The all-network snapshot remains available for road
+matching and context.
+
+The Phase 1 freeze and its original counts/checksum are immutable. This
+correction changes the code and interpretation for a separately versioned
+future run; it does not rewrite old discovery rows, frozen Phase 2 data, or the
+one-time benchmark. In particular, no Phase 2 output or benchmark statistic
+has been retuned using TET.
+
+### Official NVDB road-object enrichment candidates
+
+NVDB Les V4 exposes a separate data catalogue and road-object API. Object
+records have IDs/versions, validity period, properties and network
+`stedfesting`; the Uberiket API offers ordered NDJSON streams with a resumable
+`start` cursor and object-change events. The stream example's
+`stedfesting[].id` is not assumed to be `veglenkesekvensid`: an adapter must
+validate the current object-type location schema and map its linear reference
+to the pinned network sequence/positions before joining. Proximity alone is
+not a join. The source object snapshot is additive and append-only; it cannot
+rewrite the Phase 1 link artifact.
+
+Scout now records these official object types as **disabled candidates**, not
+active data sources:
+
+| NVDB type | ID | What the documented semantics can contribute | What it cannot decide alone | State |
+|---|---:|---|---|---|
+| `Vegdekke` | 241 | Surface/material evidence, when a current code value and linear join are validated | Motorcycle access; absence is not gravel | Held for current catalogue/value-map and coverage validation |
+| `Trafikkreguleringer` | 856 | A restriction claim for motor traffic or pedestrians/cyclists; documented optional time-range and free-text exception note | Motorcycle prohibition from ambiguous text, or permission from absence | Held for code, vehicle applicability, direction/extent and time validation |
+| `Vegstengning` | 485 | A periodic/dated road-closure candidate | Permanent restriction or motorcycle applicability by guess | Held for current date/cause and vehicle semantics |
+| `Vegsperring` | 607 | Physical road-block evidence; route-dataset schema includes type/function, network-link references and conditional closed-time attributes | Legal prohibition or permission from barrier presence | Held for current type, linked road IDs and schedule interpretation |
+| `Vegbom` | 23 | Physical gate/maintenance inventory | Whether it is currently closed; the type is recorded whether normally open or closed, so it cannot alone establish route closure | Context-only; held for any state-feed/road association |
+| `Gjennomkjøring forbudt` | 913 | A no-through-traffic restriction candidate; published NVDB product specification describes vehicle applicability, direction, weekday and a motorcycle-exception field, plus a linked end object | A corridor-wide stop unless the paired extent, direction, schedule and current values are resolved | Held for current catalogue, relation completeness and applicability validation |
+
+The official NVDB catalogue portal showed version `2.46_1039` when checked on
+2026-10-07. That is a research observation, not a version to hard-code: each
+acquisition must fetch the then-current version, per-type definition, code
+lists, and checksums. The object API is public, but public access is not a substitute for the
+current NVDB catalogue definition, licensing record, code list, update
+semantics, and interpretation review. The existing NVDB source records NLOD
+1.0 and its dataset-level attribution; the object adapter must pin those
+terms/attribution with each acquired object-type definition. No object data
+has been downloaded or ingested in this correction. No restrictions have been
+inferred and motorcycle access remains UNKNOWN absent separately qualified
+evidence.
+
+Any future acquisition is a separate heavy-work stage under the shared A17
+lease, with one type per checkpoint stream. It must pin the parent link
+snapshot checksum, current catalogue version and type-definition SHA-256;
+store each raw page/object batch and its checksum with the stream cursor in
+one durable transaction; yield before a request and after a committed batch;
+verify the partial artifact on restart; and append normalized evidence in a
+separate layer. Only after a successful validated join may surface objects
+support physical surface, or restriction objects support legal/temporal
+claims. A failed or unavailable type stays held and does not block independent
+types. The registry's planning function therefore returns `REVIEW_REQUIRED`
+and will not acquire objects by itself.
+
+Official references used for these semantics and API mechanics:
+
+- [NVDB Les V4 data catalogue](https://nvdb-docs.atlas.vegvesen.no/nvdbapil/v4/Datakatalog/) and its [type-definition endpoint pattern](https://nvdbapiles.atlas.vegvesen.no/datakatalog/api/v1/vegobjekttyper/)
+- [NVDB Les V4 road-object API](https://nvdb-docs.atlas.vegvesen.no/nvdbapil/v4/Vegobjekter/)
+- [NVDB Les V4 Uberiket streaming and events](https://nvdb-docs.atlas.vegvesen.no/nvdbapil/v4/Uberiket/)
+- [NVDB product specification: `Vegdekke` 241](https://tfprod1.sintef.no/datakatalog/eksport/produktspesifikasjon-2.42/241.pdf)
+- [NVDB Rutedatasett 2.0 object semantics](https://dokument.geonorge.no/produktspesifikasjoner/nvdb-rutedatasett/Versjon%202.0/Rutedatasett.html)
+- [Current NVDB Datakatalog portal and object-type list](https://datakatalogen.atlas.vegvesen.no/)
+- [NVDB product specification: `Vegbom` 23](https://tfprod1.sintef.no/datakatalog/eksport/produktspesifikasjon/23.pdf)
+- [Statens vegvesen data delivery/object list](https://www.vegvesen.no/fag/teknologi/nasjonal-vegdatabank/registrere-data-i-nvdb/objektliste/)
+
 After the freeze, the benchmark samples each comparison line at approximately
 20 m intervals and queries both complete independently imported networks via
 the spatial index. An edge is considered physical support only within the
@@ -117,9 +212,11 @@ Paved/gravel/unsealed/forest/mountain/other engineered physical character is
 separate from ordinary-navigation versus potential-special-route role. Surface
 never establishes legal access. NVDB or OSM agreement can strengthen physical
 existence only. With no qualifying Norwegian lane-access or restriction data
-attached to this run, motorcycle access and routability remain UNKNOWN;
-credible special routes project to ORANGE, ordinary roads remain ordinary
-roads, and neither RED nor GREEN is manufactured.
+attached to this run, motorcycle access and routability remain UNKNOWN. A
+credible, independently researched lane may project to ORANGE; an NVDB road
+type or road-network match by itself is not enough to make a road a rider
+lane. Ordinary roads remain ordinary roads, and neither RED nor GREEN is
+manufactured.
 
 ## Norway access-source research and limits
 

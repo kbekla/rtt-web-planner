@@ -28,11 +28,28 @@ test('physical road/surface classification keeps ordinary gravel roads as roads 
   assert.equal(classifyPhysicalRoad({ highway: 'track' }).physical_character, 'OTHER_ENGINEERED_ROAD');
 });
 
-test('NVDB physical road class does not infer surface or motorcycle permission', () => {
-  const result = classifyPhysicalRoad({ 'nvdb:type_veg': 'Skogsbilveg' }, 'NVDB');
-  assert.equal(result.physical_character, 'FOREST_ROAD');
+test('NVDB observed tractor-road type supports engineered context, not surface or motorcycle permission', () => {
+  const result = classifyPhysicalRoad({ 'nvdb:type_veg': 'Traktorveg' }, 'NVDB');
+  assert.equal(result.physical_character, 'OTHER_ENGINEERED_ROAD');
+  assert.equal(result.network_role, 'ENGINEERED_ROAD_RESEARCH_CONTEXT');
+  assert.equal(result.product_projection, 'NOT_PROJECTED');
   assert.equal(result.access, 'UNKNOWN');
   assert.equal(result.routability, 'UNKNOWN');
+  const unverifiedForestType=classifyPhysicalRoad({'nvdb:type_veg':'Skogsbilveg'},'NVDB');
+  assert.equal(unverifiedForestType.physical_character,'ENGINEERED_ROAD_UNKNOWN_SURFACE');
+  assert.equal(unverifiedForestType.network_role,'UNCLASSIFIED_NETWORK_CONTEXT');
+  assert.equal(unverifiedForestType.access,'UNKNOWN');
+  const ordinary=classifyPhysicalRoad({'nvdb:type_veg':'Enkel bilveg','nvdb:vegkategori':'P'},'NVDB');
+  assert.equal(ordinary.network_role,'ORDINARY_ROAD');
+  assert.equal(ordinary.ordinary_navigation,true);
+  for(const type of ['Gang- og sykkelveg','Fortau','Gangveg','Sti','Sykkelveg','Gågate']){
+    const context=classifyPhysicalRoad({'nvdb:type_veg':type},'NVDB');
+    assert.equal(context.network_role,'NON_MOTOR_NETWORK_CONTEXT',type);
+    assert.equal(context.product_projection,'NOT_PROJECTED',type);
+  }
+  const unknown=classifyPhysicalRoad({'nvdb:type_veg':'Unrecognized NVDB type'},'NVDB');
+  assert.equal(unknown.network_role,'UNCLASSIFIED_NETWORK_CONTEXT');
+  assert.equal(unknown.access,'UNKNOWN');
 });
 
 test('cross-source exact support needs identity or explicit topology as well as ordered geometry', () => {
@@ -99,11 +116,12 @@ test('private NVDB sequence grouping checkpoints by sequence and resumes without
   try{
     const source=nvdbNorwaySourceDefinition();
     store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:'no-nvdb-phase1-20261006',source_id:source.source_id,version:'fixture',checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',licence:source.licence,coverage:{countries:['NO'],regions:['NO']}});
-    const coords=[[10,60],[10.001,60],[10.002,60]],edge=(id,start,end,startNode,endNode,line)=>({edge_id:id,geometry:{type:'LineString',coordinates:line},tags:{'nvdb:type_veg':'Skogsbilveg'},evidence:[{topology:{sequence_id:'1',link_number:id.endsWith('1')?1:2,segment_number:'1',start_position:start,end_position:end,start_node:startNode,end_node:endNode}}]});
+    const coords=[[10,60],[10.001,60],[10.002,60]],edge=(id,start,end,startNode,endNode,line)=>({edge_id:id,geometry:{type:'LineString',coordinates:line},tags:{'nvdb:type_veg':'Traktorveg'},evidence:[{topology:{sequence_id:'1',link_number:id.endsWith('1')?1:2,segment_number:'1',start_position:start,end_position:end,start_node:startNode,end_node:endNode}}]});
     store.saveNetworkEdges('no-nvdb-phase1-20261006',[edge('nvdb:1',0,.5,'n1','n2',coords.slice(0,2)),edge('nvdb:2',.5,1,'n2','n3',coords.slice(1))]);
     assert.equal((await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',shouldYield:()=>true})).status,'BLOCKED');
     const complete=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'});
     assert.equal(complete.status,'COMPLETE');assert.equal(complete.corridor_count,1);assert.equal(complete.link_count,2);
+    assert.deepEqual(complete.by_network_role,{ENGINEERED_ROAD_RESEARCH_CONTEXT:1},'observed tractor-road class is counted as research context, not lane status');
     assert.equal((await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'})).status,'REUSED');
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });

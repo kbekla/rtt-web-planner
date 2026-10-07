@@ -6,21 +6,35 @@ const UNSEALED=new Set(['unpaved','ground','dirt','earth','mud','sand','grass','
 const ORDINARY_HIGHWAY=new Set(['motorway','motorway_link','trunk','trunk_link','primary','primary_link','secondary','secondary_link','tertiary','tertiary_link','unclassified','residential','living_street','road']);
 const label=value=>String(value??'').normalize('NFKC').trim().toLocaleLowerCase();
 
+/** NVDB typeVeg is a network-object class, not an access or surface verdict. */
+export function classifyNvdbNetworkRole(typeVeg){
+  const type=label(typeVeg);
+  if(type==='enkel bilveg')return 'ORDINARY_ROAD';
+  if(type==='traktorveg')return 'ENGINEERED_ROAD_RESEARCH_CONTEXT';
+  if(/^(gang- og sykkelveg|fortau|gangveg|sti|sykkelveg|gågate)$/.test(type))return 'NON_MOTOR_NETWORK_CONTEXT';
+  return 'UNCLASSIFIED_NETWORK_CONTEXT';
+}
+
 /** Physical/network description only. It never makes an access or product decision. */
 export function classifyPhysicalRoad(tags={},source='OSM'){
   const highway=label(tags.highway),surface=label(tags.surface),tracktype=label(tags.tracktype),typeVeg=label(tags['nvdb:type_veg']);
-  const ordinary=ORDINARY_HIGHWAY.has(highway)||/enkel bilveg|rampe|rundkjøring|kjøreveg/.test(typeVeg);
+  const nvdbRole=source==='NVDB'?classifyNvdbNetworkRole(typeVeg):null;
+  const ordinary=source==='NVDB'?nvdbRole==='ORDINARY_ROAD':ORDINARY_HIGHWAY.has(highway);
   let physical_character='ENGINEERED_ROAD_UNKNOWN_SURFACE';
   if(PAVED.has(surface))physical_character='PAVED_ROAD';
   else if(GRAVEL.has(surface)||/^grade[12]$/.test(tracktype))physical_character='GRAVEL_ROAD';
   else if(UNSEALED.has(surface)||/^grade[3-5]$/.test(tracktype))physical_character='UNSEALED_ROAD';
-  else if(/skogsbilveg|skogveg|forest road/.test(typeVeg))physical_character='FOREST_ROAD';
+  else if(source==='NVDB'&&nvdbRole==='NON_MOTOR_NETWORK_CONTEXT')physical_character='NON_MOTOR_NETWORK_FEATURE';
+  else if(source==='NVDB'&&typeVeg==='traktorveg')physical_character='OTHER_ENGINEERED_ROAD';
+  else if(source==='NVDB'&&/skogsbilveg|skogveg|fjellveg|terrengveg|kjerreveg/.test(typeVeg))physical_character='ENGINEERED_ROAD_UNKNOWN_SURFACE';
   else if(/fjell|mountain road/.test(typeVeg))physical_character='MOUNTAIN_ROAD';
-  else if(/traktorveg|kjerreveg|terrengveg/.test(typeVeg)||highway==='track')physical_character='OTHER_ENGINEERED_ROAD';
+  else if(highway==='track')physical_character='OTHER_ENGINEERED_ROAD';
   else if(['path','footway','bridleway','cycleway'].includes(highway))physical_character='NON_CAR_PATH';
-  return {source,physical_character,network_role:ordinary?'ORDINARY_ROAD':'POTENTIAL_SPECIAL_ROUTE',
+  const network_role=source==='NVDB'?nvdbRole:(ordinary?'ORDINARY_ROAD':'POTENTIAL_SPECIAL_ROUTE');
+  return {source,physical_character,network_role,
     ordinary_navigation:ordinary,access:'UNKNOWN',routability:'UNKNOWN',
-    basis:source==='NVDB'?['NVDB:typeVeg/network geometry; no surface inferred without a surface field']:
+    product_projection:source==='NVDB'&&network_role!=='ORDINARY_ROAD'?'NOT_PROJECTED':undefined,
+    basis:source==='NVDB'?['NVDB:typeVeg/network geometry only; Phase 1 road-link snapshot has no populated surface/access attributes']:
       ['OSM highway/surface/tracktype physical tags; tags do not establish legal access']};
 }
 

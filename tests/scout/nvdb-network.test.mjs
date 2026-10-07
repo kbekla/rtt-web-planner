@@ -9,6 +9,7 @@ import {
   discoverNvdbRun, nvdbDiscoverySelection, nvdbNorwaySourceDefinition, normalizeNvdbPage,
   normalizeNvdbRoadLink, registerNvdbDiscoverySource,
 } from '../../scripts/scout/nvdb-network.mjs';
+import { getNvdbObjectType, NVDB_OBJECT_TYPE_REGISTRY, nvdbObjectSourceDefinitions, planNvdbObjectAcquisition } from '../../scripts/scout/nvdb-object-registry.mjs';
 
 const wkt = 'LINESTRING Z (500000 6651411 100,500020 6651430 101)';
 const link = (sequence, number, typeVeg, category = 'P') => ({
@@ -49,8 +50,8 @@ test('official NVDB page normalizes road links into private Scout network edges'
     assert.equal(edge.jurisdiction_ids[0], 'NO');
   }
   assert.equal(edges[0].tags['nvdb:road_name'], 'Synthetic fixture road');
-  assert.equal(edges[1].tags.highway, 'track');
-  assert.equal(edges[2].tags.highway, 'path');
+  assert.equal(edges[1].tags.highway, undefined, 'NVDB typeVeg is preserved without lossy conversion to an OSM highway tag');
+  assert.equal(edges[2].tags.highway, undefined, 'pedestrian/cycle source classes remain NVDB classes');
 });
 
 test('NVDB source sequence positions and port node IDs survive normalization as topology, without proving access', () => {
@@ -112,16 +113,60 @@ test('NVDB source policy is private and does not claim legal access, restriction
   assert.equal(new URL(`${NVDB_API_BASE}${NVDB_LINKS_PATH}`).protocol, 'https:');
 });
 
-test('NVDB road-link presence only produces unknown access/routability and non-authoritative character', () => {
+test('NVDB road-link skeleton only creates private engineered-road research leads', () => {
   const privateRoad = normalizeNvdbRoadLink(link(7, 3, 'Enkel bilveg', 'P'));
-  const selection = nvdbDiscoverySelection(privateRoad.tags);
-  assert.ok(selection);
-  assert.equal(selection.classification, 'UNKNOWN');
-  assert.equal(selection.motorcycle_access, 'unknown');
-  assert.equal(selection.routability, 'unknown');
-  assert.equal(selection.canonical_status, 'NOT_COMPARED');
-  assert.equal(nvdbDiscoverySelection({ 'nvdb:type_veg': 'Enkel bilveg', 'nvdb:vegkategori': 'E' }), null,
-    'ordinary public road links are network context, not lane candidates');
+  assert.equal(nvdbDiscoverySelection(privateRoad.tags), null,
+    'private-category ordinary roads remain ordinary network context, not lane candidates');
+  const tractorRoad = nvdbDiscoverySelection({ 'nvdb:type_veg': 'Traktorveg' });
+  assert.equal(tractorRoad.research_state, 'SCOUT_RESEARCH_REQUIRED');
+  assert.equal(tractorRoad.product_projection, 'NOT_PROJECTED');
+  assert.equal(tractorRoad.motorcycle_access, 'unknown');
+  assert.equal(tractorRoad.routability, 'unknown');
+  for (const type of ['Gang- og sykkelveg', 'Fortau', 'Gangveg', 'Sti', 'Sykkelveg', 'Gågate', 'Enkel bilveg']) {
+    assert.equal(nvdbDiscoverySelection({ 'nvdb:type_veg': type }), null, `${type} stays context and does not inflate lane leads`);
+  }
+  assert.equal(nvdbDiscoverySelection({ 'nvdb:type_veg': 'Traktorveg' }).product_projection, 'NOT_PROJECTED');
+  assert.equal(nvdbDiscoverySelection({ 'nvdb:type_veg': 'unknown/missing type' }), null);
+});
+
+test('Phase 1 road-link skeleton leaves absent surface/access and identifiers absent', () => {
+  const raw = link(8, 4, 'Traktorveg');
+  delete raw.vegsystemreferanse.strekning.trafikantgruppe;
+  delete raw.adresse;
+  delete raw.vegsystemreferanse.kortform;
+  const edge = normalizeNvdbRoadLink(raw);
+  assert.equal(edge.tags['nvdb:type_veg'], 'Traktorveg');
+  assert.equal(edge.tags.surface, undefined);
+  assert.equal(edge.tags['nvdb:surface'], undefined);
+  assert.equal(edge.tags['nvdb:trafikantgruppe'], undefined);
+  assert.equal(edge.tags['nvdb:road_name'], undefined);
+  assert.equal(edge.tags['nvdb:road_reference'], undefined);
+  assert.equal(edge.evidence[0].claim, 'PHYSICAL_EXISTENCE');
+});
+
+test('NVDB object candidates remain metadata-gated and acquisition planning is pinned/resumable', () => {
+  assert.deepEqual(NVDB_OBJECT_TYPE_REGISTRY.map(x => x.type_id), [241, 856, 485, 607, 23, 913]);
+  assert.equal(getNvdbObjectType(241).evidence_roles.includes('SURFACE'), true);
+  assert.equal(getNvdbObjectType(241).cannot_support.includes('motorcycle access'), true);
+  assert.equal(getNvdbObjectType(856).cannot_support.includes('permission when no object is returned'), true);
+  assert.equal(getNvdbObjectType(607).cannot_support.includes('legal prohibition or motorcycle access from physical presence alone'), true);
+  const hash='a'.repeat(64);
+  assert.throws(() => planNvdbObjectAcquisition({typeIds:[241],catalogueVersion:'current',catalogueSha256:hash}), /definition checksum/);
+  const plan=planNvdbObjectAcquisition({typeIds:[241,913],catalogueVersion:'2.x-fixture',catalogueSha256:hash,definitionChecksums:{241:hash,913:hash}});
+  assert.equal(plan.status,'REVIEW_REQUIRED');
+  assert.equal(plan.immutable_parent_network,true);
+  assert.ok(plan.checkpoint.commit_unit.includes('page + page checksum + cursor'));
+  assert.ok(plan.checkpoint.admission.includes('shared A17 heavy-work lease'));
+  assert.equal(plan.types[0].status,'HELD_FOR_SCHEMA_AND_APPLICABILITY_VALIDATION');
+  assert.throws(() => planNvdbObjectAcquisition({typeIds:[999],catalogueVersion:'x',catalogueSha256:hash,definitionChecksums:{999:hash}}), /not in the reviewed candidate registry/);
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-nvdb-object-registry-')),store=new ScoutGeoStore(root);
+  try {
+    for(const definition of nvdbObjectSourceDefinitions()){
+      const registered=store.registerSource(definition);
+      assert.equal(store.sourceApproval(registered.source_id),null,'registered object source is not implicitly approved');
+      assert.equal(store.getSource(registered.source_id).source_status,'DISABLED_REVIEW_REQUIRED');
+    }
+  } finally { store.close(); fs.rmSync(root,{recursive:true,force:true}); }
 });
 
 test('NVDB adapter rejects unrecognized pages and unsupported geometry CRS', () => {
@@ -230,7 +275,7 @@ test('NVDB snapshot feeds Scout discovery without OSM and never assigns motorcyc
     store.recordNetworkSnapshot({ snapshot_id: 'nvdb-discovery-fixture-v1', source_id: parent.source_id, version: 'fixture', checksum,
       licence: { ...parent.licence, attribution: parent.attribution }, coverage: { countries: ['NO'], regions: ['NO'] } });
     store.saveNetworkEdges('nvdb-discovery-fixture-v1', normalizeNvdbPage({ objekter: [{ veglenkesekvensid: 9933,
-      veglenker: [link(9933, 1, 'Skogsbilveg'), link(9933, 2, 'Enkel bilveg', 'E')] }] }));
+      veglenker: [link(9933, 1, 'Traktorveg'), link(9933, 2, 'Enkel bilveg', 'E')] }] }));
     const discovery = registerNvdbDiscoverySource(store, 'nvdb-discovery-fixture-v1').source;
     store.approveSource({ source_id: discovery.source_id, approved_by: 'fixture owner', scope: 'independent NVDB test' });
     store.createDiscoveryRun({ run_id: 'no-nvdb-fixture-run', discovery_source_id: discovery.source_id, snapshot_id: 'nvdb-discovery-fixture-v1',
@@ -239,13 +284,15 @@ test('NVDB snapshot feeds Scout discovery without OSM and never assigns motorcyc
     const result = discoverNvdbRun(store, 'no-nvdb-fixture-run', { batchSize: 1 });
     assert.equal(result.status, 'COMPLETE');
     assert.equal(result.edges_examined, 2);
-    assert.equal(result.candidate_count, 1, 'private track is selected, ordinary public road remains network context');
+    assert.equal(result.candidate_count, 1, 'tractor-road research lead is selected; ordinary road remains network context');
     const candidate = store.db.prepare('SELECT * FROM discovery_candidates WHERE run_id=?').get('no-nvdb-fixture-run');
     assert.equal(candidate.motorcycle_access, 'unknown');
     assert.equal(candidate.routability, 'unknown');
     assert.equal(candidate.canonical_status, 'NOT_COMPARED');
     assert.equal(JSON.parse(candidate.provenance_json).network_source_id, 'no-nvdb-vegkart');
-    assert.equal(JSON.parse(candidate.provenance_json).private_network_evidence[0].source_record.typeVeg, 'Skogsbilveg');
+    assert.equal(JSON.parse(candidate.provenance_json).product_projection, 'NOT_PROJECTED');
+    assert.equal(JSON.parse(candidate.provenance_json).research_state, 'SCOUT_RESEARCH_REQUIRED');
+    assert.equal(JSON.parse(candidate.provenance_json).private_network_evidence[0].source_record.typeVeg, 'Traktorveg');
   } finally {
     store.close();
     fs.rmSync(root, { recursive: true, force: true });
