@@ -92,10 +92,14 @@ function corridorEnvelope(edges,paddingM=12){
   const lonPadding=paddingM/(111320*Math.max(.1,Math.cos(Math.max(Math.abs(minLat),Math.abs(maxLat))*Math.PI/180))),latPadding=paddingM/110574;
   return {minLon:minLon-lonPadding,maxLon:maxLon+lonPadding,minLat:minLat-latPadding,maxLat:maxLat+latPadding};
 }
-function edgesInEnvelope(edges,envelope){return edges.filter(edge=>{
-  const minLon=Math.min(edge.a[0],edge.b[0]),maxLon=Math.max(edge.a[0],edge.b[0]),minLat=Math.min(edge.a[1],edge.b[1]),maxLat=Math.max(edge.a[1],edge.b[1]);
-  return maxLon>=envelope.minLon&&minLon<=envelope.maxLon&&maxLat>=envelope.minLat&&minLat<=envelope.maxLat;
-});}
+function sampleEdgeSupportWindow(edges,envelope,step=15){
+  const local=[],totalSampleCount=edges.reduce((count,edge)=>{
+    const length=edgeLength(edge),samples=Math.max(1,Math.ceil(length/step)),minLon=Math.min(edge.a[0],edge.b[0]),maxLon=Math.max(edge.a[0],edge.b[0]),minLat=Math.min(edge.a[1],edge.b[1]),maxLat=Math.max(edge.a[1],edge.b[1]);
+    if(maxLon>=envelope.minLon&&minLon<=envelope.maxLon&&maxLat>=envelope.minLat&&minLat<=envelope.maxLat)local.push(edge);
+    return count+samples;
+  },0);
+  return {edges:local,samples:sampleEdges(local,step,envelope).samples,total_sample_count:totalSampleCount};
+}
 function edgeLength(edge) { return distance(edge.a, edge.b); }
 function sampleEdges(edges, step = 15, retainEnvelope = null) {
   const result = [];let totalSampleCount=0;
@@ -154,7 +158,7 @@ export function compareSpwCorridors(corridor, spws, { competitors = [] } = {}) {
     // 12 m envelope cannot contribute a hit. Keep the full edge list and its
     // samples for reciprocal coverage so long source geometry is never
     // artificially made to look like a full match.
-    const localB=edgesInEnvelope(b,envelope),bs=sampleEdges(b,15,envelope),sa=support(as,localB,12,20),sb=support(bs.samples,a,12,20,bs.total_sample_count),da=sa.hits.map(x=>x.distance);
+    const bs=sampleEdgeSupportWindow(b,envelope),sa=support(as,bs.edges,12,20),sb=support(bs.samples,a,12,20,bs.total_sample_count),da=sa.hits.map(x=>x.distance);
     metrics.set(spw,{b,sa,sb,p50:percentile(da,.5),p95:percentile(da,.95),bestAngle:percentile([...sa.hits,...sb.hits].map(hit=>hit.angle),.1),endpointMax:endpointGap(corridor.geometry,spw.geometry),identity:routeIdentity(corridor,spw)});
   }
   return spws.map(spw=>{
