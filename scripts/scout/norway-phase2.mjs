@@ -15,6 +15,9 @@ export const NORWAY_PHASE1_BASELINE=Object.freeze({run_id:'no-phase1-nvdb-202610
 export const NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL=`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json
   FROM phase2_network_corridors_rtree r CROSS JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid
   WHERE r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=? AND c.snapshot_id=?`;
+export const NORWAY_BENCHMARK_NETWORK_EDGE_SQL=`SELECT e.edge_id,e.geometry_json,e.tags_json,e.snapshot_id
+  FROM network_edges_rtree r CROSS JOIN network_edges e ON e.edge_rowid=r.edge_rowid
+  WHERE r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=? AND e.snapshot_id IN (?,?)`;
 export const NORWAY_FREEZE_REQUIRED_STAGES=Object.freeze(['NVDB_IMPORT','OSM_IMPORT','NVDB_DISCOVERY','OSM_DISCOVERY','CROSS_SOURCE_RECONCILIATION']);
 export function validateNorwayFreezePreconditions({codeCommit,completedStages}={}){
   if(!/^[a-f0-9]{40}$/i.test(codeCommit??'')||!Array.isArray(completedStages)||NORWAY_FREEZE_REQUIRED_STAGES.some(stage=>!completedStages.includes(stage)))
@@ -227,11 +230,9 @@ export async function benchmarkFrozenNorwayAgainstTet({root,databaseFile=path.jo
   const manifest=await verifyNorwayPhase2Freeze({root,databaseFile,shouldYield});
   if(!tetFile||fs.lstatSync(tetFile).isSymbolicLink()||!fs.statSync(tetFile).isFile())throw new Error('post-freeze benchmark requires the one explicitly approved regular TET benchmark file');
   const tetBytes=fs.readFileSync(tetFile),tetSha256=crypto.createHash('sha256').update(tetBytes).digest('hex'),parsed=parseRouteFile('gpx',tetBytes.toString('utf8'));onStart({tet_sha256:tetSha256,feature_count:parsed.parts.length,phase2_database_sha256:manifest.database.sha256});
-  const db=new DatabaseSync(databaseFile,{readOnly:true}),cache=new Map(),query=db.prepare(`SELECT e.edge_id,e.geometry_json,e.tags_json,e.snapshot_id
-    FROM network_edges_rtree r JOIN network_edges e USING(edge_rowid)
-    WHERE e.snapshot_id IN (?,?) AND r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=?`);
-  const lookup=(point,radius)=>{const latPad=radius/110574,lonPad=radius/(111320*Math.max(.1,Math.cos(point[1]*Math.PI/180))),rows=query.all(manifest.snapshots.nvdb.snapshot_id,manifest.snapshots.osm.snapshot_id,
-      point[0]+lonPad,point[0]-lonPad,point[1]+latPad,point[1]-latPad),out=[];
+  const db=new DatabaseSync(databaseFile,{readOnly:true}),cache=new Map(),query=db.prepare(NORWAY_BENCHMARK_NETWORK_EDGE_SQL);
+  const lookup=(point,radius)=>{const latPad=radius/110574,lonPad=radius/(111320*Math.max(.1,Math.cos(point[1]*Math.PI/180))),rows=query.all(
+      point[0]+lonPad,point[0]-lonPad,point[1]+latPad,point[1]-latPad,manifest.snapshots.nvdb.snapshot_id,manifest.snapshots.osm.snapshot_id),out=[];
     for(const row of rows){let edge=cache.get(row.edge_id);if(!edge){edge={edge_id:row.edge_id,source:row.snapshot_id===manifest.snapshots.nvdb.snapshot_id?'NVDB':'OSM',geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json)};
         cache.set(row.edge_id,edge);if(cache.size>25000)cache.delete(cache.keys().next().value);}out.push(edge);}return out;};
   let features=priorFeatures.slice(),completed=new Set(features.map(row=>row.index));

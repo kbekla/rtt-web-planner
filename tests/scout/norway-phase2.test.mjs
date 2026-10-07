@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { benchmarkFrozenNorwayAgainstTet, NORWAY_FREEZE_REQUIRED_STAGES, NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, validateNorwayFreezePreconditions, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
+import { benchmarkFrozenNorwayAgainstTet, NORWAY_BENCHMARK_NETWORK_EDGE_SQL, NORWAY_FREEZE_REQUIRED_STAGES, NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL, NORWAY_PHASE1_BASELINE, scoreNorwayRouteFeature, summarizeNorwayBenchmarkFeatures, validateNorwayFreezePreconditions, verifyNorwayPhase2Freeze } from '../../scripts/scout/norway-phase2.mjs';
 
 const route={type:'LineString',coordinates:[[10,60],[10.002,60]]};
 const edge=(id,source,geometry,tags={})=>({edge_id:id,source,geometry,tags});
@@ -78,6 +78,22 @@ test('Norway cross-source matching drives bounded candidate lookup from the RTre
     assert.match(plan[0],/SCAN r VIRTUAL TABLE INDEX/);
     assert.match(plan[1],/SEARCH c USING INTEGER PRIMARY KEY \(rowid=\?\)/);
     assert.deepEqual(db.prepare(NORWAY_NVDB_CORRIDOR_CANDIDATE_SQL).all(10.01,9.99,60.01,59.99,'nvdb').map(row=>row.corridor_id),['near']);
+  }finally{db.close();}
+});
+
+test('post-freeze route benchmark spatial lookup uses RTree-first indexed edge joins',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    db.exec(`CREATE TABLE network_edges(edge_rowid INTEGER PRIMARY KEY,edge_id TEXT,geometry_json TEXT,tags_json TEXT,snapshot_id TEXT);
+      CREATE INDEX network_edges_snapshot_idx ON network_edges(snapshot_id);
+      CREATE VIRTUAL TABLE network_edges_rtree USING rtree(edge_rowid,min_lon,max_lon,min_lat,max_lat);
+      INSERT INTO network_edges VALUES(1,'nvdb:near','{}','{}','nvdb'),(2,'osm:near','{}','{}','osm'),(3,'nvdb:far','{}','{}','nvdb');
+      INSERT INTO network_edges_rtree VALUES(1,10,10.001,60,60.001),(2,10,10.001,60,60.001),(3,20,20.001,60,60.001);`);
+    const bounds=[10.01,9.99,60.01,59.99],snapshots=['nvdb','osm'];
+    const plan=db.prepare(`EXPLAIN QUERY PLAN ${NORWAY_BENCHMARK_NETWORK_EDGE_SQL}`).all(...bounds,...snapshots).map(row=>row.detail);
+    assert.match(plan[0],/SCAN r VIRTUAL TABLE INDEX/);
+    assert.match(plan[1],/SEARCH e USING INTEGER PRIMARY KEY \(rowid=\?\)/);
+    assert.deepEqual(db.prepare(NORWAY_BENCHMARK_NETWORK_EDGE_SQL).all(...bounds,...snapshots).map(row=>row.edge_id),['nvdb:near','osm:near']);
   }finally{db.close();}
 });
 
