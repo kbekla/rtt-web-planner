@@ -71,7 +71,7 @@ export async function verifyNorwayPhase2Freeze({root,databaseFile=path.join(root
 }
 
 /** Out-of-core, resumable grouping of the raw NVDB observations by explicit source sequence. */
-export function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1-20261006',batchSequences=20,shouldYield=()=>false,onProgress=()=>{},expectedChecksum=NORWAY_PHASE1_BASELINE.nvdb_checksum}={}){
+export async function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1-20261006',batchSequences=20,shouldYield=()=>false,onProgress=()=>{},expectedChecksum=NORWAY_PHASE1_BASELINE.nvdb_checksum}={}){
   const snapshot=store.getNetworkSnapshot(snapshotId);if(snapshot?.checksum!==expectedChecksum||store.getSource(snapshot.source_id)?.network_api?.provider!=='statens-vegvesen-nvdb-api-les-v4')throw new Error('Norway topology grouping requires the pinned NVDB source snapshot');
   if(!Number.isInteger(batchSequences)||batchSequences<1||batchSequences>500)throw new Error('NVDB corridor grouping batch must be 1-500 sequences');
   store.db.exec(`CREATE TABLE IF NOT EXISTS phase2_stage_state(stage TEXT PRIMARY KEY,status TEXT NOT NULL,cursor TEXT,records_seen INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL);
@@ -95,21 +95,29 @@ export function buildNorwayNvdbCorridors(store,{snapshotId='no-nvdb-phase1-20261
     saveBox=store.db.prepare('INSERT OR IGNORE INTO phase2_network_corridors_rtree(corridor_rowid,min_lon,max_lon,min_lat,max_lat) VALUES(?,?,?,?,?)');
   for(;;){
     if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
-    const batch=seqs.all(snapshotId,cursor,cursor,batchSequences);if(!batch.length)break;
+    const batchStarted=process.hrtime.bigint();let sequencePageMs=0,sourceRowsMs=0,parseMs=0,deriveAndWriteMs=0,commitMs=0;
+    const pageStarted=process.hrtime.bigint(),batch=seqs.all(snapshotId,cursor,cursor,batchSequences);sequencePageMs=Number(process.hrtime.bigint()-pageStarted)/1e6;if(!batch.length)break;
     let batchCursor=cursor,batchRecords=records;store.db.exec('BEGIN IMMEDIATE');try{
-      for(const sequence of batch){const rows=links.all(snapshotId,sequence.sequence_id).map(row=>({edge_id:row.edge_id,geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json),evidence:JSON.parse(row.evidence_json)}));
+      for(const sequence of batch){const readStarted=process.hrtime.bigint(),sourceRows=links.all(snapshotId,sequence.sequence_id),readDone=process.hrtime.bigint();
+        const parseStarted=process.hrtime.bigint(),rows=sourceRows.map(row=>({edge_id:row.edge_id,geometry:JSON.parse(row.geometry_json),tags:JSON.parse(row.tags_json),evidence:JSON.parse(row.evidence_json)}));sourceRowsMs+=Number(readDone-readStarted)/1e6;parseMs+=Number(process.hrtime.bigint()-parseStarted)/1e6;
+        const deriveStarted=process.hrtime.bigint();
         const groups=buildNvdbSequenceCorridors(rows),rowsById=new Map(rows.map(row=>[row.edge_id,row]));for(const group of groups){const members=group.member_edge_ids.map(id=>rowsById.get(id));if(members.some(row=>!row))throw new Error('NVDB corridor references a missing source link');const physical=new Set(members.map(row=>classifyPhysicalRoad(row.tags,'NVDB').physical_character));
           const physicalCharacter=physical.size===1?[...physical][0]:'MIXED_PHYSICAL_CHARACTER',networkRole=members.every(row=>classifyPhysicalRoad(row.tags,'NVDB').ordinary_navigation)?'ORDINARY_ROAD':'POTENTIAL_SPECIAL_ROUTE';
           const attributes={name:[...new Set(members.map(row=>row.tags['nvdb:road_name']).filter(Boolean))],ref:[...new Set(members.map(row=>row.tags['nvdb:road_reference']??row.tags['nvdb:vegnummer']).filter(Boolean))],type_veg:[...new Set(members.map(row=>row.tags['nvdb:type_veg']).filter(Boolean))]};
           save.run(group.corridor_id,snapshotId,'no-nvdb-vegkart',group.source_sequence_id,group.member_edge_ids.length,group.identity_state,physicalCharacter,networkRole,JSON.stringify(group.geometry),JSON.stringify(attributes),JSON.stringify(group.member_edge_ids),JSON.stringify(group.support));
           for(const edgeId of group.member_edge_ids)saveMember.run(group.corridor_id,edgeId);
           const rid=rowId.get(group.corridor_id).rowid;let west=180,east=-180,south=90,north=-90;for(const line of group.geometry.coordinates)for(const [lon,lat] of line){west=Math.min(west,lon);east=Math.max(east,lon);south=Math.min(south,lat);north=Math.max(north,lat);}if(west<=east&&south<=north)saveBox.run(rid,west,east,south,north);}
+        deriveAndWriteMs+=Number(process.hrtime.bigint()-deriveStarted)/1e6;
         batchRecords+=rows.length;batchCursor=sequence.sequence_id;
         if(shouldYield())throw Object.assign(new Error('Norway NVDB corridor batch yielded safely'),{code:'SCOUT_YIELD_REQUESTED'});
       }
-      putStage.run(stage,'RUNNING',batchCursor,batchRecords,new Date().toISOString());store.db.exec('COMMIT');
+      putStage.run(stage,'RUNNING',batchCursor,batchRecords,new Date().toISOString());const commitStarted=process.hrtime.bigint();store.db.exec('COMMIT');commitMs=Number(process.hrtime.bigint()-commitStarted)/1e6;
     }catch(error){store.db.exec('ROLLBACK');if(error.code==='SCOUT_YIELD_REQUESTED'){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}throw error;}
-    cursor=batchCursor;records=batchRecords;onProgress({sequence_id:cursor,links_processed:records,sequence_count:batch.length});
+    const batchLinks=batchRecords-records;cursor=batchCursor;records=batchRecords;onProgress({sequence_id:cursor,links_processed:records,sequence_count:batch.length,batch_links:batchLinks,sequence_page_ms:sequencePageMs,source_rows_ms:sourceRowsMs,parse_ms:parseMs,derive_and_write_ms:deriveAndWriteMs,commit_ms:commitMs,batch_ms:Number(process.hrtime.bigint()-batchStarted)/1e6});
+    // Node signal callbacks and resource monitors run on the event loop. Yield
+    // after the atomic sequence batch so SIGINT/factory intent can be observed
+    // without ever checkpointing a partial NVDB sequence.
+    await new Promise(resolve=>setImmediate(resolve));
     if(shouldYield()){putStage.run(stage,'BLOCKED',cursor,records,new Date().toISOString());return {...phase2NvdbCorridorStats(store,snapshotId,'BLOCKED'),cursor,resumable:true};}
   }
   putStage.run(stage,'COMPLETE',cursor,records,new Date().toISOString());return phase2NvdbCorridorStats(store,snapshotId,'COMPLETE');

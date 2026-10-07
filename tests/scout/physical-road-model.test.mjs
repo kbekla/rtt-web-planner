@@ -94,30 +94,46 @@ test('NVDB sequence branch or duplicated position remains ambiguous rather than 
   assert.equal(corridors.reduce((n,x)=>n+x.member_edge_ids.length,0),3);
 });
 
-test('private NVDB sequence grouping checkpoints by sequence and resumes without changing source links',()=>{
+test('private NVDB sequence grouping checkpoints by sequence and resumes without changing source links',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-no-phase2-corridors-')),store=new ScoutGeoStore(root);
   try{
     const source=nvdbNorwaySourceDefinition();
     store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:'no-nvdb-phase1-20261006',source_id:source.source_id,version:'fixture',checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',licence:source.licence,coverage:{countries:['NO'],regions:['NO']}});
     const coords=[[10,60],[10.001,60],[10.002,60]],edge=(id,start,end,startNode,endNode,line)=>({edge_id:id,geometry:{type:'LineString',coordinates:line},tags:{'nvdb:type_veg':'Skogsbilveg'},evidence:[{topology:{sequence_id:'1',link_number:id.endsWith('1')?1:2,segment_number:'1',start_position:start,end_position:end,start_node:startNode,end_node:endNode}}]});
     store.saveNetworkEdges('no-nvdb-phase1-20261006',[edge('nvdb:1',0,.5,'n1','n2',coords.slice(0,2)),edge('nvdb:2',.5,1,'n2','n3',coords.slice(1))]);
-    assert.equal(buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',shouldYield:()=>true}).status,'BLOCKED');
-    const complete=buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'});
+    assert.equal((await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',shouldYield:()=>true})).status,'BLOCKED');
+    const complete=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'});
     assert.equal(complete.status,'COMPLETE');assert.equal(complete.corridor_count,1);assert.equal(complete.link_count,2);
-    assert.equal(buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'}).status,'REUSED');
+    assert.equal((await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1'})).status,'REUSED');
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('NVDB corridor transaction batches roll back completely on a mid-batch factory yield',()=>{
+test('NVDB corridor transaction batches roll back completely on a mid-batch factory yield',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-no-phase2-batch-yield-')),store=new ScoutGeoStore(root);
   try{
     const source=nvdbNorwaySourceDefinition();store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:'no-nvdb-phase1-20261006',source_id:source.source_id,version:'fixture',checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',licence:source.licence,coverage:{countries:['NO'],regions:['NO']}});
     const edge=(sequenceId,id,offset)=>({edge_id:`nvdb:${sequenceId}:${id}`,geometry:{type:'LineString',coordinates:[[10+offset,60],[10.001+offset,60]]},tags:{'nvdb:type_veg':'Skogsbilveg'},evidence:[{topology:{sequence_id:sequenceId,link_number:1,segment_number:'1',start_position:0,end_position:1,start_node:`${sequenceId}-a`,end_node:`${sequenceId}-b`}}]});
     store.saveNetworkEdges('no-nvdb-phase1-20261006',[edge('seq-a','1',0),edge('seq-b','1',.01)]);
-    let checks=0;const yielded=buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2,shouldYield:()=>++checks===2});
+    let checks=0;const yielded=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2,shouldYield:()=>++checks===2});
     assert.equal(yielded.status,'BLOCKED');assert.equal(yielded.link_count,0);
     assert.equal(store.db.prepare("SELECT records_seen FROM phase2_stage_state WHERE stage='NVDB_SEQUENCE_CORRIDORS'").get().records_seen,0);
-    const resumed=buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2});
+    const resumed=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:2});
     assert.equal(resumed.status,'COMPLETE');assert.equal(resumed.link_count,2);assert.equal(resumed.corridor_count,2);
+  }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('NVDB corridor builder yields to queued process signals between atomic sequence batches',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-no-phase2-event-loop-yield-')),store=new ScoutGeoStore(root);
+  try{
+    const source=nvdbNorwaySourceDefinition();store.registerSource(source);store.recordNetworkSnapshot({snapshot_id:'no-nvdb-phase1-20261006',source_id:source.source_id,version:'fixture',checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',licence:source.licence,coverage:{countries:['NO'],regions:['NO']}});
+    const edge=(sequenceId,offset)=>({edge_id:`nvdb:${sequenceId}`,geometry:{type:'LineString',coordinates:[[10+offset,60],[10.001+offset,60]]},tags:{'nvdb:type_veg':'Skogsbilveg'},evidence:[{topology:{sequence_id:sequenceId,link_number:1,segment_number:'1',start_position:0,end_position:1,start_node:`${sequenceId}-a`,end_node:`${sequenceId}-b`}}]});
+    store.saveNetworkEdges('no-nvdb-phase1-20261006',[edge('seq-a',0),edge('seq-b',.01),edge('seq-c',.02)]);
+    let signalRequested=false;setImmediate(()=>{signalRequested=true;});
+    const stopped=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:1,shouldYield:()=>signalRequested});
+    assert.equal(stopped.status,'BLOCKED');assert.equal(stopped.link_count,1);
+    const checkpoint=store.db.prepare("SELECT status,cursor,records_seen FROM phase2_stage_state WHERE stage='NVDB_SEQUENCE_CORRIDORS'").get();
+    assert.equal(checkpoint.status,'BLOCKED');assert.equal(checkpoint.cursor,'seq-a');assert.equal(checkpoint.records_seen,1);
+    const resumed=await buildNorwayNvdbCorridors(store,{snapshotId:'no-nvdb-phase1-20261006',expectedChecksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',batchSequences:1});
+    assert.equal(resumed.status,'COMPLETE');assert.equal(resumed.link_count,3);assert.equal(resumed.corridor_count,3);
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });

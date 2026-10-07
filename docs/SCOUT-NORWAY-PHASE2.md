@@ -39,6 +39,16 @@ the current Norway extract to a dated URL before download, hashes the downloaded
 PBF, and pins that artifact before import. OSM attribution is retained as a
 dataset-level acknowledgement, not per-corridor public provenance.
 
+NVDB corridor grouping commits complete sequence batches and their cursor in
+the same SQLite transaction. The worker yields to the Node event loop between
+committed batches so process signals and factory-priority requests can be
+observed. Progress output includes coarse timings for sequence-page lookup,
+source-row reads, JSON parsing, derivation/writes, and commits; these timings
+help distinguish query overhead from the deterministic topology work without
+changing identity rules. After an unclean process exit, restart only after
+SQLite WAL recovery and the shared admission layer have established that the
+old owner is stale; the stage resumes from its last committed sequence.
+
 When every independent stage is complete, commit the exact code state and
 freeze it using that commit SHA:
 
