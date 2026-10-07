@@ -50,6 +50,10 @@ after the first page; an optional-cursor `OR` in the indexed `DISTINCT` query
 can force repeated scans from the beginning. After an unclean process exit, restart only after
 SQLite WAL recovery and the shared admission layer have established that the
 old owner is stale; the stage resumes from its last committed sequence.
+The Norway OSM corridor builder reads the run's explicit pre-freeze TET
+exclusion marker and omits discovery-hint joins and prior-reference lineage.
+Its source support and queue state therefore come only from the pinned NVDB
+and OSM snapshots.
 
 When every independent stage is complete, commit the exact code state and
 freeze it using that commit SHA:

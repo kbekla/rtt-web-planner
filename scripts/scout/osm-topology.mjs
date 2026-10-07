@@ -120,14 +120,16 @@ function persistCorridors(db, corridors, batchSize = 500) {
   return saved;
 }
 
-export function triageCorridorReviewQueue(store,{runId,shouldYield=()=>false,batchSize=1000}={}){
+export async function triageCorridorReviewQueue(store,{runId,shouldYield=()=>false,batchSize=1000,includeDiscoveryHintSupport}={}){
   if(!Number.isInteger(batchSize)||batchSize<100||batchSize>5000)throw new Error('corridor triage batch size must be 100-5000');
   const run=store.getDiscoveryRun(runId);if(!run)throw new Error('corridor triage requires an existing discovery run');
+  const runConfig=JSON.parse(run.config_json),blindIndependent=runConfig.tet_use==='PROHIBITED_UNTIL_PHASE2_FREEZE',readDiscoveryHints=includeDiscoveryHintSupport??!blindIndependent;
+  if(blindIndependent&&readDiscoveryHints)throw new Error('blind independent corridor triage must not read discovery-hint matches before the Phase 2 freeze');
   const stage='CORRIDOR_REVIEW_TRIAGE',prior=stageRow(store.db,run.snapshot_id,runId,stage);
   if(prior?.status==='COMPLETE')return {status:'REUSED',processed:prior.records_seen};
-  const rows=store.db.prepare(`SELECT v.corridor_version_id,v.corridor_id,v.identity_state,v.review_priority,
-    EXISTS(SELECT 1 FROM physical_corridor_observations o JOIN discovery_candidate_matches m USING(candidate_id)
-      WHERE o.corridor_version_id=v.corridor_version_id AND m.relationship='same_osm_network_part_support') tet_supported
+  const hintSupportSql=readDiscoveryHints?`EXISTS(SELECT 1 FROM physical_corridor_observations o JOIN discovery_candidate_matches m USING(candidate_id)
+      WHERE o.corridor_version_id=v.corridor_version_id AND m.relationship='same_osm_network_part_support')`:'0';
+  const rows=store.db.prepare(`SELECT v.corridor_version_id,v.corridor_id,v.identity_state,v.review_priority,${hintSupportSql} tet_supported
     FROM physical_corridor_versions v WHERE v.run_id=? ORDER BY v.corridor_version_id`).all(runId);
   const offset=prior?.status==='BLOCKED'||prior?.status==='RUNNING'?Number(prior.records_seen):0;
   const update=store.db.prepare(`UPDATE corridor_review_queue SET state=?,reason_code=?,priority=?,ranking_json=?,updated_at=?
@@ -144,16 +146,19 @@ export function triageCorridorReviewQueue(store,{runId,shouldYield=()=>false,bat
         human_review_required:state==='AMBIGUOUS'&&row.identity_state!=='TOPOLOGY_BACKED'}),at,row.corridor_version_id);
     }setStage(store.db,run.snapshot_id,runId,stage,'RUNNING',i+batch.length);store.db.exec('COMMIT');}
     catch(error){store.db.exec('ROLLBACK');throw error;}
+    await new Promise(resolve=>setImmediate(resolve));
     if(shouldYield()){setStage(store.db,run.snapshot_id,runId,stage,'BLOCKED',i+batch.length);return {status:'BLOCKED',processed:i+batch.length,resumable:true};}
   }
   setStage(store.db,run.snapshot_id,runId,stage,'COMPLETE',rows.length);return {status:'COMPLETE',processed:rows.length};
 }
 
-export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnImpl = spawn, shouldYield = () => false, batchSize = 5000 } = {}) {
+export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnImpl = spawn, shouldYield = () => false, batchSize = 5000, includeDiscoveryHintSupport } = {}) {
   if (!Number.isInteger(batchSize) || batchSize < 100 || batchSize > 20000) throw new Error('topology batch size must be 100-20000');
   const run = store.getDiscoveryRun(runId); if (!run) throw new Error('corridor processing requires an existing discovery run');
+  const runConfig=JSON.parse(run.config_json),blindIndependent=runConfig.tet_use==='PROHIBITED_UNTIL_PHASE2_FREEZE',readDiscoveryHints=includeDiscoveryHintSupport??!blindIndependent;
+  if(blindIndependent&&readDiscoveryHints)throw new Error('blind independent OSM corridor processing must not read discovery-hint matches before the Phase 2 freeze');
   if (stageRow(store.db, run.snapshot_id, runId, 'CORRIDOR_BUILD')?.status === 'COMPLETE' && stageRow(store.db, run.snapshot_id, runId, 'CORRIDOR_LINEAGE')?.status === 'COMPLETE'
-    && stageRow(store.db,run.snapshot_id,runId,'CORRIDOR_REVIEW_TRIAGE')?.status==='COMPLETE') return { ...corridorRunStats(store, runId), status: 'REUSED' };
+    && stageRow(store.db,run.snapshot_id,runId,'CORRIDOR_REVIEW_TRIAGE')?.status==='COMPLETE') return { ...corridorRunStats(store, runId,{includeDiscoveryHintSupport:readDiscoveryHints}), status: 'REUSED' };
   const snapshot = store.getNetworkSnapshot(run.snapshot_id), artifact = store.getNetworkArtifact(run.snapshot_id);
   if (!snapshot || !artifact || !fs.statSync(artifact.local_path).isFile()) throw new Error('corridor topology requires the registered private PBF artifact');
   const artifactPath = path.resolve(artifact.local_path), storeRoot = fs.realpathSync(store.root);
@@ -162,9 +167,9 @@ export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnI
   const fileHash = crypto.createHash('sha256'); for await (const chunk of fs.createReadStream(artifactPath)) fileHash.update(chunk);
   if (fileHash.digest('hex') !== snapshot.checksum) throw new Error('topology PBF checksum does not match the pinned regional snapshot');
   const priorBuild=stageRow(store.db,run.snapshot_id,runId,'CORRIDOR_BUILD');
+  const hintSupportSql=readDiscoveryHints?`EXISTS(SELECT 1 FROM discovery_candidate_matches m WHERE m.candidate_id=c.candidate_id AND m.relationship='same_osm_network_part_support')`:'0';
   const candidateRows = priorBuild?.status==='COMPLETE'?[]:store.db.prepare(`SELECT c.candidate_id,c.edge_id,c.part_index,c.classification,c.length_m,c.geometry_json,c.tags_json,
-    EXISTS(SELECT 1 FROM discovery_candidate_matches m WHERE m.candidate_id=c.candidate_id AND m.relationship='same_osm_network_part_support') tet_supported
-    FROM discovery_candidates c WHERE c.run_id=? ORDER BY c.candidate_id`).all(runId);
+    ${hintSupportSql} tet_supported FROM discovery_candidates c WHERE c.run_id=? ORDER BY c.candidate_id`).all(runId);
   const wayIds = new Set(candidateRows.map(r => r.edge_id)), file = artifactPath;
   const topologyStage = priorBuild?.status==='COMPLETE'?{status:'REUSED'}:await scanWays({ db: store.db, file, snapshotId: run.snapshot_id, runId, stage: 'WAY_REFERENCES', selectedWayIds: wayIds, osmium, spawnImpl, shouldYield, batchSize });
   if (topologyStage.status === 'BLOCKED') return { status: 'BLOCKED', stage: 'WAY_REFERENCES', checkpoint: topologyStage.records_seen };
@@ -180,11 +185,13 @@ export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnI
   if(priorBuild?.status!=='COMPLETE'){
     setStage(store.db, run.snapshot_id, runId, 'CORRIDOR_BUILD', 'RUNNING', priorOrdinal);
     for (const corridor of buildTopologyCorridors({ candidates, wayNodes, nodeDegree, snapshotId: run.snapshot_id, runId })) {
-      if (ordinal++ < priorOrdinal) continue;
+      if (ordinal++ < priorOrdinal) {if(ordinal%500===0){await new Promise(resolve=>setImmediate(resolve));if(shouldYield()){setStage(store.db,run.snapshot_id,runId,'CORRIDOR_BUILD','BLOCKED',priorOrdinal);return {status:'BLOCKED',stage:'CORRIDOR_BUILD',checkpoint:priorOrdinal,resumable:true};}}continue;}
       batch.push(corridor);
       if (batch.length >= 500) {
         saved += persistCorridors(store.db, batch); batch = [];
         setStage(store.db, run.snapshot_id, runId, 'CORRIDOR_BUILD', 'RUNNING', ordinal);
+        if (shouldYield()) { setStage(store.db, run.snapshot_id, runId, 'CORRIDOR_BUILD', 'BLOCKED', ordinal); return { status: 'BLOCKED', stage: 'CORRIDOR_PERSIST', corridors_saved: saved, resumable: true }; }
+        await new Promise(resolve=>setImmediate(resolve));
         if (shouldYield()) { setStage(store.db, run.snapshot_id, runId, 'CORRIDOR_BUILD', 'BLOCKED', ordinal); return { status: 'BLOCKED', stage: 'CORRIDOR_PERSIST', corridors_saved: saved, resumable: true }; }
       }
     }
@@ -193,10 +200,10 @@ export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnI
   }
   const lineageStage = stageRow(store.db, run.snapshot_id, runId, 'CORRIDOR_LINEAGE');
   if (lineageStage?.status !== 'COMPLETE') {
-    const previous = store.db.prepare(`SELECT * FROM (SELECT v.corridor_version_id,v.corridor_id,v.node_sequence_json,dr.snapshot_id,
+    const previous = readDiscoveryHints?store.db.prepare(`SELECT * FROM (SELECT v.corridor_version_id,v.corridor_id,v.node_sequence_json,dr.snapshot_id,
       row_number() OVER(PARTITION BY v.corridor_id ORDER BY v.created_at DESC,v.corridor_version_id DESC) rank
       FROM physical_corridor_versions v JOIN discovery_runs dr USING(run_id) WHERE dr.run_id<>? AND dr.country_code=? AND dr.region_id=? AND dr.status='REVIEW_REQUIRED')
-      WHERE rank=1`).all(runId, run.country_code, run.region_id).map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)}));
+      WHERE rank=1`).all(runId, run.country_code, run.region_id).map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)})):[];
     const current = store.db.prepare(`SELECT corridor_version_id,corridor_id,node_sequence_json FROM physical_corridor_versions WHERE run_id=?`).all(runId)
       .map(r=>({...r,node_sequence:JSON.parse(r.node_sequence_json)}));
     const pairs = inferCorridorLineage(previous,current), add=store.db.prepare(`INSERT OR IGNORE INTO physical_corridor_lineage(lineage_id,from_version_id,to_version_id,relation,match_state,evidence_json,created_at)
@@ -217,12 +224,15 @@ export async function buildCorridorRun(store, { runId, osmium = 'osmium', spawnI
       setStage(store.db,run.snapshot_id,runId,'CORRIDOR_LINEAGE','COMPLETE',pairs.length);store.db.exec('COMMIT');
     }catch(error){store.db.exec('ROLLBACK');throw error;}
   }
-  const triage=triageCorridorReviewQueue(store,{runId,shouldYield});if(triage.status==='BLOCKED')return {status:'BLOCKED',stage:'CORRIDOR_REVIEW_TRIAGE',...triage};
-  return corridorRunStats(store, runId);
+  const triage=await triageCorridorReviewQueue(store,{runId,shouldYield,includeDiscoveryHintSupport:readDiscoveryHints});if(triage.status==='BLOCKED')return {status:'BLOCKED',stage:'CORRIDOR_REVIEW_TRIAGE',...triage};
+  return corridorRunStats(store, runId,{includeDiscoveryHintSupport:readDiscoveryHints});
 }
 export const buildBelgiumCorridorRun = buildCorridorRun;
 
-export function corridorRunStats(store, runId) {
+export function corridorRunStats(store, runId,{includeDiscoveryHintSupport}={}) {
+  const run=store.getDiscoveryRun(runId);if(!run)throw new Error('corridor statistics require an existing discovery run');
+  const blindIndependent=JSON.parse(run.config_json).tet_use==='PROHIBITED_UNTIL_PHASE2_FREEZE',readDiscoveryHints=includeDiscoveryHintSupport??!blindIndependent;
+  if(blindIndependent&&readDiscoveryHints)throw new Error('blind independent corridor statistics must not read discovery-hint matches before the Phase 2 freeze');
   const counts = store.db.prepare('SELECT classification,count(*) corridors,sum(length_m) length_m FROM physical_corridor_versions WHERE run_id=? GROUP BY classification').all(runId);
   const queue = store.db.prepare('SELECT state,count(*) count FROM corridor_review_queue q JOIN physical_corridor_versions v USING(corridor_version_id) WHERE v.run_id=? GROUP BY state').all(runId);
   const sourceCounts = store.db.prepare(`SELECT count(DISTINCT o.candidate_id) raw_observations,count(DISTINCT v.corridor_id) corridors,
@@ -231,8 +241,8 @@ export function corridorRunStats(store, runId) {
   const lengths = store.db.prepare('SELECT length_m FROM physical_corridor_versions WHERE run_id=? ORDER BY length_m,corridor_id').all(runId).map(r => Number(r.length_m));
   const bins = Object.fromEntries([['lt_100m',100],['100_500m',500],['500_1000m',1000],['1_5km',5000],['ge_5km',Infinity]].map(([name,max]) => [name,
     lengths.filter((value,index) => (name === 'lt_100m' ? value < max : name === '100_500m' ? value >= 100 && value < max : name === '500_1000m' ? value >= 500 && value < max : name === '1_5km' ? value >= 1000 && value < max : value >= 5000)).length]));
-  const support = store.db.prepare(`SELECT count(DISTINCT v.corridor_id) tet_supported FROM physical_corridor_versions v JOIN physical_corridor_observations o USING(corridor_version_id)
-    WHERE v.run_id=? AND EXISTS(SELECT 1 FROM discovery_candidate_matches m WHERE m.candidate_id=o.candidate_id AND m.relationship='same_osm_network_part_support')`).get(runId);
+  const support = readDiscoveryHints?store.db.prepare(`SELECT count(DISTINCT v.corridor_id) tet_supported FROM physical_corridor_versions v JOIN physical_corridor_observations o USING(corridor_version_id)
+    WHERE v.run_id=? AND EXISTS(SELECT 1 FROM discovery_candidate_matches m WHERE m.candidate_id=o.candidate_id AND m.relationship='same_osm_network_part_support')`).get(runId):{tet_supported:0};
   const byExistence = store.db.prepare('SELECT physical_existence,count(*) count FROM physical_corridor_versions WHERE run_id=? GROUP BY physical_existence').all(runId);
   const byAccess = store.db.prepare('SELECT motorcycle_access,count(*) count FROM physical_corridor_versions WHERE run_id=? GROUP BY motorcycle_access').all(runId);
   const lineage = store.db.prepare(`SELECT relation,match_state,count(*) count FROM physical_corridor_lineage l JOIN physical_corridor_versions v ON v.corridor_version_id=l.to_version_id WHERE v.run_id=? GROUP BY relation,match_state`).all(runId);
@@ -249,7 +259,7 @@ export function corridorRunStats(store, runId) {
     topology: { branch_nodes: branchNodes, branching_corridors: branchingCorridors,
       lineage: Object.fromEntries(lineage.map(row=>[`${row.relation}:${row.match_state}`,Number(row.count)])),
       parallel_pairs: store.db.prepare(`SELECT count(*) n FROM discovery_candidate_matches m JOIN discovery_candidates c USING(candidate_id) WHERE c.run_id=? AND m.relationship='POSSIBLE_PARALLEL'`).get(runId).n },
-    source_support: { osm_only: Number(sourceCounts.corridors ?? 0) - Number(support.tet_supported ?? 0), tet_supported: Number(support.tet_supported ?? 0), other_sources: 0 },
+    source_support: { osm_only: Number(sourceCounts.corridors ?? 0) - Number(support.tet_supported ?? 0), tet_supported: readDiscoveryHints?Number(support.tet_supported??0):null, other_sources: 0, reference_hint_status:readDiscoveryHints?'AVAILABLE':'NOT_READ' },
     existence: { confirmed: existence.confirmed??0, probable: existence.probable??0, unknown: existence.unknown??0, contradictory: existence.contradictory??0 },
     access: { known_permitted: access.confirmed??0, known_restricted: access.prohibited??0, temporary_restriction: access.temporarily_restricted??0,
       conflicting_or_review: access.contradictory??0, unknown: access.unknown??0 },

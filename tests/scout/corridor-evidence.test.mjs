@@ -168,7 +168,7 @@ test('Watchkeeper records source changes, bounded failures, private legal record
   } finally { store.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('corridor triage checkpoints, queues corroboration/identity issues, suppresses catalog-only fragments and retains research decisions',()=>{
+test('corridor triage checkpoints, queues corroboration/identity issues, suppresses catalog-only fragments and retains research decisions',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'scout-corridor-triage-'));fs.chmodSync(root,0o700);const store=new ScoutGeoStore(root);
   try{
     const network={source_id:'triage-network',name:'Synthetic OSM',type:'regional-osm-network',organisation:'Synthetic',expected_formats:['pbf'],coverage:{countries:['BE'],regions:['BE']},jurisdiction_ids:[],location:'fixture://pbf',adapter_version:'fixture',licence:{name:'ODbL',version:'1.0'},attribution:'© OpenStreetMap contributors',reuse:{private_processing:true,redistribution:true,derived_public_use:false},roles:{discovery_only:false,physical_existence:false,legal_access:false,routing_network:true,public_reuse:true,jurisdiction_boundaries:false},update:{mechanism:'fixture'},rate_limits:{requests_per_minute:0}};
@@ -186,8 +186,8 @@ test('corridor triage checkpoints, queues corroboration/identity issues, suppres
       store.db.prepare("INSERT INTO physical_corridor_observations(corridor_version_id,candidate_id,relation) VALUES(?,?,'OSM_WAY_PART_OBSERVATION')").run(version,candidate);
       store.db.prepare("INSERT INTO corridor_review_queue(corridor_version_id,corridor_id,state,reason_code,priority,ranking_json,updated_at) VALUES(?,?,'UNREVIEWED','fixture','NORMAL_REVIEW','{}','2026-10-01')").run(version,corridor);
     }
-    const first=triageCorridorReviewQueue(store,{runId:'triage-run',batchSize:100,shouldYield:()=>true});assert.deepEqual(first,{status:'BLOCKED',processed:100,resumable:true});
-    const resumed=triageCorridorReviewQueue(store,{runId:'triage-run',batchSize:100});assert.deepEqual(resumed,{status:'COMPLETE',processed:150});
+    const first=await triageCorridorReviewQueue(store,{runId:'triage-run',batchSize:100,shouldYield:()=>true});assert.deepEqual(first,{status:'BLOCKED',processed:100,resumable:true});
+    const resumed=await triageCorridorReviewQueue(store,{runId:'triage-run',batchSize:100});assert.deepEqual(resumed,{status:'COMPLETE',processed:150});
     const states=store.db.prepare('SELECT state,count(*) n FROM corridor_review_queue GROUP BY state').all().map(r=>[r.state,Number(r.n)]).sort();
     assert.deepEqual(states,[['AMBIGUOUS',1],['CATALOGUED',110],['LOW_VALUE',1],['UNREVIEWED',38]].sort());
     const research=JSON.parse(store.db.prepare("SELECT ranking_json FROM corridor_review_queue WHERE state='UNREVIEWED' LIMIT 1").get().ranking_json);
@@ -195,7 +195,14 @@ test('corridor triage checkpoints, queues corroboration/identity issues, suppres
     const escalation=JSON.parse(store.db.prepare("SELECT ranking_json FROM corridor_review_queue WHERE state='AMBIGUOUS' LIMIT 1").get().ranking_json);
     assert.equal(escalation.research_state,'HUMAN_ESCALATION');assert.equal(escalation.human_review_required,true);
     recordCorridorReview(store,{corridorId:'corr-003',decision:'INTERESTING',reviewer:'Karl',reason:'Synthetic manual research review'});
-    assert.deepEqual(triageCorridorReviewQueue(store,{runId:'triage-run'}),{status:'REUSED',processed:150});
+    assert.deepEqual(await triageCorridorReviewQueue(store,{runId:'triage-run'}),{status:'REUSED',processed:150});
     assert.equal(store.db.prepare("SELECT state FROM corridor_review_queue WHERE corridor_id='corr-003'").get().state,'INTERESTING');
+    const config=JSON.parse(store.getDiscoveryRun('triage-run').config_json);config.tet_use='PROHIBITED_UNTIL_PHASE2_FREEZE';
+    store.db.prepare('UPDATE discovery_runs SET config_json=? WHERE run_id=?').run(JSON.stringify(config),'triage-run');
+    store.db.prepare("DELETE FROM osm_topology_stage_state WHERE run_id='triage-run' AND stage='CORRIDOR_REVIEW_TRIAGE'").run();
+    await assert.rejects(()=>triageCorridorReviewQueue(store,{runId:'triage-run',includeDiscoveryHintSupport:true}),/must not read discovery-hint matches/);
+    assert.deepEqual(await triageCorridorReviewQueue(store,{runId:'triage-run',includeDiscoveryHintSupport:false}),{status:'COMPLETE',processed:150});
+    const independent=store.db.prepare("SELECT state,ranking_json FROM corridor_review_queue WHERE corridor_id='corr-000'").get();
+    assert.equal(independent.state,'CATALOGUED');assert.deepEqual(JSON.parse(independent.ranking_json),{source_count:1,tet_support:false,research_state:'AUTO_RESOLVED',human_review_required:false});
   }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
