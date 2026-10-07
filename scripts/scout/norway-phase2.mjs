@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { parseRouteFile } from './route-parsers.mjs';
 import { buildNvdbSequenceCorridors, classifyPhysicalRoad } from './physical-road-model.mjs';
 import { lengthMeters } from './route-segmenter.mjs';
-import { compareSpwCorridor } from './spw-network.mjs';
+import { compareSpwCorridors } from './spw-network.mjs';
 
 export const NORWAY_PHASE1_BASELINE=Object.freeze({run_id:'no-phase1-nvdb-20261006',nvdb_checksum:'2dbca12351f15cffcdc79a0c08a6c2a768bc8434ebb34f1e155c6120f77d46d1',edges_examined:3104901,candidate_pieces:514859,reference_features:17,exact:0,partial:0,all_features_ambiguous:true,ambiguous_candidate_edge_support:17,independent_candidate_pieces_outside_ambiguous_comparisons:505228,route_processing:Object.freeze({road_km:7137.013,unknown_km:1695.940,unknown_reasons_km:Object.freeze({no_network_match:988.746,competing_network_classes:469.111,insufficient_tags:126.684,interval_support_uncertainty:111.398})})});
 const shaFile=async file=>{const hash=crypto.createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);return hash.digest('hex');};
@@ -129,32 +129,33 @@ export function phase2NvdbCorridorStats(store,snapshotId='no-nvdb-phase1-2026100
 }
 
 /** Reconcile OSM lane-corridor hypotheses against topology-built NVDB corridors. */
-export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='no-nvdb-phase1-20261006',shouldYield=()=>false,batchSize=100,onProgress=()=>{}}={}){
+export async function reconcileNorwayCorridors(store,{osmRunId,nvdbSnapshotId='no-nvdb-phase1-20261006',shouldYield=()=>false,batchSize=20,onProgress=()=>{}}={}){
   if(!Number.isInteger(batchSize)||batchSize<1||batchSize>1000)throw new Error('Norway cross-source batch size must be 1-1000 corridors');
   const osmRun=store.getDiscoveryRun(osmRunId);if(!osmRun||osmRun.status!=='COMPLETE'||osmRun.reference_run_id!==null)throw new Error('Norway reconciliation requires a complete independent OSM discovery pass');
   if(store.db.prepare('SELECT status FROM osm_topology_stage_state WHERE snapshot_id=? AND run_id=? AND stage=?').get(osmRun.snapshot_id,osmRunId,'CORRIDOR_REVIEW_TRIAGE')?.status!=='COMPLETE')throw new Error('Norway reconciliation requires OSM candidate corridor topology to be complete');
   if(store.db.prepare('SELECT status FROM phase2_stage_state WHERE stage=?').get('NVDB_SEQUENCE_CORRIDORS')?.status!=='COMPLETE')throw new Error('Norway reconciliation requires topology-built NVDB sequence corridors');
   const nvdb=store.getNetworkSnapshot(nvdbSnapshotId),osm=store.getNetworkSnapshot(osmRun.snapshot_id);if(nvdb?.checksum!==NORWAY_PHASE1_BASELINE.nvdb_checksum||!osm?.checksum)throw new Error('Norway reconciliation source snapshots are not checksum-pinned');
   const stage='NVDB_OSM_CORRIDOR_RECONCILIATION',prior=store.db.prepare('SELECT * FROM phase2_stage_state WHERE stage=?').get(stage);if(prior?.status==='COMPLETE')return norwayReconciliationStats(store,osmRunId,'REUSED');
-  let cursor=prior?.cursor??'';const checkpoint=store.db.prepare(`INSERT INTO phase2_stage_state(stage,status,cursor,records_seen,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(stage) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,records_seen=excluded.records_seen,updated_at=excluded.updated_at`);
-  const corridors=store.db.prepare(`SELECT corridor_version_id,corridor_id,geometry_json FROM physical_corridor_versions WHERE run_id=? AND corridor_version_id>? ORDER BY corridor_version_id LIMIT ?`),
+  let cursor=prior?.cursor??'',cursorRowid=cursor?Number(store.db.prepare('SELECT corridor_version_rowid FROM physical_corridor_versions WHERE corridor_version_id=?').get(cursor)?.corridor_version_rowid??0):0;
+  const checkpoint=store.db.prepare(`INSERT INTO phase2_stage_state(stage,status,cursor,records_seen,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(stage) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,records_seen=excluded.records_seen,updated_at=excluded.updated_at`);
+  const corridors=store.db.prepare(`SELECT corridor_version_rowid,corridor_version_id,corridor_id,geometry_json FROM physical_corridor_versions WHERE run_id=? AND corridor_version_rowid>? ORDER BY corridor_version_rowid LIMIT ?`),
     observations=store.db.prepare(`SELECT d.tags_json FROM physical_corridor_observations o JOIN discovery_candidates d USING(candidate_id) WHERE o.corridor_version_id=?`),
     candidates=store.db.prepare(`SELECT c.corridor_id,c.source_identity,c.geometry_json,c.attributes_json,c.evidence_json FROM phase2_network_corridors_rtree r JOIN phase2_network_corridors c ON c.rowid=r.corridor_rowid WHERE c.snapshot_id=? AND r.min_lon<=? AND r.max_lon>=? AND r.min_lat<=? AND r.max_lat>=?`),
     upsert=store.db.prepare(`INSERT OR IGNORE INTO phase2_cross_source_support(osm_corridor_version_id,nvdb_corridor_id,relationship,evidence_json) VALUES(?,?,?,?)`);
   const osmFeatureCount=Number(store.db.prepare('SELECT count(*) n FROM physical_corridor_versions WHERE run_id=?').get(osmRunId).n),nvdbSource=store.getSource(nvdb.source_id),osmSource=store.getSource(osm.source_id);let processed=Number(prior?.records_seen??0);
   while(true){if(shouldYield()){checkpoint.run(stage,'BLOCKED',cursor,processed,new Date().toISOString());return {...norwayReconciliationStats(store,osmRunId,'BLOCKED'),resumable:true};}
-    const batch=corridors.all(osmRunId,cursor,batchSize);if(!batch.length)break;
+    const batch=corridors.all(osmRunId,cursorRowid,batchSize);if(!batch.length)break;
     store.db.exec('BEGIN IMMEDIATE');try{for(const corridor of batch){
       const geometry=JSON.parse(corridor.geometry_json),box=lineParts(geometry).flat().reduce((b,p)=>({west:Math.min(b.west,p[0]),east:Math.max(b.east,p[0]),south:Math.min(b.south,p[1]),north:Math.max(b.north,p[1])}),{west:180,east:-180,south:90,north:-90});
       const latPad=30/110574,lonPad=30/(111320*Math.max(.1,Math.cos((box.south+box.north)*Math.PI/360))),near=candidates.all(nvdbSnapshotId,box.east+lonPad,box.west-lonPad,box.north+latPad,box.south-latPad);
       const osmTags=observations.all(corridor.corridor_version_id).map(row=>JSON.parse(row.tags_json)),attributes={ref:[...new Set(osmTags.map(t=>t.ref).filter(Boolean))].join('|'),name:[...new Set(osmTags.map(t=>t.name).filter(Boolean))].join('|')};
       const featureList=near.map(row=>({source_feature_id:row.corridor_id,geometry:JSON.parse(row.geometry_json),attributes:{...JSON.parse(row.attributes_json),source_sequence_id:row.source_identity}}));
-      const mapped=featureList.map(feature=>{const match=compareSpwCorridor({geometry,attributes},{...feature},{competitors:featureList});const relationship=({EXACT:'EXACT_CORRIDOR_SUPPORT',LIKELY:'STRONG_CORRIDOR_SUPPORT',PARTIAL:'PARTIAL_CORRIDOR_SUPPORT',PARALLEL:'POSSIBLE_PARALLEL',AMBIGUOUS:'AMBIGUOUS_IDENTITY',NO_MATCH:'NO_RELATION'})[match.relationship];return {feature,relationship,match};});
-      for(const item of mapped)upsert.run(corridor.corridor_version_id,item.feature.source_feature_id,item.relationship,JSON.stringify({matcher:'spw-shared-cross-network-geometry-v1',relationship:item.relationship,geometry_match:item.match,
+      const mapped=compareSpwCorridors({geometry,attributes},featureList);
+      for(const {spw:feature,match} of mapped){const relationship=({EXACT:'EXACT_CORRIDOR_SUPPORT',LIKELY:'STRONG_CORRIDOR_SUPPORT',PARTIAL:'PARTIAL_CORRIDOR_SUPPORT',PARALLEL:'POSSIBLE_PARALLEL',AMBIGUOUS:'AMBIGUOUS_IDENTITY',NO_MATCH:'NO_RELATION'})[match.relationship];upsert.run(corridor.corridor_version_id,feature.source_feature_id,relationship,JSON.stringify({matcher:'spw-shared-cross-network-geometry-v1',relationship,geometry_match:match,
         osm:{source_id:osmSource.source_id,snapshot_id:osm.snapshot_id,sha256:osm.checksum,source_corridor_version_id:corridor.corridor_version_id},
-        nvdb:{source_id:nvdbSource.source_id,snapshot_id:nvdb.snapshot_id,sha256:nvdb.checksum,sequence_id:item.feature.attributes.source_sequence_id??null},
-        motorcycle_access_effect:'NONE',routability_effect:'NONE',proximity_only_identity:false}));
-      cursor=corridor.corridor_version_id;processed++;
+        nvdb:{source_id:nvdbSource.source_id,snapshot_id:nvdb.snapshot_id,sha256:nvdb.checksum,sequence_id:feature.attributes.source_sequence_id??null},
+        motorcycle_access_effect:'NONE',routability_effect:'NONE',proximity_only_identity:false}));}
+      cursor=corridor.corridor_version_id;cursorRowid=Number(corridor.corridor_version_rowid);processed++;
     }checkpoint.run(stage,'RUNNING',cursor,processed,new Date().toISOString());store.db.exec('COMMIT');}catch(error){store.db.exec('ROLLBACK');throw error;}
     await new Promise(resolve=>setImmediate(resolve));
     if(shouldYield()){checkpoint.run(stage,'BLOCKED',cursor,processed,new Date().toISOString());return {...norwayReconciliationStats(store,osmRunId,'BLOCKED'),resumable:true};}

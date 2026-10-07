@@ -126,39 +126,36 @@ function geometryLength(edges) { return edges.reduce((sum, edge) => sum + edgeLe
 
 /** Conservative SPW-to-corridor relation. It records evidence only; it never changes legal access or routability. */
 export function compareSpwCorridor(corridor, spw, { competitors = [] } = {}) {
-  const a = edgeRecords(corridor?.geometry), b = edgeRecords(spw?.geometry);
-  const empty = { relationship: 'NO_MATCH', reason: 'line geometry unavailable', motorcycle_access_effect: 'NONE', routability_effect: 'NONE' };
-  if (!a.length || !b.length) return empty;
-  const as = sampleEdges(a), bs = sampleEdges(b), sa = support(as, b, 12, 20), sb = support(bs, a, 12, 20);
-  const da = sa.hits.map(x => x.distance), db = sb.hits.map(x => x.distance), p50 = percentile(da, .5), p95 = percentile(da, .95);
-  const supportedAngles = [...sa.hits, ...sb.hits].map(hit => hit.angle), bestAngle = percentile(supportedAngles, .1);
-  const endpointMax = endpointGap(corridor.geometry, spw.geometry), identity = routeIdentity(corridor, spw);
-  let competing = false;
-  for (const other of competitors) {
-    if (other.source_feature_id === spw.source_feature_id) continue;
-    const c = edgeRecords(other.geometry); if (!c.length) continue;
-    const alternate = support(as, c, 12, 20), alternateP95 = percentile(alternate.hits.map(x => x.distance), .95);
-    if (alternate.ratio >= .8 && Math.abs(alternateP95 - p95) <= 2) { competing = true; break; }
+  return compareSpwCorridors(corridor,[spw],{competitors})[0]?.match??{relationship:'NO_MATCH',reason:'line geometry unavailable',motorcycle_access_effect:'NONE',routability_effect:'NONE'};
+}
+
+/** Compare one corridor to a local candidate set while computing every
+ * candidate's corridor support once. Calling the single-feature matcher once
+ * per nearby source edge repeated all competitor geometry work quadratically. */
+export function compareSpwCorridors(corridor, spws, { competitors = [] } = {}) {
+  if(!Array.isArray(spws)||!Array.isArray(competitors))throw new Error('corridor comparison inputs must be arrays');
+  const a=edgeRecords(corridor?.geometry),as=sampleEdges(a),all=[...new Set([...spws,...competitors])],metrics=new Map();
+  for(const spw of all){
+    const b=edgeRecords(spw?.geometry);if(!a.length||!b.length){metrics.set(spw,{empty:true});continue;}
+    const bs=sampleEdges(b),sa=support(as,b,12,20),sb=support(bs,a,12,20),da=sa.hits.map(x=>x.distance);
+    metrics.set(spw,{b,sa,sb,p50:percentile(da,.5),p95:percentile(da,.95),bestAngle:percentile([...sa.hits,...sb.hits].map(hit=>hit.angle),.1),endpointMax:endpointGap(corridor.geometry,spw.geometry),identity:routeIdentity(corridor,spw)});
   }
-  let relationship = 'NO_MATCH', reason = 'insufficient reciprocal linear support, direction agreement or endpoint continuity';
-  if (competing) { relationship = 'AMBIGUOUS'; reason = 'multiple SPW alignments have indistinguishable geometric support'; }
-  else if (sa.ratio >= .8 && sb.ratio >= .8 && p50 >= 3 && p95 <= 30 && bestAngle <= 15) {
-    relationship = 'PARALLEL'; reason = 'nearby aligned geometries remain separate; proximity does not transfer identity';
-  } else if (identity && sa.ratio >= .98 && sb.ratio >= .98 && p95 <= 1.5 && endpointMax <= 3 && bestAngle <= 8) {
-    relationship = 'EXACT'; reason = 'reciprocal near-coincident geometry, route identity, direction and endpoint support';
-  } else if (identity && sa.ratio >= .8 && sb.ratio >= .8 && p95 <= 8 && endpointMax <= 20 && bestAngle <= 12) {
-    relationship = 'LIKELY'; reason = 'reciprocal geometry, route identity, direction and endpoint continuity';
-  } else if (bestAngle <= 18 && sa.ratio >= .35 && sb.ratio >= .15 && p95 <= 12) {
-    relationship = 'PARTIAL'; reason = 'aligned reciprocal support covers only part of at least one geometry';
-  } else if ((sa.ratio >= .2 || sb.ratio >= .2) && !identity) {
-    relationship = 'AMBIGUOUS'; reason = 'some geometric overlap lacks sufficient route identity for a stronger relationship';
-  }
-  return {
-    relationship, reason, identity_match: identity, support_ratio_corridor: sa.ratio, support_ratio_spw: sb.ratio,
-    p50_distance_m: Number.isFinite(p50) ? Number(p50.toFixed(2)) : null, p95_distance_m: Number.isFinite(p95) ? Number(p95.toFixed(2)) : null,
-    endpoint_max_distance_m: Number.isFinite(endpointMax) ? Number(endpointMax.toFixed(2)) : null, aligned_edge_bearing_p10_deg: Number(bestAngle.toFixed(2)),
-    corridor_length_m: geometryLength(a), spw_feature_length_m: geometryLength(b),
-    identity_basis: ['reciprocal sampled line support', 'local direction agreement', 'endpoint continuity', 'route name/reference equality', 'competing-alignment separation'],
-    evidence_role: ['PHYSICAL_EXISTENCE', 'NETWORK_IDENTITY', 'NETWORK_CONTEXT'], motorcycle_access_effect: 'NONE', routability_effect: 'NONE',
-  };
+  return spws.map(spw=>{
+    const m=metrics.get(spw);if(!m||m.empty)return {spw,match:{relationship:'NO_MATCH',reason:'line geometry unavailable',motorcycle_access_effect:'NONE',routability_effect:'NONE'}};
+    const competing=all.some(other=>other!==spw&&other.source_feature_id!==spw.source_feature_id&&(()=>{const candidate=metrics.get(other);return candidate&&!candidate.empty&&candidate.sa.ratio>=.8&&Math.abs(candidate.p95-m.p95)<=2;})());
+    const {b,sa,sb,p50,p95,bestAngle,endpointMax,identity}=m;
+    let relationship='NO_MATCH',reason='insufficient reciprocal linear support, direction agreement or endpoint continuity';
+    if(competing){relationship='AMBIGUOUS';reason='multiple SPW alignments have indistinguishable geometric support';}
+    else if(sa.ratio>=.8&&sb.ratio>=.8&&p50>=3&&p95<=30&&bestAngle<=15){relationship='PARALLEL';reason='nearby aligned geometries remain separate; proximity does not transfer identity';}
+    else if(identity&&sa.ratio>=.98&&sb.ratio>=.98&&p95<=1.5&&endpointMax<=3&&bestAngle<=8){relationship='EXACT';reason='reciprocal near-coincident geometry, route identity, direction and endpoint support';}
+    else if(identity&&sa.ratio>=.8&&sb.ratio>=.8&&p95<=8&&endpointMax<=20&&bestAngle<=12){relationship='LIKELY';reason='reciprocal geometry, route identity, direction and endpoint continuity';}
+    else if(bestAngle<=18&&sa.ratio>=.35&&sb.ratio>=.15&&p95<=12){relationship='PARTIAL';reason='aligned reciprocal support covers only part of at least one geometry';}
+    else if((sa.ratio>=.2||sb.ratio>=.2)&&!identity){relationship='AMBIGUOUS';reason='some geometric overlap lacks sufficient route identity for a stronger relationship';}
+    return {spw,match:{relationship,reason,identity_match:identity,support_ratio_corridor:sa.ratio,support_ratio_spw:sb.ratio,
+      p50_distance_m:Number.isFinite(p50)?Number(p50.toFixed(2)):null,p95_distance_m:Number.isFinite(p95)?Number(p95.toFixed(2)):null,
+      endpoint_max_distance_m:Number.isFinite(endpointMax)?Number(endpointMax.toFixed(2)):null,aligned_edge_bearing_p10_deg:Number(bestAngle.toFixed(2)),
+      corridor_length_m:geometryLength(a),spw_feature_length_m:geometryLength(b),
+      identity_basis:['reciprocal sampled line support','local direction agreement','endpoint continuity','route name/reference equality','competing-alignment separation'],
+      evidence_role:['PHYSICAL_EXISTENCE','NETWORK_IDENTITY','NETWORK_CONTEXT'],motorcycle_access_effect:'NONE',routability_effect:'NONE'}};
+  });
 }

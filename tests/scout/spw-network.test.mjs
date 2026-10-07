@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareSpwCorridor, normalizeSpwFeature, spwRoadSourceDefinition, spwServiceMetadataVersion } from '../../scripts/scout/spw-network.mjs';
+import { compareSpwCorridor, compareSpwCorridors, normalizeSpwFeature, spwRoadSourceDefinition, spwServiceMetadataVersion } from '../../scripts/scout/spw-network.mjs';
 import { assessCatalogueSource, BELGIUM_NAP_CANDIDATES } from '../../scripts/scout/belgium-source-catalogue.mjs';
 import { ScoutGeoStore } from '../../scripts/scout/geostore.mjs';
 import { registerOsmDiscoverySource } from '../../scripts/scout/osm-discovery.mjs';
@@ -63,6 +63,17 @@ test('nearby parallel geometry is labelled parallel and never inherits identity'
   assert.equal(result.relationship, 'PARALLEL');
   assert.equal(result.identity_match, false);
   assert.equal(result.motorcycle_access_effect, 'NONE');
+});
+
+test('batched corridor comparison preserves competing-alignment ambiguity without repeated scoring',()=>{
+  const a=corridor(line(4,50),{route_number:'N90'}),first={...spw(line(4,50),{route_number:'N90'}),source_feature_id:'spw:1'},
+    second={...spw(line(4,50),{route_number:'N91'}),source_feature_id:'spw:2'};
+  const batched=compareSpwCorridors(a,[first,second]);
+  assert.equal(batched.length,2);assert.ok(batched.every(row=>row.match.relationship==='AMBIGUOUS'));
+  assert.deepEqual(batched.map(row=>row.match),[
+    compareSpwCorridor(a,first,{competitors:[first,second]}),
+    compareSpwCorridor(a,second,{competitors:[first,second]}),
+  ]);
 });
 
 test('partial overlap is distinguished from whole-corridor identity', () => {
