@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-readonly EXPECTED_REPO="/home/karl/rtt-map-factory/worktrees/codex-scout"
+readonly FACTORY_DIR="${RTT_FACTORY_DIR:-${HOME:?}/rtt-map-factory}"
+readonly EXPECTED_REPO="$FACTORY_DIR/worktrees/codex-scout"
 readonly REPO="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/../.." && pwd -P)"
 if [[ "$REPO" != "$EXPECTED_REPO" || "$(git -C "$REPO" branch --show-current)" != "codex/scout" ]]; then
   printf '%s\n' 'Refusing launcher installation outside the expected Scout worktree/branch.' >&2

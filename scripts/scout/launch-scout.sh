@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly EXPECTED_REPO="/home/karl/rtt-map-factory/worktrees/codex-scout"
-readonly STATE_BASE="/home/karl/rtt-map-factory/scout/private/real-source-validation"
+readonly FACTORY_DIR="${RTT_FACTORY_DIR:-${HOME:?}/rtt-map-factory}"
+readonly EXPECTED_REPO="$FACTORY_DIR/worktrees/codex-scout"
+readonly STATE_BASE="$FACTORY_DIR/scout/private/real-source-validation"
 readonly STATE_ROOT="$STATE_BASE/operator-state/state"
-readonly FACTORY_DIR="/home/karl/rtt-map-factory"
 readonly PORT="${SCOUT_OPERATOR_PORT:-8770}"
 readonly URL="http://127.0.0.1:${PORT}/"
 readonly HEALTH_URL="${URL%/}/health"
