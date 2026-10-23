@@ -36,6 +36,14 @@ test('private MapLibre reviewer renders route, segmentation, canonical compariso
     await page.goto(`http://127.0.0.1:${server.address().port}/`,{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.__scoutReview?.ready,{timeout:12000});
     assert.deepEqual(await page.evaluate(()=>window.__scoutReview.counts),{source_routes:1,segments:7,canonical:2});
+    // MapLibre's load handler can publish review metadata before source tiles
+    // finish rendering. Wait for the target feature, not merely __scoutReview.ready.
+    await page.waitForFunction(()=>{
+      const map=window.__scoutMap;
+      if(!map?.isStyleLoaded())return false;
+      const point=map.project([7.4245,43.735]);
+      return map.queryRenderedFeatures(point,{layers:['segments-line']}).some(f=>f.properties.id==='synthetic-road-2');
+    },undefined,{timeout:12000});
     const hit=await page.evaluate(()=>{const map=window.__scoutMap,point=map.project([7.4245,43.735]);return {id:map.queryRenderedFeatures(point,{layers:['segments-line']})[0]?.properties.id,point};});
     assert.equal(hit.id,'synthetic-road-2');await page.mouse.click(hit.point.x,hit.point.y);
     const inspector=await page.locator('#inspector').textContent();
