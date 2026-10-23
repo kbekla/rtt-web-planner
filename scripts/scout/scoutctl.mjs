@@ -5,13 +5,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ScoutStore } from './core.mjs';
 import { readHostSnapshot } from './resources.mjs';
+import { browserToolStatus, researchWithBrowser } from './browser-tool.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const factory = process.env.FACTORY_DIR || path.join(os.homedir(), 'rtt-map-factory');
 const store = new ScoutStore(factory);
 const [cmd, ...args] = process.argv.slice(2);
-const usage = 'scoutctl status|host|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>';
-if (cmd === 'status') {
+const usage = 'scoutctl status|host|list [pending|running|held|done|reviews]|enqueue-fixture <name>|show <candidate-id>|browser-status|browse <research task>';
+if (cmd === 'browser-status') console.log(JSON.stringify(browserToolStatus(),null,2));
+else if (cmd === 'browse') {
+  try {const result=await researchWithBrowser(args.join(' '));console.log(JSON.stringify(result,null,2));}
+  catch(error){console.error(JSON.stringify({status:'ERROR',message:error instanceof Error?error.message:String(error)}));process.exitCode=1;}
+}
+else if (cmd === 'status') {
   const scout = store.status();
   const host = readHostSnapshot({ factoryDir: factory });
   const thermal = { state: store.read('thermal-state.json')?.state ?? 'UNKNOWN', cpu_temp_c: host.cpu_temp_c ?? null,
